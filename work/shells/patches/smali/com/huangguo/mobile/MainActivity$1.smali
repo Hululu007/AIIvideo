@@ -372,9 +372,38 @@
 .end method
 
 .method public shouldInterceptRequest(Landroid/webkit/WebView;Landroid/webkit/WebResourceRequest;)Landroid/webkit/WebResourceResponse;
-    .locals 0
+    .locals 2
 
-    .line 132
+    # ── 改造：媒体请求先问一句 MediaProxy ──────────────────────────────
+    # bilibili 那族 CDN 对同一个签名地址，HTTP/2 后端回 403、HTTP/1.1 回 206，
+    # 而 <video> 用什么协议是 WebView 自己谈的，前端无从干涉。所以命中那几个
+    # 域名时自己用 OkHttp 发（强制 HTTP/1.1），再把响应原样还给 WebView。
+    #
+    # 先过 handles() 再 fetch()：不然每个 assets 请求都会被多发一次。
+    # fetch() 拿不到东西会返回 null，那时照旧走下面 WebViewAssetLoader 那条路。
+    invoke-interface {p2}, Landroid/webkit/WebResourceRequest;->getUrl()Landroid/net/Uri;
+
+    move-result-object v0
+
+    invoke-virtual {v0}, Landroid/net/Uri;->toString()Ljava/lang/String;
+
+    move-result-object v0
+
+    invoke-static {v0}, Lcom/huangguo/mobile/MediaProxy;->handles(Ljava/lang/String;)Z
+
+    move-result v0
+
+    if-eqz v0, :cond_proxy_end
+
+    invoke-static {p2}, Lcom/huangguo/mobile/MediaProxy;->fetch(Landroid/webkit/WebResourceRequest;)Landroid/webkit/WebResourceResponse;
+
+    move-result-object v0
+
+    if-eqz v0, :cond_proxy_end
+
+    return-object v0
+
+    :cond_proxy_end
     iget-object p0, p0, Lcom/huangguo/mobile/MainActivity$1;->val$loader:Landroidx/webkit/WebViewAssetLoader;
 
     invoke-interface {p2}, Landroid/webkit/WebResourceRequest;->getUrl()Landroid/net/Uri;
