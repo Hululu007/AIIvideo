@@ -15,6 +15,12 @@ done
 
 CP="$JARS/json-20231013.jar:$ANDROID_JAR:$JARS/okhttp-4.10.0.jar:$JARS/okio-jvm-3.0.0.jar:$JARS/kotlin-stdlib-1.6.20.jar"
 OUT=$(mktemp -d)
-javac -nowarn -cp "$CP" -d "$OUT" java-src/com/huangguo/mobile/UserSource.java
-javac -nowarn -cp "$CP:$OUT" -d "$OUT" java-test/UserSourceTest.java
-java -cp "$CP:$OUT" UserSourceTest cz_repack/assets/site-default.json
+# 编**整个 java-src**，不是只有 UserSource —— UserSource 现在会用到同一个包的
+# CmsXml / CmsAdapter / AgedmAdapter / AiiHttp，只编它一个文件必然一片「找不到符号」，
+# 而那个报错看起来像是这次改坏了（2026-10-16 恢复出厂设置这一轮踩到）。
+# 桩照 build.sh 的做法单独编到 stubs/：只进 classpath，不进最终产物。
+mkdir -p "$OUT/stubs"
+javac -nowarn -cp "$ANDROID_JAR" -d "$OUT/stubs" $(find java-stubs -name '*.java')
+javac -nowarn -cp "$CP:$OUT/stubs" -d "$OUT" $(find java-src -name '*.java')
+javac -nowarn -cp "$CP:$OUT:$OUT/stubs" -d "$OUT" java-test/UserSourceTest.java
+java -cp "$CP:$OUT:$OUT/stubs" UserSourceTest cz_repack/assets/site-default.json

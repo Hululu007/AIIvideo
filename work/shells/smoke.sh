@@ -68,7 +68,15 @@ say "清日志并冷启动"
 "${ADB[@]}" logcat -c 2>/dev/null || true
 "${ADB[@]}" shell am force-stop "$PKG"
 sleep 1
-"${ADB[@]}" shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+# monkey 是原版的启动方式，但它有脾气：在 Android 13 模拟器上出现过只打一行
+# 「SYS_KEYS has no physical keys」然后 rc=251、一个事件都不发的情况（2026-10-16）。
+# 那跟被测的包没关系 —— 表现成「前端没起来」会把人带偏，所以这里加一条退路。
+"${ADB[@]}" shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
+sleep 2
+if ! "${ADB[@]}" shell pidof "$PKG" >/dev/null 2>&1; then
+  say "monkey 没把应用拉起来，改用 am start"
+  "${ADB[@]}" shell am start -n "$PKG/.MainActivity" >/dev/null 2>&1 || true
+fi
 
 # ---- 断言 1+2：等数据层 -----------------------------------------------------
 say "等待数据层（上限 ${WAIT}s）"

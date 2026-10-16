@@ -16,7 +16,11 @@ public class UserSourceTest {
     public static void main(String[] a) throws Exception {
         String real = new String(Files.readAllBytes(Paths.get(a[0])), "UTF-8");
         String BASE = "\"web\":{\"paths\":{\"home\":\"/api/home\"},\"categories\":{\"x\":1}}";
-        check("线上真实配置", real, true);
+        // 传进来的是内置模板 assets/site-default.json。它现在是一份**模板**，不是一份能用
+        // 的用户配置：「用户自带源」那一轮之后它把 origin 清空了 —— 装完不自带任何站，
+        // 这是刻意的。所以它按用户配置的规则**应该被拒**（缺 origin，而 home 是相对路径）。
+        // 这一条顺带守着那个决定：谁要是往模板里塞回一个 origin，这里会红。
+        check("内置模板（不带源，应被拒）", real, false);
         check("缺 origin",            "{" + BASE + "}", false);
         check("origin 是 http",       "{\"origin\":\"http://a.com\"," + BASE + "}", false);
         check("origin 带路径",        "{\"origin\":\"https://a.com/sub\"," + BASE + "}", false);

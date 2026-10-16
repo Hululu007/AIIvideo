@@ -147,6 +147,19 @@ html[data-theme=dark] .continue-card .continue-action{background:#302a1e;border-
 .feed-rate-panel.hidden{display:none}
 .feed-rate-option{min-width:58px;height:32px;border:0;border-radius:14px;background:rgba(255,255,255,.10);color:#fff;font-size:12px;font-weight:800}
 .feed-rate-option.active{background:#ffd24a;color:#201a08}
+/* 清晰度面板：和倍速同一个壳，多一行「这个源只有这一路」的说明。
+   档位标签用 CDN 自己声明的宽度（1080x608 → 1080P），note 里摊开原始两个数。 */
+.feed-quality-panel{display:flex;flex-direction:column;gap:6px;min-width:150px;padding:8px;border:1px solid rgba(255,255,255,.22);border-radius:18px;background:rgba(0,0,0,.68);box-shadow:0 8px 24px rgba(0,0,0,.45);backdrop-filter:blur(14px)}
+.feed-quality-panel.hidden{display:none}
+.feed-quality-option{display:flex;flex-direction:column;align-items:flex-start;gap:2px;min-width:134px;padding:8px 12px;border:0;border-radius:14px;background:rgba(255,255,255,.10);color:#fff;font-size:12px;font-weight:800;text-align:left}
+.feed-quality-option small{font-size:10px;font-weight:600;opacity:.7}
+.feed-quality-option.is-current{background:#ffd24a;color:#201a08}
+.feed-quality-option.is-current small{opacity:.75}
+.feed-quality-note{margin:2px 4px 0;color:rgba(255,255,255,.66);font-size:10px;line-height:1.4}
+/* 上一集 / 下一集只在横屏出现：横屏那条竖向轴给了亮度，切集就只剩这两个按钮。 */
+.feed-ep-prev,.feed-ep-next{display:none}
+.feed[data-orientation=landscape] .feed-ep-prev,
+.feed[data-orientation=landscape] .feed-ep-next{display:inline-flex;align-items:center;justify-content:center}
 /* 播放中收起播放器外壳：进度条 / 集数 / 时间 / 倍速·横屏按钮。
    暂停（含尚未起播）时展开 —— 点一下屏幕暂停即可操作，再点继续播放即隐去。
    返回键不在收起范围：它是导航而不是播放信息，留着省一次点击。
@@ -168,6 +181,21 @@ html[data-theme=dark] .continue-card .continue-action{background:#302a1e;border-
 .feed-seek span{font-size:12px;opacity:.8;font-variant-numeric:tabular-nums}
 .feed.is-seeking .feed-hud,.feed.is-seeking .feed-bar,.feed.is-seeking .feed-times{opacity:1}
 @media(prefers-reduced-motion:reduce){.feed-seek{transition:none}}
+
+/* ---- 横屏上下滑调亮度 ----
+   和拖进度同一套 HUD 位置（舞台中央，横屏时跟着舞台一起转）。
+   亮度本身走原生窗口属性（__player:brightness），这里只是把它显示出来。 */
+.feed-brightness{position:absolute;top:50%;left:50%;z-index:4;display:flex;flex-direction:column;align-items:center;gap:6px;padding:12px 20px;border-radius:16px;background:rgba(0,0,0,.62);color:#fff;opacity:0;transform:translate(-50%,-50%) scale(.86);transition:opacity .14s ease,transform .14s ease;pointer-events:none}
+.feed-page.is-bright .feed-brightness{opacity:1;transform:translate(-50%,-50%) scale(1)}
+.feed-brightness b{font-size:15px;font-weight:800;font-variant-numeric:tabular-nums}
+.feed-brightness i{display:block;width:120px;height:4px;border-radius:2px;background:rgba(255,255,255,.25);overflow:hidden}
+.feed-brightness-fill{display:block;height:100%;width:50%;border-radius:2px;background:#ffd24a;transition:width .1s linear}
+.feed.is-bright .feed-hud,.feed.is-bright .feed-bar,.feed.is-bright .feed-times{opacity:1}
+@media(prefers-reduced-motion:reduce){.feed-brightness{transition:none}}
+
+/* 横屏把竖向手势收归亮度，所以原生竖向滚动要关掉 —— touch-action 得在**手势开始前**
+   就生效，所以它跟着 data-orientation 走，而不是在 pointerdown 里现改。 */
+.feed[data-orientation=landscape]{touch-action:none}
 
 /* ---- 横屏播放：旋转「内容舞台」，不调 Fullscreen API ----
    Manifest 里 MainActivity 是 screenOrientation="portrait"，且 MainActivity$2 这个
@@ -264,3 +292,26 @@ html[data-theme=dark] .continue-card .continue-action{background:#302a1e;border-
 .source-drop{flex:0 0 auto;width:46px;border:1px solid var(--line);border-radius:15px;background:var(--panel);
   color:var(--muted);font-size:19px;line-height:1}
 .source-empty{padding:16px;border:1px dashed var(--line);border-radius:15px;color:var(--muted);font-size:13px;text-align:center}
+
+/* 「重新拉取这个源的配置」。排在清单下面、新增表单上面 —— 它作用于**当前生效**
+   那个源，和下面要新增的不是一回事，位置得把这件事说清楚。
+   宽度拉满，因为它是这一页唯一一个「补救」动作，不该看起来像个次要按钮。 */
+.source-refetch{display:block;width:100%;margin:0 0 22px;padding:13px 15px;border:1px solid var(--line);
+  border-radius:15px;background:var(--panel);color:inherit;font:inherit;font-size:13px;
+  font-weight:700;text-align:left}
+.source-refetch small{display:block;margin-top:3px;font-size:11px;font-weight:400;color:var(--muted)}
+.source-refetch:disabled{color:var(--muted)}
+
+/* 恢复出厂设置。危险动作，颜色沿用「退出登录」那支（#aa3a28），排版沿用设置页
+   那一套按钮：h2 + 说明段落 + 一个按钮。转圈动画直接用 auth-spin。 */
+.settings-reset button{min-height:43px;margin-top:2px;padding:0 14px;border:1px solid #d7b6ab;border-radius:11px;
+  background:var(--panel);color:#aa3a28;font-size:12px;font-weight:700}
+html[data-theme=dark] .settings-reset button{border-color:#5b3a30}
+.settings-reset button:disabled{opacity:.7}
+.settings-reset button.is-loading{display:inline-flex;align-items:center;justify-content:center;gap:9px}
+.settings-reset button.is-loading:before{content:"";width:15px;height:15px;flex:none;
+  border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:auth-spin .7s linear infinite}
+@media(prefers-reduced-motion:reduce){.settings-reset button.is-loading:before{animation:none}}
+
+/* 只有一路清晰度时那一行是「当前」而不是「可选项」：置灰，但保持可读。 */
+.feed-quality-option:disabled{opacity:1;cursor:default}

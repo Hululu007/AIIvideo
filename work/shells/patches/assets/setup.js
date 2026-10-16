@@ -84,10 +84,21 @@
         showError((result && result.error) || '设置失败');
         return;
       }
-      // 成功。这里必须重载 —— SiteProfile 是在 Activity.onCreate 里建的，
-      // 只在启动时读一次配置，不重启不会生效。
+      // 成功。这里**必须重建 Activity**，光 reload 页面是不够的 —— SiteProfile 是在
+      // Activity.onCreate 里建的，只在启动时读一次配置，页面重载了 Activity 还在，
+      // 拿到的还是上一份 profile。表现是：源填完了、首页却报一个跟自己填的地址毫无
+      // 关系的错（「Expected URL scheme … but no scheme was found for /api/home」），
+      // 用户只能自己把应用退掉重开。第一版就是 location.reload()，而这一屏恰好是
+      // 「恢复出厂设置」之后必经的那一屏，所以这里跟换源那条路走同一个动作。
+      //
+      // 不 await：Java 那边先回包、200ms 后才 recreate，等它的话页面会在被销毁前挂起。
+      // 留一个兜底 —— 2.5 秒后页面还在，说明重建没发生，退回重载页面。
       button.textContent = '已保存，正在重启…';
-      setTimeout(() => { try { location.reload(); } catch (error) {} }, 200);
+      if (typeof window.restartAfterSource === 'function') {
+        window.restartAfterSource(() => { try { location.reload(); } catch (error) {} });
+      } else {
+        setTimeout(() => { try { location.reload(); } catch (error) {} }, 200);
+      }
       return;
     } catch (error) {
       showError('设置失败：' + (error.message || error));

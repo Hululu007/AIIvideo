@@ -14,16 +14,21 @@
   const SEEK_SPAN = 120;   // 横向划满一屏 = 120 秒
   const SEEK_SLOP = 14;    // 横向死区（px），小于它不认成拖进度
   const SEEK_BIAS = 1.2;   // 横向位移要超过纵向的倍数，否则算纵向滑动（切集）
+  const BRIGHT_SPAN = 0.7; // 竖向划满一屏 = 亮度走 70% 的量程
+  const BRIGHT_SLOP = 16;  // 竖向死区（px）
 
   function createFeedPlayer(deps) {
     let observer = null;
     // 当前可见那一集。相邻集会被预热/回收，它们同样会触发 play/pause 事件，
     // 所以判断「要不要收起外壳」必须只认这一集，不能看任意一集的 paused。
     let activePage = null;
+    // 本窗口的亮度（0~1）。进播放器时问一次原生：窗口上没覆盖过就用系统亮度的
+    // 估计值 —— 不这样的话第一次上下滑会从我们瞎猜的数起跳，屏幕先闪一下。
+    let brightness = null;
 
     const {
       state, content, api, asArray, esc, icon, toast, readCache,
-      bridgeCall, renderDetail, goHome, updateBackEnabled
+      bridgeCall, playerCommand, renderDetail, goHome, updateBackEnabled
     } = deps;
 
     function speedLabel(rate) {
@@ -272,15 +277,34 @@
     function close() {
       if (!document.querySelector('.feed')) return false;
       cleanup();
+      // 离开播放器把亮度交回系统 —— 播放器里调暗是为了看片，退出之后还黑着
+      // 就成了「这个 App 把我的屏幕调暗了」。
+      playerCommand?.('brightness?value=-1').catch(() => {});
+      brightness = null;
       state.route = 'detail';
       if (state.detail) renderDetail(); else goHome();
       updateBackEnabled();
       return true;
     }
 
+    /**
+     * 问一次当前亮度，作为上下滑的起点。
+     *
+     * 不问的话只能瞎猜一个数（比如 50%），用户第一次滑会先「跳」到那个数 ——
+     * 而系统播放器不会跳。原生那边读的是窗口覆盖值，没覆盖过就退到系统亮度估计值。
+     */
+    function primeBrightness() {
+      if (!playerCommand || brightness != null) return;
+      playerCommand('brightness').then(result => {
+        const value = Number(result && result.value);
+        if (value >= 0) brightness = Math.max(0.05, Math.min(1, value));
+      }).catch(() => {});
+    }
+
     function open(videoId, episode) {
       const id = videoId ?? state.detail?.id ?? state.sourceItem?.id;
       if (id == null) { toast('缺少剧集信息', true); return; }
+      primeBrightness();
       const memory = recall(String(id));
       const explicit = episode != null && Number(episode) > 0;
       const ep = explicit ? Number(episode) : (memory ? memory.ep : 1);
@@ -479,6 +503,9 @@
         await attach(page);
         page.querySelector('.feed-error')?.classList.add('hidden');
         await video.play().catch(() => {});
+        // 清晰度只问**当前这一集**，不问预热的那几集 —— 每集一次请求，
+        // 而预热一集只是为了切过去时不用等，不是为了让面板提前准备好。
+        loadQuality(page, video.getAttribute('src') || '');
       } catch (error) {
         page.querySelector('.feed-spinner')?.classList.add('hidden');
         const box = page.querySelector('.feed-error');
@@ -501,13 +528,94 @@
 
     function controlsHtml() {
       return `<div class="feed-controls">
+        <button type="button" class="feed-control feed-ep-prev" aria-label="上一集">上一集</button>
+        <button type="button" class="feed-control feed-ep-next" aria-label="下一集">下一集</button>
+        <button type="button" class="feed-control feed-quality-toggle" hidden aria-label="选择清晰度">清晰度</button>
         <button type="button" class="feed-control feed-rate-toggle" aria-label="选择倍速">${speedLabel(selectedRate())}</button>
         <button type="button" class="feed-control feed-orientation-toggle" aria-label="切换横屏播放">横屏</button>
         <button type="button" class="feed-control feed-flip-toggle" aria-label="翻转画面方向">翻转</button>
+        <div class="feed-quality-panel hidden" role="menu" aria-label="清晰度"></div>
         <div class="feed-rate-panel hidden" role="menu" aria-label="播放倍速">
           ${SPEEDS.map(rate => `<button type="button" class="feed-rate-option" data-rate="${rate}" role="menuitemcheckbox">${speedLabel(rate)}</button>`).join('')}
         </div>
       </div>`;
+    }
+
+    /**
+     * 问一次清晰度。主 m3u8 里那张码率表只有取回文本才看得见，而页面 CSP 的
+     * connect-src 是 'none' —— 所以这段走 Java（__player:variants）。
+     *
+     * 空列表**不是错误**：那个站只有一路（实测量子/暴风两家的 master 都只有
+     * 一档：RESOLUTION=1080x608 + BANDWIDTH=800000）。这时按钮照旧显示当前这一路，
+     * 面板里如实写一句，而不是给一个点不动的选择器。
+     */
+    async function loadQuality(page, url) {
+      if (!playerCommand || !url || url.indexOf('.m3u8') < 0) return;
+      if (page.dataset.quality != null) return;      // 一集只问一次
+      try {
+        const result = await playerCommand('variants?url=' + encodeURIComponent(url));
+        const items = asArray(result.items);
+        page.dataset.quality = JSON.stringify(items);
+        page.dataset.qualityPicked = url;
+        updateQualityUi(page);
+      } catch (error) {
+        // 拿不到就不显示这一项，不打扰用户。
+        page.dataset.quality = '';
+      }
+    }
+
+    function qualityLabelOf(page) {
+      const items = asArray(JSON.parse(page.dataset.quality || '[]'));
+      const picked = page.dataset.qualityPicked || '';
+      const hit = items.find(item => item.url === picked);
+      return (hit && hit.name) || (items.length === 1 ? items[0].name : '');
+    }
+
+    function updateQualityUi(page) {
+      const feed = page.closest('.feed');
+      if (!feed) return;
+      const items = asArray(JSON.parse(page.dataset.quality || '[]'));
+      const button = feed.querySelector('.feed-quality-toggle');
+      if (!button) return;
+      const label = qualityLabelOf(page);
+      // 一档都没有（不是主列表 / 探测失败）就不出现 —— 编一个数字比不显示更糟。
+      button.hidden = items.length === 0;
+      if (items.length) button.textContent = label || '清晰度';
+      const panel = feed.querySelector('.feed-quality-panel');
+      if (!panel) return;
+      const rows = items.map(item => {
+        // 「当前这一路」有两种认法：地址就是正在播的那个，或者压根只有一路。
+        // 后者很重要 —— 只有一路时如果还让人点，点下去是把同一个流换个地址重挂一遍，
+        // 白白黑一下屏。这里把它标成当前并置灰，面板的职责就回到「告诉用户是什么」。
+        const current = items.length === 1 || item.url === (page.dataset.qualityPicked || '');
+        return `<button type="button" class="feed-quality-option${current ? ' is-current' : ''}" data-quality="${esc(item.url)}"${current ? ' disabled' : ''}>${esc(item.name)}${item.note ? `<small>${esc(item.note)}</small>` : ''}</button>`;
+      }).join('');
+      panel.innerHTML = rows
+        + (items.length === 1 ? '<p class="feed-quality-note">这个源只有这一路清晰度</p>' : '');
+    }
+
+    /** 换清晰度 = 换地址重挂。位置、倍速、播放状态都带过去。 */
+    function pickQuality(page, url) {
+      const video = page.querySelector('video');
+      if (!video || !url || url === page.dataset.qualityPicked) return;
+      const wasPlaying = !video.paused;
+      const at = video.currentTime;
+      const rate = video.playbackRate;
+      page.dataset.qualityPicked = url;
+      video.dataset.ready = '1';                  // attach() 里那句判断用不到，直接重挂
+      video.src = url;
+      video.load();
+      const restore = () => {
+        video.removeEventListener('loadedmetadata', restore);
+        try { if (at > 0) video.currentTime = at; } catch (error) {}
+        video.playbackRate = rate;
+        if (wasPlaying) video.play().catch(() => {});
+      };
+      video.addEventListener('loadedmetadata', restore);
+      page.querySelector('.feed-spinner')?.classList.remove('hidden');
+      urlRemember(page.dataset.videoId, Number(page.dataset.ep), url);
+      updateQualityUi(page);
+      toast('已切到 ' + (qualityLabelOf(page) || '这一路'));
     }
 
     async function render(videoId, startEpisode = 1) {
@@ -546,6 +654,7 @@
                 <div class="feed-error hidden"><span class="feed-error-text"></span><button type="button" class="feed-retry">重试</button></div>
                 <div class="feed-speed">2×</div>
                 <div class="feed-seek"><b class="feed-seek-delta">快进 0 秒</b><span class="feed-seek-clock">0:00 / 0:00</span></div>
+                <div class="feed-brightness"><b class="feed-brightness-value">亮度 50%</b><i class="feed-brightness-fill"></i></div>
                 <div class="feed-hud"><b>第 ${n} 集</b><span>${esc(detail.title || '')}</span></div>
                 <div class="feed-bar"><i class="feed-bar-fill"></i></div>
                 <div class="feed-times"><span class="feed-time-cur">0:00</span><span class="feed-time-total">--:--</span></div>
@@ -659,44 +768,135 @@
         if (cur) cur.textContent = fmtClock(target);
       };
 
+      /**
+       * 手势收尾。两种模式收的东西不一样：
+       *   seek   —— 落到目标位置、按原状态恢复播放（endDrag 里那套）
+       *   bright —— 只把 HUD 收起来；亮度已经一格格写进窗口了，没有「确认」这一步
+       */
+      const endGesture = commit => {
+        if (!drag) return;
+        if (drag.mode === 'seek') { endDrag(commit); return; }
+        drag.page?.classList.remove('is-bright');
+        feed.classList.remove('is-bright');
+        drag = null;
+      };
+
+      // ── 手势：两个功能共用一个 pointer 状态机，按**主导轴**分派 ──────
+      //
+      //   内容坐标里的横轴 → 拖进度（竖屏横屏都能用）
+      //   内容坐标里的纵轴 → 横屏是亮度；竖屏不接（那条轴归滚动容器，用来切集）
+      //
+      // ── 为什么是「内容坐标」而不是屏幕坐标 ────────────────────────────
+      // 横屏是纯 CSS 把 `.feed-stage` 转了 90°（见 app.css 那一节），视口本身
+      // 还是竖的。所以「用户手上往左划」在视口里可能是 +x，也可能是 ±y ——
+      // 取决于转了哪个方向（翻转开关）：
+      //
+      //   非翻转  stage(x, y) → 视口(100vw - y, x)   用户向右 = dy，用户向下 = -dx
+      //   翻转    stage(x, y) → 视口(y, 100vh - x)   用户向右 = -dy，用户向下 = dx
+      //
+      // 上一版直接拿 dx 当「横向」，在竖屏下没问题，在横屏下的实际含义是
+      // **物理上竖着划 = 拖进度、横着划 = 切集**（那也是有意的，见改造说明）。
+      // 现在改成在内容坐标里判轴：横屏时物理横划 = 进度、物理竖划 = 亮度，
+      // 和系统播放器一套手感。代价是横屏下不能滑动切集，所以控件里补了
+      // 「上一集 / 下一集」两个按钮（只在横屏显示）。
+      //
+      // 那条被让出来的纵轴靠 CSS 的 touch-action:none 才抓得住 —— 横屏时原生
+      // 滚动不再吃手势，同一个 pointer 序列才能按轴分流。
+
+      /** 视口位移 → 内容坐标位移（用户视角：x 向右、y 向下）。 */
+      function contentDelta(feed, dx, dy) {
+        if (!isLandscape(feed)) return { x: dx, y: dy };
+        const flip = feed.dataset.flip === '1';
+        return flip ? { x: -dy, y: dx } : { x: dy, y: -dx };
+      }
+
+      function paintBrightness(page, value) {
+        const label = page.querySelector('.feed-brightness-value');
+        if (label) label.textContent = '亮度 ' + Math.round(value * 100) + '%';
+        const fill = page.querySelector('.feed-brightness-fill');
+        if (fill) fill.style.width = (value * 100).toFixed(1) + '%';
+      }
+
+      /**
+       * 竖向划满多少像素等于走完 BRIGHT_SPAN 的量程。
+       *
+       * 取的是**内容坐标**里那条竖边的长度：竖屏就是视口高，横屏是视口宽
+       * （画面转了 90°，用户在手上量到的「一屏高」正好是视口宽）。
+       */
+      function brightStep() {
+        const extent = isLandscape(feed)
+          ? (window.innerWidth || feed.clientWidth || 1)
+          : (window.innerHeight || feed.clientHeight || 1);
+        return Math.max(180, extent * BRIGHT_SPAN);
+      }
+
       feed.addEventListener('pointerdown', event => {
         if (drag) endDrag(false);
         if (event.target.closest('.feed-back, .feed-retry, .feed-bar, .feed-error, .feed-controls')) return;
         const page = event.target.closest('.feed-page');
         if (!page) return;
         const video = page.querySelector('video');
-        if (!video || !video.duration || !isFinite(video.duration)) return;
-        drag = { page, video, x: event.clientX, y: event.clientY, fromTime: video.currentTime, target: video.currentTime, active: false };
+        const seekable = Boolean(video && video.duration && isFinite(video.duration));
+        // 竖屏只需要「能拖进度」；横屏还多一条「能调亮度」，所以视频还没起来也接。
+        if (!seekable && !isLandscape(feed)) return;
+        drag = {
+          page, video, seekable,
+          x: event.clientX, y: event.clientY,
+          fromTime: video ? video.currentTime : 0,
+          target: video ? video.currentTime : 0,
+          base: brightness == null ? 0.5 : brightness,
+          value: brightness == null ? 0.5 : brightness,
+          mode: '', active: false
+        };
       });
 
       feed.addEventListener('pointermove', event => {
         if (!drag) return;
-        const dx = event.clientX - drag.x;
-        const dy = event.clientY - drag.y;
-        if (!drag.active) {
-          if (Math.abs(dx) < SEEK_SLOP || Math.abs(dx) < Math.abs(dy) * SEEK_BIAS) return;
-          drag.active = true;
-          endHold();                       // 拖进度与长按 2× 互斥，谁先成立算谁
+        const delta = contentDelta(feed, event.clientX - drag.x, event.clientY - drag.y);
+        const dx = delta.x;
+        const dy = delta.y;
+        if (!drag.mode) {
+          const horizontal = Math.abs(dx) >= SEEK_SLOP && Math.abs(dx) >= Math.abs(dy) * SEEK_BIAS;
+          const vertical = Math.abs(dy) >= BRIGHT_SLOP && Math.abs(dy) > Math.abs(dx);
+          // 谁先成立算谁，**之后不再改判** —— 手一抖就中途换功能比不响应更糟。
+          if (horizontal && drag.seekable) drag.mode = 'seek';
+          else if (vertical && isLandscape(feed)) drag.mode = 'bright';
+          else return;
+          endHold();                       // 和长按 2× 互斥，谁先成立算谁
           scrollToPage(feed, drag.page);   // 斜着划带起来的那几像素滚动，压回本集
-          drag.page.classList.add('is-seek');
-          feed.classList.add('is-seeking');
-          // 按住进度时先停住播放头：画面静止，预览的那个位置才是真的位置。
-          // 松手后按原状态恢复，本来是暂停的就别自作主张播起来。
-          drag.wasPlaying = !drag.video.paused;
-          if (drag.wasPlaying) { try { drag.video.pause(); } catch (error) {} }
+          drag.active = true;
+          if (drag.mode === 'seek') {
+            drag.page.classList.add('is-seek');
+            feed.classList.add('is-seeking');
+            // 按住进度时先停住播放头：画面静止，预览的那个位置才是真的位置。
+            // 松手后按原状态恢复，本来是暂停的就别自作主张播起来。
+            drag.wasPlaying = !drag.video.paused;
+            if (drag.wasPlaying) { try { drag.video.pause(); } catch (error) {} }
+          } else {
+            drag.page.classList.add('is-bright');
+            feed.classList.add('is-bright');
+          }
         }
-        const span = Math.max(240, window.innerWidth || feed.clientWidth || 1);
-        const ceiling = seekCeiling(drag.video);
-        const raw = drag.fromTime + (dx / span) * SEEK_SPAN;
-        drag.target = Math.max(0, ceiling ? Math.min(ceiling, raw) : raw);
-        paintDrag();
+        if (drag.mode === 'seek') {
+          const span = Math.max(240, window.innerWidth || feed.clientWidth || 1);
+          const ceiling = seekCeiling(drag.video);
+          const raw = drag.fromTime + (dx / span) * SEEK_SPAN;
+          drag.target = Math.max(0, ceiling ? Math.min(ceiling, raw) : raw);
+          paintDrag();
+        } else if (drag.mode === 'bright') {
+          drag.value = Math.max(0.05, Math.min(1, drag.base - dy / brightStep()));
+          brightness = drag.value;
+          paintBrightness(drag.page, drag.value);
+          // 不节流：一次 pointermove 一次桥调用。真的卡了再按帧合并，别提前优化。
+          playerCommand?.('brightness?value=' + drag.value.toFixed(3)).catch(() => {});
+        }
       });
 
       feed.addEventListener('pointerup', () => {
-        if (drag?.active) seekSwipeAt = Date.now();
-        endDrag(true);
+        if (drag?.mode === 'seek' && drag.active) seekSwipeAt = Date.now();
+        endGesture(true);
       });
-      feed.addEventListener('pointercancel', () => endDrag(false));
+      feed.addEventListener('pointercancel', () => endGesture(false));
 
       feed.addEventListener('click', event => {
         if (event.target.closest('.feed-back')) { close(); return; }
@@ -704,11 +904,29 @@
         if (controls) {
           event.stopPropagation();
           const panel = feed.querySelector('.feed-rate-panel');
-          if (event.target.closest('.feed-rate-toggle')) { panel?.classList.toggle('hidden'); return; }
-          const rateButton = event.target.closest('.feed-rate-option');
-          if (rateButton) {
-            const rate = Number(rateButton.dataset.rate);
-            if (SPEEDS.includes(rate)) { rememberRate(rate); applyRate(feed, rate); panel?.classList.add('hidden'); }
+          const qualityPanel = feed.querySelector('.feed-quality-panel');
+          if (event.target.closest('.feed-quality-toggle')) {
+            qualityPanel?.classList.toggle('hidden');
+            panel?.classList.add('hidden');
+            return;
+          }
+          const qualityButton = event.target.closest('.feed-quality-option');
+          if (qualityButton) {
+            const page = activePage || feed.querySelector('.feed-page');
+            if (page) pickQuality(page, qualityButton.dataset.quality);
+            qualityPanel?.classList.add('hidden');
+            return;
+          }
+          if (event.target.closest('.feed-ep-prev') || event.target.closest('.feed-ep-next')) {
+            const back = Boolean(event.target.closest('.feed-ep-prev'));
+            const here = activePage || feed.querySelector('.feed-page');
+            const target = back ? here?.previousElementSibling : here?.nextElementSibling;
+            if (target && target.classList.contains('feed-page')) scrollToPage(feed, target, 'smooth');
+            return;
+          }
+          if (event.target.closest('.feed-rate-toggle')) {
+            panel?.classList.toggle('hidden');
+            qualityPanel?.classList.add('hidden');
             return;
           }
           if (event.target.closest('.feed-orientation-toggle')) {

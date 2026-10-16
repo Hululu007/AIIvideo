@@ -6,6 +6,10 @@ let contentSource = 'hongguo';
 let contentReady;
 const bridgeInstance = Date.now() + '-' + Math.random().toString(36).slice(2);
 const privateMode = () => contentSource === 'huangguo';
+// 「恢复出厂设置」跑到一半留下的标记。它只交代一件事：那一次登出如果没等到网络
+// 回来，下一次启动补一刀（见 finishResetLogout）。住在 localStorage 里，所以
+// **必须最后写** —— 写早了会被重置自己的那次全量 clear() 一起清掉。
+const RESET_FLAG = 'hgpref:factoryReset';
 window.NativeCallbacks = {
   resolve(id, value) { callbacks.get(id)?.resolve(value); callbacks.delete(id); },
   reject(id, message) { callbacks.get(id)?.reject(new Error(message)); callbacks.delete(id); }
@@ -55,6 +59,15 @@ function restartAfterSource(onStuck) {
   sessionStorage.clear();
   sourceCommand('restart').catch(() => {});
   window.setTimeout(() => { if (typeof onStuck === 'function') onStuck(); }, 2500);
+}
+
+// 播放器那几条要原生帮忙的指令（亮度 / 清晰度）。和 sourceCommand 同一个套路：
+// 走 detail 桥上的 __player: 前缀 —— 加动作不用碰 MainActivity 那两张 dispatch 表。
+async function playerCommand(command) {
+  const reply = await bridgeCall('detail', { id: '__player:' + command });
+  const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
+  if (result && result.ok === false) throw new Error(result.error || '播放指令失败');
+  return result || {};
 }
 
 function api(action, args = {}) {
@@ -214,7 +227,9 @@ const state = {
   search: null, searchPending: false, searchError: '', query: '', filter: 'all', banner: 0, categoryBanner: 0,
   listing: null, tags: null, tagsReturn: null, listingReturn: null, settingsReturn: null,
   libraryTab: 'history', libraryQuery: '', accountReturn: null, account: { loggedIn: false },
-  sourceGroup: '', sourceQueue: [], previous: null, compactHeld: false
+  sourceGroup: '', sourceQueue: [], previous: null, compactHeld: false,
+  // 正在改备注的那个源的地址（内容源页面用）。空串 = 没有在编辑。
+  sourceNote: ''
 };
 // 子分类下标。state.sub 只预置了内置那套的两个 key，而换源之后 state.tab 是配置
 // 里给的任意 key（苹果CMS 那边是 "1"/"2"/"3"…），取不到就得回 0 —— 不然
@@ -322,6 +337,8 @@ function setAccount(profile) {
   scroll.scrollTop = savedScroll;
 }
 api('account').then(setAccount).catch(() => {});
+// 上一次恢复出厂设置如果有件没干完的事（登出没等到网络），在这儿把它做完。
+finishResetLogout();
 window.hgWindowInsets = height => {
   document.getElementById('app').style.setProperty('--status-bar-height', `${Math.max(0, Number(height) || 0)}px`);
 };
@@ -784,7 +801,10 @@ function renderSettings() {
     <section class="update-settings"><div><h2>应用更新</h2><button type="button" class="app-version" data-secret-entry aria-label="当前版本 ${esc(appVersion)}"><span class="app-version-text">版本 ${appVersion ? `v${esc(appVersion)}` : '读取中…'}</span></button><p>当前安装包版本。</p></div></section>
     <section class="settings-storage"><h2>本地存储</h2><button type="button" data-clear="cache">清理内容缓存</button></section>
       <section><button type="button" class="settings-link" data-source-settings="1"><span><strong>内容源</strong><small>${state.sourceName ? esc(state.sourceName + '（' + state.sourceCount + ' 个已保存）') : '未配置'}</small></span>${icon('arrow')}</button></section>
-      <section><button type="button" class="settings-link" data-proxy-settings="1"><span><strong>网络代理</strong><small>${state.proxy ? esc(state.proxy) : '直连。有机场的话填这里可以绕开慢链路'}</small></span>${icon('arrow')}</button></section></div>`;
+      <section><button type="button" class="settings-link" data-proxy-settings="1"><span><strong>网络代理</strong><small>${state.proxy ? esc(state.proxy) : '直连。有机场的话填这里可以绕开慢链路'}</small></span>${icon('arrow')}</button></section>
+    <section class="settings-reset"><h2>恢复出厂设置</h2>
+      <p>退出登录，并清掉这台设备上的收藏、观看历史、内容缓存、内容源和代理，回到刚装好、还没填源的样子。账号本身和云端的片单不受影响，重新登录还能拿回来。</p>
+      <button type="button" data-factory-reset="1">恢复出厂设置</button></section></div>`;
 }
 
 // 网络代理。实测直连那条链六次里四次 9~18 秒（cf-ray 落在 LAX），而换路由
@@ -793,36 +813,77 @@ function renderSettings() {
 // 内容源管理。
 //
 // 存的是**地址清单**，配置内容只有当前生效那一份（Java 侧 user-source.json）。
-// 切换 = 重新拉那个地址 + 覆盖当前配置，跟第一次填走完全一样的校验 —— 这样
-// 切到一个已经失效的源会被当场拒绝，而不是留一份坏配置在盘上等下次启动闪退。
+// 切换 = 拿那个地址的本地缓存 + 覆盖当前配置，跟着第一次填走完全一样的校验 ——
+// 校验和干跑一个都不少（那才是「别把应用锁死」的那道闸），少的只是**网络那一段**。
+// 缓存不在时（第一次切到某个源）照旧现场拉一次，拉回来的那份会存成缓存。
 function renderSourceSettings() {
   const items = asArray(state.sources);
-  const rows = items.map(item => `<li class="source-row${item.active ? ' is-active' : ''}">
-      <button type="button" class="source-pick" data-source-use="${esc(item.url)}" ${item.active ? 'disabled' : ''}>
-        <span><strong>${esc(item.name || item.url)}</strong><small>${esc(item.url)}</small></span>
+  const active = items.find(item => item.active);
+  const rows = items.map(item => {
+    const url = String(item.url || '');
+    const label = item.alias || item.name || url;
+    // 备注编辑：就地展开，不弹窗。备注只是给人看的一行字，改它不值得一个模态。
+    if (state.sourceNote === url) {
+      return `<li class="source-row is-editing">
+        <form class="source-note-form" data-source-note-form="${esc(url)}">
+          <label for="source-note">备注（可留空）</label>
+          <input id="source-note" type="text" maxlength="40" autocomplete="off" placeholder="${esc(item.name || url)}" value="${esc(item.alias || '')}">
+          <div class="source-note-actions">
+            <button type="submit">保存</button>
+            <button type="button" data-source-note-clear="${esc(url)}" ${item.alias ? '' : 'disabled'}>清空</button>
+            <button type="button" data-source-note-cancel="1">取消</button>
+          </div>
+        </form>
+      </li>`;
+    }
+    return `<li class="source-row${item.active ? ' is-active' : ''}">
+      <button type="button" class="source-pick" data-source-use="${esc(url)}" ${item.active ? 'disabled' : ''}>
+        <span><strong>${esc(label)}</strong><small>${esc(url)}</small></span>
         ${item.active ? '<em>当前</em>' : icon('arrow')}
       </button>
-      <button type="button" class="source-drop" data-source-forget="${esc(item.url)}" aria-label="删除 ${esc(item.name || item.url)}">×</button>
-    </li>`).join('');
+      <button type="button" class="source-note" data-source-note="${esc(url)}" aria-label="改 ${esc(label)} 的备注">备注</button>
+      <button type="button" class="source-drop" data-source-forget="${esc(url)}" aria-label="删除 ${esc(label)}">×</button>
+    </li>`;
+  }).join('');
   content.innerHTML = `<div class="settings-page"><button type="button" class="listing-back" data-back="1">${icon('back')} 返回设置</button><h1>内容源</h1>
     <section class="settings-account">
-      <p>切换源会重新拉取那份配置并重启应用。想看别的内容就换一个。</p>
+      <p>切换源会重启应用。第二次之后走本地缓存，不用再等网络。</p>
       <ul class="source-list">${rows || '<li class="source-empty">还没有保存过任何源</li>'}</ul>
+      ${active ? `<button type="button" class="source-refetch" data-source-refetch="${esc(String(active.url || ''))}">
+        重新拉取这个源的配置
+        <small>服务器上改了配置、这边一直用旧的，点这里。要联网，会重启。</small>
+      </button>` : ''}
       <form id="source-form" class="password-form">
         <label for="source-value">添加一个源</label>
         <input id="source-value" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://example.com/source.json">
-        <p class="field-hint">地址必须以 https:// 开头。支持我们自己的 JSON 和苹果CMS 的接口地址。</p>
+        <label for="source-alias">备注（可留空）</label>
+        <input id="source-alias" type="text" maxlength="40" autocomplete="off" placeholder="给这个源起个名字，比如「量子」">
+        <p class="field-hint">地址必须以 https:// 开头。支持我们自己的 JSON 和苹果CMS 的接口地址。备注只是给人看的，随时能改。</p>
         <p id="source-error" class="auth-error" role="alert" hidden></p>
         <button type="submit">添加并切换</button>
       </form>
     </section></div>`;
 }
 
+/** 写/清一个源的备注。空串 = 清掉，退回自动取的名字。 */
+async function saveSourceNote(url, text) {
+  const clean = String(text == null ? '' : text).trim();
+  try {
+    const result = await sourceCommand('note?url=' + encodeURIComponent(url) + '&value=' + encodeURIComponent(clean));
+    state.sources = asArray(result.items);
+    state.sourceNote = '';
+    renderSourceSettings();
+    toast(clean ? '备注已保存' : '备注已清空');
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
 async function refreshSources() {
   const listing = await sourceCommand('list');
   state.sources = asArray(listing.items);
   const active = state.sources.find(item => item.active);
-  state.sourceName = active ? (active.name || active.url) : '';
+  state.sourceName = active ? (active.alias || active.name || active.url) : '';
   state.sourceCount = state.sources.length;
   // 挂出去给 feed-player.js 用：上报观看进度时要带上「这条属于哪个源」。
   //
@@ -895,6 +956,106 @@ function renderAccountManagement() {
           <p id="password-error" class="auth-error" role="alert" hidden></p><button type="submit">确认修改</button>
         </form></section>
       <section class="settings-account"><h2>同步与登录</h2><button type="button" data-sync-now="1">立即同步片单</button><button type="button" data-logout="1" aria-live="polite">退出登录</button></section>` : `<section class="settings-account"><p>登录后可同步收藏和观看历史，并管理头像与密码。</p><button type="button" data-account-action="1">登录或注册</button></section>`}</div>`;
+}
+
+// ── 恢复出厂设置 ──────────────────────────────────────────────────────
+//
+// 「像刚装好一样」拆开是四件事：没有登录、没有片单、没有缓存、没有源。账号本身
+// 和云端的片单不动 —— 重新登录还能拿回来。
+//
+// 顺序是硬要求：
+//   ① 先退出登录。ParseUser 的当前用户活在**内存**里，而重启走的是 Activity 重建、
+//      进程不死；MainActivity 在 onCreate 里照样能从它拿到 objectId，界面照样是
+//      登录态。所以「把盘上那份账号文件删掉」不等于退出登录，必须让 logout 真的
+//      跑完（这正是它排在清盘前面的原因，而不是反过来）。
+//   ② 再让 Java 清盘（__source:reset）：源、片单、代理、头像、缓存目录，外加 WebView
+//      的 Cookie —— HttpOnly 的 Cookie 前端看不见也删不掉，只有 CookieManager 够得着。
+//      这一步又必须在①之后：清盘会把 cacheDir 端掉，而 Parse 的登录态就在那底下，
+//      先清它就等于让①没得退。
+//   ③ 然后清前端自己这份（localStorage 为主）。排在②之后才有效 —— 反过来的话，
+//      ②里那次 cacheDir 清理正好会抽掉③还在写的文件。
+//   ④ 最后重启。「配置」是 MainActivity.onCreate 那条链里读的，源没了，重进来的
+//      那一屏就是「设置源」，和第一次装好打开时一模一样。
+async function runFactoryReset(button) {
+  const accepted = await askConfirmation('恢复出厂设置',
+    '退出登录，并清掉这台设备上的收藏、观看历史、内容缓存、内容源和代理。清完会重启，回到刚装好、还没填源的样子（要重新填一次源地址）。账号本身和云端片单不受影响。',
+    '确认重置');
+  if (!accepted) return;
+
+  const original = button.textContent;
+  button.disabled = true;
+  button.classList.add('is-loading');
+  button.textContent = '正在重置…';
+  try {
+    // ① 退出登录。离线时 Parse 的登出要等它自己的超时，而后面三步全是本地操作，
+    //    没理由陪着一起等 —— 给它封个顶：只有**明确回来了**才算退干净，超时（undefined）
+    //    和报错（false）都当没退，下一次启动补（finishResetLogout）。
+    let loggedOut = true;
+    if (state.account.loggedIn) {
+      loggedOut = await settleWithin(api('logout').then(() => true).catch(() => false), 6000) === true;
+    }
+    // ② Java 清盘
+    await sourceCommand('reset');
+    // ③ 前端存储
+    await wipeWebStorage();
+    // ④ 没退干净的记一笔给下一次启动（必须在③之后写），然后重启
+    if (!loggedOut) {
+      try { localStorage.setItem(RESET_FLAG, String(Date.now())); } catch (error) {}
+    }
+    toast('已恢复出厂设置，正在重启…');
+    restartAfterSource(() => { location.reload(); });
+  } catch (error) {
+    console.log('[reset] 重置中断：' + (error.message || error));
+    toast('重置没做完：' + (error.message || error), true);
+    button.disabled = false;
+    button.classList.remove('is-loading');
+    button.textContent = original;
+  }
+}
+
+/** 给一个动作封顶：到点就往下走，不管它做没做完。做没做完由调用方自己判断。 */
+function settleWithin(promise, ms) {
+  return Promise.race([promise, new Promise(resolve => window.setTimeout(resolve, ms))]);
+}
+
+/**
+ * 前端这一侧的存储。Java 那边清的是 Cookie 和 DOM storage（见 __source:reset），
+ * 这里把页面自己看得见的全部清空 —— 重点是 localStorage：片单、接口缓存、
+ * 首页骨架屏、缓存作用域、倍速档位，全在它里面。
+ *
+ * Cache Storage 和 IndexedDB 现在没人用，但「像刚装好一样」要成立，就不能按
+ * 「我猜没用到」来清；两个 API 在某些 WebView 上会缺席，各自包一层。
+ */
+async function wipeWebStorage() {
+  try { localStorage.clear(); } catch (error) {}
+  try { sessionStorage.clear(); } catch (error) {}
+  try {
+    document.cookie.split(';').forEach(item => {
+      const name = item.split('=')[0].trim();
+      if (name) document.cookie = name + '=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
+    });
+  } catch (error) {}
+  try { await Promise.all((await caches.keys()).map(name => caches.delete(name))); } catch (error) {}
+  try {
+    const databases = await indexedDB.databases();
+    (databases || []).forEach(db => { if (db && db.name) indexedDB.deleteDatabase(db.name); });
+  } catch (error) {}
+}
+
+/**
+ * 上一次恢复出厂设置如果没能当场退出登录（离线时网络那一截要等超时），这里补一刀。
+ * 标记读一次就删 —— 它记的是「还有件事没干完」，不是配置。
+ *
+ * 为什么不能省：登出没回来，内存里那个 ParseUser 就还在；Activity 重建之后界面
+ * 照样是登录态、只是片单空了 —— 「恢复出厂设置」这句承诺就不成立。
+ */
+function finishResetLogout() {
+  let pending = '';
+  try { pending = localStorage.getItem(RESET_FLAG) || ''; } catch (error) {}
+  if (!pending) return;
+  try { localStorage.removeItem(RESET_FLAG); } catch (error) {}
+  console.log('[reset] 上一次重置的登出没跑完，补一次');
+  api('logout').then(setAccount).catch(() => {});
 }
 
 function renderSearch() {
@@ -1630,6 +1791,9 @@ const feedPlayer = window.HGFeedPlayer.create({
   // bridgeCall 是给播放进度上报用的（feed-player 里的 report()）。
   // 它走的是 detail 那条桥上的 __progress: 指令，不是新动作。
   bridgeCall,
+  // 亮度走原生（CSS 蒙黑只能变暗），清晰度要取 m3u8 文本（页面 fetch 不了）——
+  // 两件都要过桥，包一层在这里给播放器用。
+  playerCommand,
   renderDetail, goHome, updateBackEnabled
 });
 function feedCleanup() { feedPlayer.cleanup(); }
@@ -1722,14 +1886,21 @@ document.addEventListener('submit', async event => {
   if (event.target.id === 'source-form') {
     event.preventDefault();
     const input = document.getElementById('source-value');
+    const aliasInput = document.getElementById('source-alias');
     const error = document.getElementById('source-error');
     const button = event.target.querySelector('button[type="submit"]');
     if (!input || !button) return;
+    const url = input.value.trim();
+    const alias = String(aliasInput?.value || '').trim();
     button.disabled = true;
     button.textContent = '正在拉取…';
     if (error) error.hidden = true;
     try {
-      await sourceCommand('use?url=' + encodeURIComponent(input.value.trim()));
+      // 新填进来的地址必然没有本地缓存，这一次一定要等网络（也就这一次）。
+      await sourceCommand('use?url=' + encodeURIComponent(url));
+      // 备注单独一条指令写：用户可以随时改，且地址本身不认识它。
+      // 写失败不该拦住切换 —— 备注只是给人看的。
+      if (alias) await sourceCommand('note?url=' + encodeURIComponent(url) + '&value=' + encodeURIComponent(alias)).catch(() => {});
       restartAfterSource(() => {
         if (error) { error.textContent = '已切换，但没能自动重开，请退出后重新打开'; error.hidden = false; }
         button.disabled = false;
@@ -1740,6 +1911,12 @@ document.addEventListener('submit', async event => {
       button.disabled = false;
       button.textContent = '添加并切换';
     }
+    return;
+  }
+  const noteForm = event.target.closest('[data-source-note-form]');
+  if (noteForm) {
+    event.preventDefault();
+    await saveSourceNote(noteForm.dataset.sourceNoteForm, noteForm.querySelector('#source-note')?.value);
     return;
   }
   if (event.target.id !== 'password-form') return;
@@ -1811,6 +1988,58 @@ document.addEventListener('click', async event => {
     } catch (problem) { toast(problem.message, true); }
     return;
   }
+  if (event.target.closest('[data-source-refetch]')) {
+    const refetchButton = event.target.closest('[data-source-refetch]');
+    const refetchUrl = refetchButton.dataset.sourceRefetch;
+    if (!refetchUrl || refetchButton.disabled) return;
+    refetchButton.disabled = true;
+    const status = document.getElementById('source-error');
+    if (status) { status.hidden = false; status.textContent = '正在重新拉取…'; }
+    try {
+      // 两步，顺序不能反。
+      //
+      // refresh 是「把服务器上那份重新下下来，只写本地缓存，不动生效那份」——
+      // 它本来就是为了后台悄悄更新缓存而写的，单独的它救不了「我现在就要用上」。
+      // 跟着的 use 再从缓存取一遍：刚写进去的正好是新的，于是这次切源拿到的
+      // 就是新配置，顺带把重启也带了。
+      //
+      // 想一步到位得给 Java 加个新动作，那要同时改 MainActivity 的 packed-switch
+      // 两张表 —— 本工程最容易出事的地方，为这点事不值得。
+      await sourceCommand('refresh?url=' + encodeURIComponent(refetchUrl));
+      if (status) status.textContent = '已拉回来，正在应用…';
+      const result = await sourceCommand('use?url=' + encodeURIComponent(refetchUrl));
+      const spent = Number(result && result.ms) || 0;
+      // use 走了缓存分支（cached=true）是**正常的**：新配置刚被 refresh 写进缓存，
+      // 这里就是要那份。所以不按「本地缓存/刚拉了」措辞，直接说清楚做过什么。
+      if (status) status.textContent = `已重新拉取并应用（${spent}ms），正在重启…`;
+      restartAfterSource(() => {
+        if (status) status.textContent = '已重新拉取，但没能自动重开，请退出后重新打开';
+        refetchButton.disabled = false;
+      });
+    } catch (problem) {
+      if (status) status.textContent = problem.message;
+      refetchButton.disabled = false;
+    }
+    return;
+  }
+  const noteEdit = event.target.closest('[data-source-note]');
+  if (noteEdit) {
+    state.sourceNote = noteEdit.dataset.sourceNote;
+    renderSourceSettings();
+    content.querySelector('#source-note')?.focus();
+    return;
+  }
+  if (event.target.closest('[data-source-note-cancel]')) {
+    state.sourceNote = '';
+    renderSourceSettings();
+    return;
+  }
+  const noteClear = event.target.closest('[data-source-note-clear]');
+  if (noteClear) {
+    if (noteClear.disabled) return;
+    await saveSourceNote(noteClear.dataset.sourceNoteClear, '');
+    return;
+  }
   if (event.target.closest('[data-source-use]')) {
     const pickButton = event.target.closest('[data-source-use]');
     const pickUrl = pickButton.dataset.sourceUse;
@@ -1819,7 +2048,12 @@ document.addEventListener('click', async event => {
     const status = document.getElementById('source-error');
     if (status) { status.hidden = false; status.textContent = '正在切换…'; }
     try {
-      await sourceCommand('use?url=' + encodeURIComponent(pickUrl));
+      const result = await sourceCommand('use?url=' + encodeURIComponent(pickUrl));
+      // 把「这次是吃缓存还是等网络」说出来。换源快不快是用户能直接感觉到的，
+      // 而这两个数字（缓存命中 / 拉取耗时）是唯一能解释它的东西。
+      const spent = Number(result && result.ms) || 0;
+      const how = result && result.cached ? `本地缓存 ${spent}ms` : `刚从服务器拉了 ${spent}ms`;
+      if (status) status.textContent = `已切换（${how}），正在重启…`;
       restartAfterSource(() => {
         if (status) status.textContent = '已切换，但没能自动重开，请退出后重新打开';
         pickButton.disabled = false;
@@ -1933,6 +2167,11 @@ document.addEventListener('click', async event => {
     else if (retry.dataset.retry === 'tags') goTags();
     else if (retry.dataset.retry === 'tag-list') goTag(state.listing.slug, state.listing.label);
     else if (retry.dataset.retry === 'detail') goDetail(state.sourceItem.id);
+    return;
+  }
+  const reset = event.target.closest('[data-factory-reset]');
+  if (reset) {
+    if (!reset.disabled) runFactoryReset(reset);
     return;
   }
   const clear = event.target.closest('[data-clear]');

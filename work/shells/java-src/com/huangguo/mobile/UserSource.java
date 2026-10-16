@@ -54,6 +54,8 @@ public final class UserSource {
     private static final String FILE_NAME = "user-source.json";
     /** 源清单。跟 user-source.json 分开存 —— 那个是「当前生效的配置」，这个是「存过哪些地址」。 */
     private static final String LIST_FILE = "user-sources.json";
+    /** 每份拉回来的配置都在这儿存一份（按地址的 md5 命名）。换源不再等网络，见 applySource。 */
+    private static final String CACHE_DIR = "source-cache";
 
     private static final int FETCH_TIMEOUT = 12;
 
@@ -110,6 +112,23 @@ public final class UserSource {
         "jx.wuzhoupai.com",     // AGE动漫 的播放解析
         "xcdn.khfed.com",       // 它的播放器资源
     };
+
+    /**
+     * 播放器要原生帮忙的两件事。`__player:brightness?value=0.42` / `__player:variants?url=<编码过的 m3u8>`。
+     *
+     * ── 为什么是这两件 ────────────────────────────────────────────────
+     *   亮度：WebView 里的页面改不了系统/窗口亮度。CSS 蒙一层黑只能变暗，
+     *        而要「像系统播放器那样上下滑调亮」，得动 Window 的 screenBrightness。
+     *   清晰度：主 m3u8 里那张码率表只有取回文本才看得见，而页面 CSP 的
+     *        connect-src 是 'none' —— 拿不到文本就列不出「有哪些清晰度」。
+     *
+     * 两者都跟着 detail 桥走（和 __source: / __progress: / __http: 同一招），
+     * 不碰 MainActivity 那两张 dispatch 表。
+     */
+    public static final String PLAYER_PREFIX = "__player:";
+
+    /** 亮度下限。0 会把屏幕熄掉，用户再想调回来就得靠运气 —— 留一档看得见。 */
+    private static final float MIN_BRIGHTNESS = 0.05f;
 
     /**
      * 记一条观看进度，落到 AppStore 里，于是 api('library') 能读到它、
@@ -264,6 +283,11 @@ public final class UserSource {
             if (command.startsWith(HTTP_PREFIX)) {
                 return http(command.substring(HTTP_PREFIX.length()).trim(), out);
             }
+            // 播放器那两件要原生帮忙的事（亮度、清晰度）。同样走 detail 桥，理由和
+            // __source: 一样：不去动 dispatch 那两张表。
+            if (command.startsWith(PLAYER_PREFIX)) {
+                return player(context, command.substring(PLAYER_PREFIX.length()).trim(), out);
+            }
             if (!command.startsWith(PREFIX)) return fail(out, "不是源设置指令");
 
             String body = command.substring(PREFIX.length()).trim();
@@ -347,18 +371,57 @@ public final class UserSource {
 
             if ("set".equals(action) || "use".equals(action)) {
                 if (url.length() == 0) return fail(out, "没有提供源地址");
-                String problem = applySource(context, url);
+                // use 优先吃本地缓存（换源不等网络）；set 是「刚填进来的地址」，
+                // 缓存里不可能有它，走同一条路不会命中而已。计时是给页面显示用的 ——
+                // 「本地缓存 · 180ms」和「拉了 2.4 秒」对用户是两件事。
+                long started = System.currentTimeMillis();
+                boolean[] usedCache = new boolean[1];
+                String problem = applySource(context, url, "use".equals(action), usedCache);
                 if (problem != null) return fail(out, problem);
                 remember(context, url);
                 // 换源只重建 Activity，**进程不死** —— 而预热结果和连接池都是 static，
                 // 不清的话新源会拿到旧源的首页字节（实测：切完直接弹「内容更新失败」）。
                 AiiHttp.resetForSourceChange();
                 JSONObject saved = read(context);
-                log("已设置用户源 → " + (saved == null ? "" : saved.optString("origin", "")));
+                long spent = System.currentTimeMillis() - started;
+                log("已设置用户源 → " + (saved == null ? "" : saved.optString("origin", ""))
+                        + "  " + spent + "ms");
                 out.put("ok", true);
                 out.put("configured", true);
                 out.put("origin", saved == null ? "" : saved.optString("origin", ""));
                 out.put("url", url);
+                out.put("cached", usedCache[0]);
+                out.put("ms", spent);
+                return out;
+            }
+
+            // 后台把某条地址的配置重新拉一遍，只更新**本地缓存**，不动当前生效那份 ——
+            // 于是「用缓存秒切」不会让配置永远停在旧版本，而更新也不会触发第二次重启。
+            // 下一次切到这个源时用的就是新的。前端也可以手动调（排障用）。
+            if ("refresh".equals(action)) {
+                if (url.length() == 0) return fail(out, "没有提供源地址");
+                try {
+                    JSONObject fresh = load(url);
+                    String problem = validate(fresh);
+                    if (problem != null) return fail(out, problem);
+                    writeCache(context, url, fresh);
+                    log("已刷新源缓存 " + cacheFile(context, url).getName()
+                            + "（" + fresh.toString().length() + " 字节）");
+                    out.put("ok", true);
+                } catch (Exception e) {
+                    String why = e.getMessage() == null ? String.valueOf(e) : e.getMessage();
+                    return fail(out, "刷新失败：" + why);
+                }
+                return out;
+            }
+
+            // 给一个源写备注（名字是给人看的，为空就退回自动取的那个名字）。
+            if ("note".equals(action)) {
+                if (url.length() == 0) return fail(out, "没有提供源地址");
+                note(context, url, value);
+                JSONObject listing = list(context);
+                out.put("ok", true);
+                out.put("items", listing.optJSONArray("saved"));
                 return out;
             }
 
@@ -390,6 +453,13 @@ public final class UserSource {
                 out.put("ok", true);
                 out.put("active", read(context) == null ? "" : url);
                 return out;
+            }
+
+            // 恢复出厂设置。前端那个入口在「我的 → 设置」的最后一块，语义就是
+            // 把这台设备变回刚装好的样子：没有片单、没有缓存、没有源。
+            // 登录态不在这里退 —— 它必须由前端的 logout 先做掉，理由见 factoryReset。
+            if ("reset".equals(action)) {
+                return factoryReset(context, out);
             }
 
             return fail(out, "不认识的指令：" + action);
@@ -464,21 +534,72 @@ public final class UserSource {
     }
 
     /**
-     * 拉一个地址、校验、干跑一次 SiteProfile，全过了就存成当前配置。
-     * 返回 null 表示成功，否则是一句给人看的错。
+     * 把一个源变成当前配置。返回 null 表示成功，否则是一句给人看的错。
+     *
+     * 三件事：拿到配置 → 校验 → 干跑一次 SiteProfile → 写进 user-source.json。
      *
      * 「干跑」那段是必须的：SiteProfile 在 Activity.onCreate 里构造，它自己那堆校验
      * （origin 是不是 https、封面 AES 密钥够不够长、allowedHosts 空不空）抛异常的表现
      * 是**一装完就闪退**。而配置存在 files/ 下，App 起不来就进不了设置页 ——
      * 用户被一份填错的配置永久锁在外面，只能清数据。所以在这里先把那条路走一遍。
+     *
+     * ── 2026-10-16：换源不再等网络 ────────────────────────────────────
+     * 每次切源都重新拉一遍那个地址，代价是**一次完整的公网往返** —— 实测量子那种站
+     * 1.3~4 秒，慢的时候十几秒（Cloudflare 落在 LAX）。而那份配置一个站在几周里
+     * 基本不变：变的只有分类表。所以每份拉回来的配置都在 files/source-cache/ 里
+     * 留一份，切源时先用它。
+     *
+     * **「失效的源会被当场拒绝」这条没丢**：缓存那份同样要过 validate + 干跑，
+     * 过不了就丢掉、退回重新拉。丢掉的是「网络还能不能通」，留下的是「这份配置会不会
+     * 让应用起不来」—— 而后者才是当初要挡的那个东西。
+     *
+     * 命中缓存之后会在后台把缓存刷新一遍（refreshCacheAsync），所以下一次切过来
+     * 用的是新的；这次先按手上这份跑。
+     *
+     * @param usedCache 长度 ≥1 的数组，出参：这次是不是吃的缓存（页面要显示「本地缓存」）
      */
-    private static String applySource(Context context, String url) {
+    private static String applySource(Context context, String url, boolean preferCache, boolean[] usedCache) {
+        if (preferCache) {
+            JSONObject cached = readJson(cacheFile(context, url));
+            JSONObject config = cached == null ? null : cached.optJSONObject("config");
+            if (config != null) {
+                String problem = verify(context, config);
+                if (problem == null) {
+                    try {
+                        config.put("__url", url);
+                        save(context, config);
+                    } catch (Exception e) {
+                        return "保存失败：" + e.getMessage();
+                    }
+                    usedCache[0] = true;
+                    log("换源用的是本地缓存，没有等网络");
+                    refreshCacheAsync(context, url);
+                    return null;
+                }
+                // 缓存坏了（旧版本的字段、被改坏的文件）—— 当它不存在，重新拉。
+                log("缓存那份配置不能用了（" + problem + "），重新拉一次");
+            }
+        }
         JSONObject config;
         try {
             config = load(url);
         } catch (Exception e) {
             return "拉取失败：" + e.getMessage();
         }
+        String problem = verify(context, config);
+        if (problem != null) return problem;
+        try {
+            config.put("__url", url);
+            save(context, config);
+        } catch (Exception e) {
+            return "保存失败：" + e.getMessage();
+        }
+        writeCache(context, url, config);
+        return null;
+    }
+
+    /** 校验 + 干跑。返回 null 表示这份配置能用。 */
+    private static String verify(Context context, JSONObject config) {
         String problem = validate(config);
         if (problem != null) return problem;
         try {
@@ -488,15 +609,72 @@ public final class UserSource {
             if (e.getCause() != null && e.getCause().getMessage() != null) why = e.getCause().getMessage();
             return "这份配置会让应用启动失败，已拒绝：" + why;
         }
-        try {
-            // 把来源地址一并存下 —— 设置页要回显「当前用的是哪个源」，
-            // 而缓存作用域（前端 hgcache: 的键前缀）也是按这个地址分的。
-            config.put("__url", url);
-            save(context, config);
-        } catch (Exception e) {
-            return "保存失败：" + e.getMessage();
-        }
         return null;
+    }
+
+    // ── 源配置的本地缓存 ──────────────────────────────────────────────
+
+    private static File cacheDir(Context context) {
+        File dir = new File(context.getFilesDir(), CACHE_DIR);
+        if (!dir.isDirectory()) dir.mkdirs();
+        return dir;
+    }
+
+    /**
+     * 缓存文件名 = 地址的 md5。地址里可能有查询参数和百分号编码，
+     * 直接拿来当文件名既不安全也没法一眼认出来 —— 反正没人读文件名。
+     */
+    private static File cacheFile(Context context, String url) {
+        return new File(cacheDir(context), digest(url) + ".json");
+    }
+
+    private static String digest(String text) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+            byte[] bytes = md.digest(text.getBytes("UTF-8"));
+            StringBuilder sb = new StringBuilder(bytes.length * 2);
+            for (int i = 0; i < bytes.length; i++) {
+                sb.append(Character.forDigit((bytes[i] >> 4) & 0xf, 16));
+                sb.append(Character.forDigit(bytes[i] & 0xf, 16));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            // 拿不到 md5（理论上不会）就退回 hashCode：命中率低无所谓，别在这儿抛。
+            return Integer.toHexString(text.hashCode());
+        }
+    }
+
+    private static void writeCache(Context context, String url, JSONObject config) {
+        try {
+            JSONObject entry = new JSONObject();
+            entry.put("url", url);
+            entry.put("at", System.currentTimeMillis());
+            entry.put("config", config);
+            writeJson(cacheFile(context, url), entry);
+        } catch (Exception e) {
+            log("源缓存写入失败：" + e);
+        }
+    }
+
+    /**
+     * 后台把缓存刷新一遍。**只动缓存，不动当前生效那份** —— 动了就得再来一次重启，
+     * 用戶刚看着界面回来又要被重启一次。下一次切到这个源用的就是新的。
+     */
+    private static void refreshCacheAsync(final Context context, final String url) {
+        final Context app = context.getApplicationContext() == null ? context : context.getApplicationContext();
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    JSONObject fresh = load(url);
+                    if (validate(fresh) != null) { log("源缓存刷新：新配置没通过校验，保留旧的"); return; }
+                    writeCache(app, url, fresh);
+                    log("源缓存已刷新：" + url);
+                } catch (Exception e) {
+                    // 离线或站点挂了都很正常，缓存照旧用。
+                    log("源缓存刷新失败（保留旧的）：" + (e.getMessage() == null ? String.valueOf(e) : e.getMessage()));
+                }
+            }
+        }, "source-cache-refresh").start();
     }
 
     // ── 源清单 ────────────────────────────────────────────────────────
@@ -543,7 +721,11 @@ public final class UserSource {
             JSONObject entry = new JSONObject();
             try {
                 entry.put("url", url);
+                // name 是自动的（配置里的 name，其次从地址猜），alias 是用户写的备注。
+                // 分开存的原因只有一个：备注不能被自动名字洗掉 —— 每次切回来、
+                // 每次配置里没写 name，都会重新算一次 name，合在一个字段里就丢了。
                 entry.put("name", row == null ? guessName(url) : row.optString("name", guessName(url)));
+                entry.put("alias", row == null ? "" : row.optString("alias", ""));
                 entry.put("at", row == null ? 0L : row.optLong("at", 0L));
                 entry.put("active", url.equals(active));
             } catch (Exception ignored) {}
@@ -564,7 +746,12 @@ public final class UserSource {
         return null;
     }
 
-    /** 把一个地址记进清单（已存在就刷新时间戳）。名字优先用配置里的 name，其次从地址猜。 */
+    /**
+     * 把一个地址记进清单（已存在就刷新时间戳）。名字优先用配置里的 name，其次从地址猜。
+     *
+     * **用户写的备注（alias）原样带着走。** 这个函数每次切换、每次添加都会被调一次，
+     * 而它按 url 重建那一行 —— 忘了带 alias 的话，用户改完备注、切一次源，备注就没了。
+     */
     private static void remember(Context context, String url) {
         try {
             JSONObject store = readJson(listFile(context));
@@ -581,6 +768,9 @@ public final class UserSource {
             }
             if (name.length() == 0) name = guessName(url);
 
+            JSONObject row = find(items, url);
+            String alias = row == null ? "" : row.optString("alias", "");
+
             JSONArray next = new JSONArray();
             for (int i = 0; i < items.length(); i++) {
                 JSONObject item = items.optJSONObject(i);
@@ -590,6 +780,7 @@ public final class UserSource {
             JSONObject entry = new JSONObject();
             entry.put("url", url);
             entry.put("name", name);
+            entry.put("alias", alias);
             entry.put("at", System.currentTimeMillis());
             next.put(entry);
 
@@ -601,11 +792,67 @@ public final class UserSource {
     }
 
     /**
+     * 写/清一个源的备注。传空串 = 清掉备注，退回自动取的那个名字。
+     *
+     * 备注只是给人看的一行字，不参与任何判断 —— 源身份（identity()）算的是
+     * 「这个源的 id 会翻到哪儿去」，跟名字无关。别把它接到别的地方去。
+     */
+    private static void note(Context context, String url, String alias) {
+        try {
+            String clean = alias == null ? "" : alias.trim();
+            if (clean.length() > 40) clean = clean.substring(0, 40);   // 一行放得下，别让它撑破布局
+            JSONObject store = readJson(listFile(context));
+            JSONArray items = store == null ? null : store.optJSONArray("saved");
+            JSONArray next = new JSONArray();
+            boolean hit = false;
+            if (items != null) {
+                for (int i = 0; i < items.length(); i++) {
+                    JSONObject item = items.optJSONObject(i);
+                    if (item == null) continue;
+                    if (url.equals(item.optString("url", ""))) {
+                        hit = true;
+                        item.put("alias", clean);
+                    }
+                    next.put(item);
+                }
+            }
+            if (!hit) {
+                // 清单里还没有它（比如当前生效的那个是手改配置弄出来的）：补一行。
+                JSONObject entry = new JSONObject();
+                entry.put("url", url);
+                entry.put("name", guessName(url));
+                entry.put("alias", clean);
+                entry.put("at", System.currentTimeMillis());
+                next.put(entry);
+            }
+            JSONObject out = new JSONObject();
+            out.put("saved", next);
+            writeJson(listFile(context), out);
+            log("源备注：" + (clean.length() == 0 ? "(清空)" : clean));
+        } catch (Exception e) {
+            log("源备注写入失败：" + e);
+        }
+    }
+
+    /**
      * 从清单里划掉一个地址。
      *
      * 如果划掉的正好是当前生效的那个，连 user-source.json 一起删 —— 留着它会让
      * App 下次启动仍然读那份配置，而设置页里的清单已经没有它了，两边对不上。
      * 删完等于回到「没配源」，用户下次打开会看到设置页。
+     *
+     * ── 2026-10-16：缓存也要一起删 ──────────────────────────────────────
+     * 只划清单不删 files/source-cache/<md5>.json 会留一个很难看出来的坑：
+     * 用户把同一个地址再加回来时，`use`/`set` 走的是 applySource 的 preferCache
+     * 分支，**直接命中那份旧缓存，一次网络都不发**（实测 7ms 返回，日志是
+     * 「换源用的是本地缓存，没有等网络」）。而删源重加这个动作，用户做的场合
+     * 十有八九就是「服务器上配置改了，我要它重新读一遍」—— 结果恰恰相反。
+     *
+     * 后台确实会在 300ms 后把缓存刷新成新的（refreshCacheAsync），但那时
+     * Activity 已经建完了，刷新出来的东西没有任何调用方。用户看到的就是
+     * 「删了、重加了、还是老样子」。
+     *
+     * 缓存只是「省一次往返」的优化，源都不要了就没有保留它的理由。
      */
     private static void forget(Context context, String url) {
         try {
@@ -622,6 +869,11 @@ public final class UserSource {
             JSONObject out = new JSONObject();
             out.put("saved", next);
             writeJson(listFile(context), out);
+            File cached = cacheFile(context, url);
+            if (cached.isFile()) {
+                log(cached.delete() ? "源缓存一并清掉 " + cached.getName()
+                        : "源缓存删不掉（下次加回来会命中旧的那份）：" + cached.getName());
+            }
             if (url.equals(activeUrl(context))) {
                 clear(context);
                 log("已删除当前源，回到未配置状态");
@@ -1397,6 +1649,214 @@ public final class UserSource {
         return "";
     }
 
+    // ── 播放器要原生帮忙的两件事 ──────────────────────────────────────
+
+    /**
+     * `__player:` 的分发。两条指令：
+     *
+     *   brightness?value=0.42   0~1 的窗口亮度；-1 表示交回系统
+     *   variants?url=<m3u8>     把主列表里的清晰度档位列出来（页面自己 fetch 不了）
+     */
+    private static JSONObject player(Context context, String body, JSONObject out) {
+        try {
+            String action = body;
+            String query = "";
+            int mark = body.indexOf('?');
+            if (mark >= 0) { action = body.substring(0, mark); query = body.substring(mark + 1); }
+
+            if ("brightness".equals(action)) return brightness(context, param(query, "value"), out);
+            if ("variants".equals(action)) return variants(param(query, "url"), out);
+            return fail(out, "不认识的播放指令：" + action);
+        } catch (Throwable e) {
+            return fail(out, "播放指令失败：" + e.getClass().getSimpleName() + " " + e.getMessage());
+        }
+    }
+
+    /**
+     * 窗口亮度。0~1 是绝对亮度，-1 是「交回系统」，不传值是读当前值。
+     *
+     * 为什么不用 CSS 蒙一层黑：那只能变暗，而用户滑到顶时期待的是**变亮** ——
+     * 系统播放器就是这么做的，靠的是 Window.screenBrightness。
+     *
+     * 必须回主线程：改窗口属性是 View 系统的事，在桥的工作线程上改，
+     * Android 会直接抛（而且抛在用户手指正划着的时候）。
+     *
+     * 读的时候分两层：窗口上没覆盖过（screenBrightness < 0）就退到系统亮度
+     * （0~255 → 0~1）—— 不这样的话，用户第一次上下滑会从我们瞎猜的 50% 起跳，
+     * 屏幕先闪一下。读 Settings.System 不需要权限。
+     */
+    private static JSONObject brightness(Context context, String raw, JSONObject out) throws Exception {
+        MainActivity host = MainActivity.host;
+        if (host == null) return fail(out, "Activity 不在，亮度改不了");
+
+        if (raw.length() == 0) {
+            float current = -1f;
+            boolean system = false;
+            try {
+                android.view.Window window = host.getWindow();
+                if (window != null) current = window.getAttributes().screenBrightness;
+            } catch (Throwable ignored) {}
+            if (current < 0) {
+                system = true;
+                try {
+                    int value = android.provider.Settings.System.getInt(
+                            context.getContentResolver(),
+                            android.provider.Settings.System.SCREEN_BRIGHTNESS, 128);
+                    current = Math.max(MIN_BRIGHTNESS, Math.min(1f, value / 255f));
+                } catch (Throwable e) {
+                    current = 0.5f;                       // 问不出来就当中等亮度，别报错
+                }
+            }
+            out.put("ok", true);
+            out.put("value", current);
+            out.put("system", system);
+            return out;
+        }
+
+        final float value;
+        if ("-1".equals(raw)) {
+            value = -1f;                                   // 交回系统
+        } else {
+            float parsed;
+            try {
+                parsed = Float.parseFloat(raw);
+            } catch (Exception e) {
+                return fail(out, "亮度值看不懂：" + raw);
+            }
+            value = Math.max(MIN_BRIGHTNESS, Math.min(1f, parsed));
+        }
+        new Handler(Looper.getMainLooper()).post(new Runnable() {
+            @Override public void run() {
+                try {
+                    android.view.Window window = host.getWindow();
+                    if (window == null) return;
+                    android.view.WindowManager.LayoutParams attrs = window.getAttributes();
+                    attrs.screenBrightness = value;
+                    window.setAttributes(attrs);
+                } catch (Throwable e) {
+                    log("设置亮度失败：" + e);
+                }
+            }
+        });
+        out.put("ok", true);
+        out.put("value", value);
+        return out;
+    }
+
+    /**
+     * 把主 m3u8 拆成清晰度档位。页面 CSP 的 connect-src 是 'none'，只能在这儿取文本。
+     *
+     * 两种列表都要认：
+     *   · 主列表（有 #EXT-X-STREAM-INF）→ 每一档一行：下一行是它的播放地址（可能是相对路径）
+     *   · 媒体列表（只有 #EXTINF + .ts）→ 没有档位，返回空 items。**这不是错误** ——
+     *     站上本来就只有一路清晰度，前端据此说「这个源只有一路」，而不是假装能选。
+     *
+     * 标签取 RESOLUTION 的宽（1080x608 → 1080P），因为那是 CDN 自己声明的东西；
+     * 另外把 BANDWIDTH 一起放进 note —— 实测有站写 RESOLUTION=1080x608 配
+     * BANDWIDTH=800000，标成 1080P 是它自己写的，我们只负责照抄并把它摊开。
+     */
+    private static JSONObject variants(String url, JSONObject out) throws Exception {
+        if (url.length() == 0) return fail(out, "没有提供播放地址");
+        if (!url.startsWith("https://")) return fail(out, "只认 https 的播放地址");
+        if (url.indexOf(".m3u8") < 0) return fail(out, "不是 m3u8：" + head(url, 60));
+
+        String text = new String(AiiHttp.getRaw(url, null, 12), "UTF-8");
+        JSONArray items = new JSONArray();
+        String[] lines = text.split("\\r?\\n");
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i].trim();
+            if (!line.startsWith("#EXT-X-STREAM-INF:")) continue;
+            String attrs = line.substring("#EXT-X-STREAM-INF:".length());
+            // 地址在**下一行非空非注释**里 —— 中间允许插别的标签，所以往下找。
+            String uri = "";
+            for (int j = i + 1; j < lines.length; j++) {
+                String next = lines[j].trim();
+                if (next.length() == 0 || next.startsWith("#")) continue;
+                uri = next;
+                break;
+            }
+            if (uri.length() == 0) continue;
+
+            String resolution = attr(attrs, "RESOLUTION");
+            String bandwidth = attr(attrs, "BANDWIDTH");
+            String name = qualityLabel(resolution, bandwidth);
+            JSONObject item = new JSONObject();
+            item.put("name", name);
+            item.put("note", qualityNote(resolution, bandwidth));
+            item.put("url", absolute(url, uri));
+            items.put(item);
+        }
+        out.put("ok", true);
+        out.put("items", items);
+        // 打出来：出问题时「服务端到底给了几档」是最先要问的问题。
+        log("清晰度探测 " + head(url, 48) + " → " + items.length() + " 档");
+        return out;
+    }
+
+    /** `RESOLUTION=1920x1080,BANDWIDTH=2000000` 里取一个属性。 */
+    private static String attr(String attrs, String key) {
+        String[] parts = attrs.split(",");
+        for (int i = 0; i < parts.length; i++) {
+            int eq = parts[i].indexOf('=');
+            if (eq < 0) continue;
+            if (key.equalsIgnoreCase(parts[i].substring(0, eq).trim())) {
+                return parts[i].substring(eq + 1).trim().replace("\"", "");
+            }
+        }
+        return "";
+    }
+
+    private static String qualityLabel(String resolution, String bandwidth) {
+        if (resolution.length() > 0) {
+            int x = resolution.toLowerCase().indexOf('x');
+            if (x > 0) {
+                try {
+                    int width = Integer.parseInt(resolution.substring(0, x).trim());
+                    if (width >= 720) return width + "P";
+                    if (width > 0) return width + "宽";
+                } catch (Exception ignored) {}
+            }
+        }
+        if (bandwidth.length() > 0) {
+            try {
+                return Math.round(Integer.parseInt(bandwidth) / 10000f) / 100f + " Mbps";
+            } catch (Exception ignored) {}
+        }
+        return "默认";
+    }
+
+    private static String qualityNote(String resolution, String bandwidth) {
+        StringBuilder sb = new StringBuilder();
+        if (resolution.length() > 0) sb.append(resolution);
+        if (bandwidth.length() > 0) {
+            if (sb.length() > 0) sb.append(" · ");
+            try {
+                sb.append(Math.round(Integer.parseInt(bandwidth) / 1000f)).append(" kbps");
+            } catch (Exception e) {
+                sb.append(bandwidth).append(" bps");
+            }
+        }
+        return sb.toString();
+    }
+
+    /** 相对地址按主列表所在目录展开（实测 `2000k/hls/index.m3u8` 就是这么给的）。 */
+    private static String absolute(String base, String uri) {
+        if (uri.startsWith("http://") || uri.startsWith("https://")) return uri;
+        try {
+            java.net.URI b = new java.net.URI(base);
+            return b.resolve(uri).toString();
+        } catch (Exception e) {
+            int slash = base.lastIndexOf('/');
+            return slash < 0 ? uri : base.substring(0, slash + 1) + uri;
+        }
+    }
+
+    /** 只截前 N 个字符给人看（日志和报错里贴整条地址会把有用的部分挤掉）。 */
+    private static String head(String text, int max) {
+        if (text == null) return "";
+        return text.length() <= max ? text : text.substring(0, max) + "…";
+    }
+
     private static JSONObject fail(JSONObject out, String message) {
         try {
             out.put("ok", false);
@@ -1451,6 +1911,138 @@ public final class UserSource {
     public static void clear(Context context) {
         File target = file(context);
         if (target.isFile() && !target.delete()) log("配置删除失败：" + target);
+    }
+
+    // ── 恢复出厂设置 ──────────────────────────────────────────────────
+
+    /**
+     * 「我的 → 设置 → 恢复出厂设置」的执行体。回来之后这台设备该和刚装完一样。
+     *
+     * ── 为什么登录态不在这里退 ────────────────────────────────────────
+     * 它得由前端先做（api('logout') → AccountService.logout）。因为**退出登录不是
+     * 一件发生在盘上的事**：ParseUser 的当前用户活在内存里，写盘的那份只是它的影子，
+     * 而这里的清盘（连同 cacheDir 里的 ParseKeyValueCache 一起删掉）只处理影子。
+     * 内存那份还在的话，重建出来的 MainActivity 照样从 `ParseUser.getCurrentUser()`
+     * 拿到 objectId、`store.activateUser()` 照样把它当登录用户 —— 界面还是登录态，
+     * 只是片单空了。所以顺序是：前端先退，退干净了再进来清。
+     *
+     * ── 为什么清得掉的和清不掉的都要说出来 ────────────────────────────
+     * 这个动作没有撤销，所以返回体里带上「清了几个 prefs、哪几个删不掉」——
+     * 真机出问题时 logcat 里那句 `已恢复出厂设置` 是唯一能对账的东西。
+     */
+    private static JSONObject factoryReset(Context context, JSONObject out) throws Exception {
+        StringBuilder failed = new StringBuilder();
+
+        // ① 内容源：当前生效那份配置 + 存过的地址清单。
+        clear(context);
+        File listing = listFile(context);
+        if (listing.isFile() && !listing.delete()) failed.append(listing.getName()).append(' ');
+        // 进程不死（重启走的是 Activity.recreate），预热结果和连接池都是 static，
+        // 不作废的话下一条源会拿到上一条源的字节。和 __source:clear 同一个理由。
+        AiiHttp.resetForSourceChange();
+
+        // ② 网络代理。setProxy 同时把两个 OkHttp 客户端置空，下一次请求按直连重建。
+        String proxyProblem = AiiHttp.setProxy("");
+        if (proxyProblem != null) failed.append("proxy ").append(proxyProblem).append(' ');
+
+        // ③ 本机数据：片单、头像索引、DoH 缓存、更新器的记录……（两份例外见
+        //    clearPreferences 的说明：hot-updates 与 content-access 不清）
+        int prefs = clearPreferences(context);
+
+        // ④ 头像文件。按 objectId 命名，退不退出登录都不会被自己的生命周期清掉，
+        //    不删的话换个人登录还能在相册里翻出上一个用户的脸。
+        emptyDir(new File(context.getFilesDir(), "avatars"), failed);
+
+        // ⑤ 缓存目录。封面的解码结果、接口响应缓存、WebView 的 HTTP 缓存，
+        //    以及 ParseKeyValueCache（SDK 把「当前登录用户」写在这里）。
+        emptyDir(context.getCacheDir(), failed);
+
+        // ⑥ WebView 那边的存储。DOM storage 前端自己会清，但 **Cookie 只有这里
+        //    清得掉** —— 页面看得见的那些能靠 document.cookie 删，HttpOnly 的看不见。
+        try {
+            android.webkit.CookieManager.getInstance().removeAllCookies(null);
+            android.webkit.WebStorage.getInstance().deleteAllData();
+        } catch (Throwable e) {
+            failed.append("webview ").append(e).append(' ');
+        }
+
+        String notes = failed.toString().trim();
+        log("已恢复出厂设置：清了 " + prefs + " 份偏好" + (notes.length() == 0 ? "" : "，未删掉 " + notes));
+        out.put("ok", true);
+        out.put("prefs", prefs);
+        out.put("failed", notes);
+        return out;
+    }
+
+    /**
+     * 清掉这个应用的全部 SharedPreferences，返回清了几份。
+     *
+     * ── 为什么不能直接把 shared_prefs/ 目录删了 ─────────────────────────
+     * 那只能删掉盘上那份 XML。SharedPreferences 是**一个名字一个内存实例**，
+     * 进程活着它就在，而且之后任何一次 apply() 都会把内存里那张完整的表重新写回
+     * 文件 —— 删掉的文件会自己长回来，还带着刚清掉的数据。必须走 API 清：
+     * clear() 同时改内存和盘。
+     *
+     * ── 为什么是遍历目录，而不是列一张名字清单 ──────────────────────────
+     * 清单会漏，而且漏了没有任何症状。今天在里面的是 huangguo-data（片单）、
+     * aii-net（代理）、aii-dns（DoH 缓存）、huangguo-avatars（头像索引）、
+     * updates（更新器），明天再加一个就静默漏一个 —— 目录里有什么就清什么，
+     * 名字本身就是唯一真相。
+     *
+     * ── 两个例外，都不是用户数据，清了反而出事 ──────────────────────────
+     *
+     * ① hot-updates —— 它守着一位 `originMigrated`：应用还从 file:// 起源启动的
+     *    年代留下的标志。清掉它，下一次启动会先载 file:///android_asset/app.html、
+     *    跑完那次起源迁移再跳回 appassets —— 用户看到的是「刚恢复完出厂，启动还闪
+     *    一下」，而这一位跟用户数据毫无关系。
+     *
+     * ② content-access —— 成人门槛与私密模式解锁。这个**不能清**，清完当场坏：
+     *    ContentMode 的解锁状态是「内存一份、盘上一份」，清盘只会清掉后面那份，
+     *    而 require() 恰好卡在这个夹角上 —— 内存里 active 还是 huangguo（进程不死），
+     *    盘上 unlocked 已经 false，于是**每一个带 source 的桥指令**都抛
+     *    「内容已切换，请重新打开」，包括设置页那次 __source:get。表现就是：刚恢复
+     *    完出厂，设置源那一屏顶上多一行红字。而它压根不是用户数据 —— 前端每次冷启动
+     *    都会自动 enter-private + confirm-private-age 把两位写回来（密码内置），
+     *    清与不清，用户看到的完全一样。
+     */
+    private static int clearPreferences(Context context) {
+        File[] files = new File(context.getDataDir(), "shared_prefs").listFiles();
+        if (files == null) return 0;
+        int count = 0;
+        for (File file : files) {
+            String name = file.getName();
+            if (!name.endsWith(".xml")) continue;
+            name = name.substring(0, name.length() - 4);
+            // 上面①②那两个例外。
+            if ("hot-updates".equals(name) || "content-access".equals(name)) continue;
+            try {
+                context.getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear().commit();
+                count++;
+            } catch (Throwable e) {
+                log("偏好清空失败 " + name + "：" + e);
+            }
+        }
+        return count;
+    }
+
+    /** 把一个目录里的东西删干净，但保留目录本身 —— WebView 和 Parse 都会自己往里再找。 */
+    private static void emptyDir(File dir, StringBuilder failed) {
+        File[] children = dir == null ? null : dir.listFiles();
+        if (children == null) return;
+        for (File child : children) wipe(child, failed);
+    }
+
+    /**
+     * 递归删。删不掉的记一笔就走，不抛 —— 恢复出厂设置里半途中断，留下的是一台
+     * 「清了一半、还进不去设置页」的设备，比多留一个文件糟得多。
+     */
+    private static void wipe(File target, StringBuilder failed) {
+        if (target == null || !target.exists()) return;
+        if (target.isDirectory()) {
+            File[] children = target.listFiles();
+            if (children != null) for (File child : children) wipe(child, failed);
+        }
+        if (!target.delete()) failed.append(target.getName()).append(' ');
     }
 
     // ── 下载 ──────────────────────────────────────────────────────────
