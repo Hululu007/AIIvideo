@@ -300,10 +300,30 @@
         const code = pick(group, 'code') || '';
         asArray(group.tags).forEach(tag => {
           if (!pick(tag, 'slug')) return;
+          // ── 2026-10-17 修：标签自己带的 group 优先 ────────────────────
+          //
+          // 原代码只认 code → TAG_GROUP_BY_CODE 这一条路，**标签上带的 group
+          // 字段被完全忽略**。于是走适配器的源（它们已经在 Java 侧算好了最终
+          // 组名）只要 code 不在那张表里，所有标签就一起折进 other ——
+          // 而 renderTags 是按组渲染的，落在没有配置的组里就等于不显示。
+          //
+          // hanime1 就是这么踩中的：适配器给了 hanime-attr / hanime-role /
+          // hanime-act 这些它自己的分组，映射表里一个都没有，240 个标签
+          // 全部折进 other，页面一片空白。
+          //
+          // 现在的顺序：标签自己的 group → 组的 code 查表 → other。
+          // 老源（只有 code、标签上没有 group）行为不变。
+          //
+          // ⚠️ 直接读 `tag.group`，**不用 pick()**。pick 是走 web.fields 别名表的，
+          //    而 group 是适配器在 Java 侧算好的**最终值**，不是「可能叫什么」的
+          //    候选名之一 —— 走别名反而要往 fields 里塞一个语义不对的角色，
+          //    而 build.sh 的自检会当场把这种塞法拦下来（它比对的是「代码用到的
+          //    角色」和「fields 里声明的角色」两张表，多一个少一个都报）。
+          const own = tag && typeof tag.group === 'string' ? tag.group : '';
           items.push({
             name: pick(tag, 'tagName') || pick(tag, 'slug'),
             slug: pick(tag, 'slug'),
-            group: TAG_GROUP_BY_CODE[code] || 'other'
+            group: own || TAG_GROUP_BY_CODE[code] || 'other'
           });
         });
       });

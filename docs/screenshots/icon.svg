@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="256" height="256" role="img" aria-label="AIIvideo">
+  <title>AIIvideo</title>
+  <desc>README 用的图标变体：应用图标是「白圆底 + 黑 A」，但白圆底在 GitHub 浅色页面上不可见，
+        只剩一个孤零零的 A，而深色模式下又会变回白圆。这里把圆底换成品牌金 #D69C04 —— 和徽章同色，
+        两种模式下都立得住。A 的字形与 work/shells/brand/aiivideo-icon.svg 完全一致。</desc>
+  <circle cx="54" cy="54" r="54" fill="#d69c04"/>
+  <g fill="#ffffff">
+    <path d="M48.75 29 L59.25 29 L39.5 81 L29 81 Z"/>
+    <path d="M48.75 29 L59.25 29 L79 81 L68.5 81 Z"/>
+    <path d="M36.22 62 L71.78 62 L75.58 72 L32.42 72 Z"/>
+  </g>
+</svg>

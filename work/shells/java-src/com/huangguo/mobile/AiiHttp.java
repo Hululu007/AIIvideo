@@ -178,6 +178,46 @@ public final class AiiHttp {
         if (profile != null && "agedm".equals(profile.rule("adapter")) && url.startsWith("/api/")) {
             return AgedmAdapter.fetch(url, profile);
         }
+        // 第三个适配器（单站 HTML 型）走同一条路。它比前两个更极端：整个站
+        // **没有 JSON 接口**（/api/* 全 404），数据全在 SSR 的 HTML 里，
+        // 播放地址是页面内联的签名直链。放这里的理由和 agedm 一样 ——
+        // 结构重排（HTML → 我们的形状）总得有个地方写代码。
+        //
+        // ⚠️ 那个适配器类**不在仓库里**（目标是成人内容站，代码和内容一起排除了，
+        //    见 .gitignore 末尾）。所以：
+        //      · clone 后编译会在这一行报「找不到符号 Hanime1Adapter」
+        //      · 那是有意的，不是漏提交 —— 删掉这一整个 if 分支即可，
+        //        cms / agedm 两条线完全不受影响
+        //      · 下面那条 stripOrigin 兜底同样只服务于这个分支，但**它的思路是
+        //        通用的**：任何 origin 非空的适配器源都会踩「detail 拼了 origin
+        //        导致分流落空」这个坑，别跟着一起删
+        if (profile != null && "hanime1".equals(profile.rule("adapter")) && url.startsWith("/api/")) {
+            return Hanime1Adapter.fetch(url, profile);
+        }
+        // ── 真机抓到的 bug：详情页 404，而 URL 里带着 origin ─────────────
+        //
+        // 报错长这样：`HTTP 404 @ https://<origin>/api/videos/408707`。
+        // 首页是好的（有卡片、分类栏也对），偏偏详情挂了 —— 因为**两条路不一样**：
+        //
+        //   首页  走 prefetchBody()，那里给适配器加了分支，路径原样进适配器
+        //   详情  走 SiteRepository.detail()，那段 smali 会把**相对路径拼上 origin**
+        //         再交给 AiiHttp.get() —— 于是进来的已经是绝对地址，
+        //         上面几条 startsWith("/api/") 全部落空，请求真的发到了
+        //         <origin>/api/videos/408707（站点上不存在的接口，当然 404）。
+        //
+        // 对 origin 为空的源（cms / agedm 那种）不会暴露，因为拼完还是 /api/...；
+        // **只有 origin 非空的适配器源才踩得到**。所以这条不是某个站的问题，
+        // 是「适配器分流」这套机制本身的洞。
+        //
+        // 修在这里而不是「让配置把 origin 留空」：那些配置多半是自动生成的，
+        // 用户改不了；而且 origin 还有别的用处（封面白名单、别的相对路径）。
+        // 归一化到相对路径再分流，是唯一能同时兜住两条路的地方。
+        if (profile != null && "hanime1".equals(profile.rule("adapter")) && url.startsWith("/api/") == false) {
+            String relative = stripOrigin(url, profile);
+            if (relative != null && relative.startsWith("/api/")) {
+                return Hanime1Adapter.fetch(relative, profile);
+            }
+        }
 
         // 每次请求都记下目标主机。SiteProfile 的 origin 到底有没有被用户配置换掉，
         // 看这一行比往 smali 里插探针可靠 —— 探针写错会把整个类搞成 VerifyError，
@@ -351,6 +391,19 @@ public final class AiiHttp {
         String path = warmPath(profile);
         if (profile != null && "cms".equals(profile.rule("adapter"))) {
             return CmsAdapter.fetch(path, profile);
+        }
+        if (profile != null && "agedm".equals(profile.rule("adapter"))) {
+            return AgedmAdapter.fetch(path, profile);
+        }
+        // 单站 HTML 型适配器的首页预热同理：路径是内部词汇，适配器自己去抓页面
+        // 再抠卡片。
+        //
+        // ⚠️ **只预热首页。** 有些站的播放地址带一次性签名、会过期，预热出来的
+        //    地址等用户真去点的时候可能已经废了 —— 那种地址必须实时取。
+        //    首页没有这个问题（它只是元数据），预热是安全的。
+        //    这条判断对任何源都成立，别按「反正首页都预热」一刀切。
+        if (profile != null && "hanime1".equals(profile.rule("adapter"))) {
+            return Hanime1Adapter.fetch(path, profile);
         }
         // 绝对地址直接用，相对路径才拼 origin —— 和 SiteRepository.detail 那条规矩一致。
         if (path.startsWith("https://")) return fetchUncached(path, profile);
@@ -755,8 +808,38 @@ public final class AiiHttp {
         try { return new java.net.URL(url).getPath(); } catch (Exception e) { return url; }
     }
 
-    private static String originOf(String url) {
-        try {
+    /**
+     * 把「origin + 内部动作路径」还原成内部动作路径（带查询串）。
+     *
+     * 只对**同一个 origin** 的地址动手。别的域名原样返回 null —— 封面图的绝对
+     * 地址、外站接口都从这儿走过去，不该被误伤。
+     *
+     * ── 它补的是哪个洞 ──────────────────────────────────────────────
+     * `SiteRepository.detail()` 那段 smali 会**先把相对路径拼上 origin** 再交给
+     * `AiiHttp.get()`，于是上面那几条适配器分流的 `startsWith("/api/")` 全部落空，
+     * 请求真的发到 `https://<origin>/api/videos/408707` —— 一个站点上不存在的接口。
+     *
+     * 真机症状：首页正常、**详情页报 404 且 URL 里带着 origin**。
+     *
+     * 对 origin 为空的源（cms / agedm 那种）不会暴露，因为拼完还是 `/api/...`；
+     * 只有 origin 非空的适配器源才踩得到。所以这条修复**跟具体站点无关** ——
+     * 它属于「适配器分流」这个机制本身。
+     *
+     * 为什么修在这里而不是「让用户把 origin 留空」：配置多半是自动生成的，
+     * 用户改不了；而且 origin 还有别的用处（封面白名单、将来别的相对路径）。
+     * 归一化到相对路径再分流，是唯一能同时兜住两条路的地方。
+     */
+    private static String stripOrigin(String url, SiteProfile profile) {
+        if (url == null || profile == null) return null;
+        String origin = profile.origin;
+        if (origin == null || origin.length() == 0) return null;
+        if (!url.startsWith(origin)) return null;
+        String rest = url.substring(origin.length());
+        if (rest.length() == 0 || rest.charAt(0) != '/') return null;
+        return rest;
+    }
+
+    private static String originOf(String url) {        try {
             java.net.URL parsed = new java.net.URL(url);
             String port = parsed.getPort() > 0 ? (":" + parsed.getPort()) : "";
             return parsed.getProtocol() + "://" + parsed.getHost() + port;
@@ -934,7 +1017,12 @@ public final class AiiHttp {
         return doh != null && doh.optBoolean("enabled", false);
     }
 
-    private static void log(String message) {
+    /**
+     * 包内可见 —— 适配器也要往这条流里写（比如抓取失败、采集站匹配不上，
+     * 都要留痕）。用同一个 tag 是为了在 logcat 里能按时间顺序对照
+     * 「适配器说了什么」和「HTTP 发了什么」，分成两个 tag 会乱。
+     */
+    static void log(String message) {
         try { android.util.Log.d("AIIvideo", "[http] " + message); } catch (Throwable ignored) {}
     }
 }

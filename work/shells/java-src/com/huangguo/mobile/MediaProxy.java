@@ -52,13 +52,30 @@ public final class MediaProxy {
     /**
      * 要接管的域名（后缀匹配）。
      *
-     * 只有 bilibili 这一族 —— 它是实测会 403 的那个。加新域名之前先量一次，
-     * 确认它真的在 h2 下会挂，别凭感觉往里加。
+     * bilibili 那一族是实测在 h2 下会 403 的。
+     *
+     * 白名单里那个视频 CDN 域（2026-10-16 加）**成因不一样**，别混为一谈：
+     *
+     *   · 它服务器侧完全正常 —— 裸 curl、带 Referer、带 Origin、换 UA，
+     *     五种组合全部 206 video/mp4（在手机上量的，不是本机）。
+     *   · 编码也正常 —— ftyp isom + avc1（H.264），moov 在文件头（faststart），
+     *     是兼容性最好的组合，不是 HEVC 那种 WebView 盲区。
+     *   · 但 WebView 直接拉它 → MediaError 4（SRC_NOT_SUPPORTED），
+     *     而同一台手机上，别的源播 m3u8 是好的。
+     *
+     * 所以它挂的是「WebView 自己发的那个请求」，不是这个地址本身。接过来
+     * 用 OkHttp 发（HTTP/1.1、我们自己的头），是唯一能改的那一层。
+     * 真机日志里修完之后会看到 `[media] 媒体代理 206 http/1.1`。
+     *
+     * ⚠️ 加新域名之前先量一次。判据：**服务器侧正常、只有 WebView 发才挂** ——
+     *    如果服务器侧本身就出错（403 / 404），那接管过来也救不了，
+     *    往里加只会让日志多一层噪音。
      */
     private static final String[] HOSTS = {
             "bilivideo.com",
             "bilivideo.cn",
             "bilibili.com",
+            "hembed.com",
     };
 
     /** 是否由我们接管。不看路径 —— 同一个域下的分片、主播放列表都得走同一条路。 */

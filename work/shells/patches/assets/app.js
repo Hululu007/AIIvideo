@@ -647,9 +647,23 @@ function renderHome() {
 
 function renderTags() {
   const tags = asArray(state.tags?.items);
-  const sections = privateMode()
-    ? (siteUi().tagGroups || [])
-    : [['short', '短剧类型'], ['comic', '漫剧类型']];
+  // ── 2026-10-17 修：非 private 模式原来**不看配置** ──────────────────
+  //
+  // 原代码：
+  //   const sections = privateMode() ? (siteUi().tagGroups || []) : [['short','短剧类型'],['comic','漫剧类型']];
+  //
+  // 而 privateMode() 只对内置的黄果源为 true（contentSource === 'huangguo'）。
+  // 于是**所有用户自带源**都被按死在那一对短剧/漫剧上：配置里写了什么
+  // tagGroups 都没用，标签的 group 只要不是 short/comic 就一个都渲染不出来。
+  //
+  // 症状极具误导性：接口明明拿到了 240 个标签（右上角就写着「240 个标签」），
+  // 页面却是空的，而且不报错 —— 正是站点配置参考里警告过的那种静默失败。
+  //
+  // 现在的顺序：**配置优先**。只有配置里没写 tagGroups 时才退回内置分组，
+  // 这样黄果那套和旧的短剧/漫剧源行为不变。
+  const configured = siteUi().tagGroups || [];
+  const sections = configured.length ? configured
+    : (privateMode() ? [] : [['short', '短剧类型'], ['comic', '漫剧类型']]);
   const groups = sections.map(([id, title]) => {
     const members = tags.filter(tag => tag.group === id);
     if (!members.length) return '';
@@ -659,8 +673,8 @@ function renderTags() {
       return `<button type="button" class="tag-choice ${size}" data-tag-slug="${esc(tag.slug)}" data-tag-name="${esc(name)}">${esc(name)}</button>`;
     }).join('')}</div></section>`;
   }).join('');
-  content.innerHTML = `<div class="tags-page"><div class="tags-heading"><button type="button" data-back="1" aria-label="返回上一页">${icon('back')}</button><h1>全部类型</h1><span>${tags.length} 个${privateMode() ? '标签' : '大类'}</span></div>
-    <p class="tags-intro">${privateMode() ? '点选标签，发现相关作品' : '按短剧、漫剧大类，发现相关作品'}</p>${groups}</div>`;
+  content.innerHTML = `<div class="tags-page"><div class="tags-heading"><button type="button" data-back="1" aria-label="返回上一页">${icon('back')}</button><h1>全部类型</h1><span>${tags.length} 个标签</span></div>
+    <p class="tags-intro">点选标签，发现相关作品</p>${groups}</div>`;
 }
 
 function refreshMissingImages(items) {

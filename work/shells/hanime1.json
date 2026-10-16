@@ -1,0 +1,117 @@
+{
+  "_note": "hanime1.me 源配置（测试沙箱用，不外发）。适配器在 Java 侧：Hanime1Adapter.java。这个站是 Laravel + jQuery 的纯 SSR 站，没有任何 JSON 接口（/api/* 全 404），所以数据全从 HTML 抠、播放地址是页面内联的签名直链。逆向见 docs/2026-10-16-hanime1-逆向.md。",
+  "_status": "2026-10-16 逆向完成并离线回归通过（真实 HTML 上跑适配器同款正则：首页 131 条 / 分类 40 条 / 搜索 59 条 / watch 三档直链全中，直链 Range 请求 206）。Android 真机端到端未做 —— 适配器还没编进 APK。",
+
+  "adapter": "hanime1",
+  "origin": "https://hanime1.me",
+  "doh": { "enabled": false },
+
+  "cover": {
+    "mode": "plain",
+    "_why": "封面和视频同域，都是 vdownload.hembed.com（列表图 /image/thumbnail/{id}l.jpg、大图 {id}h.jpg、分类页 /image/cover/{id}.jpg）。白名单只填这一条 —— 端口不能写进去，SiteProfile.coverUrl() 是精确匹配的硬闸。注意广告位图集 /image/icon/ 也在这个域上，但适配器已经把它们过滤掉了。",
+    "allowedHosts": ["vdownload.hembed.com"],
+    "hostRewrites": {}
+  },
+
+  "web": {
+    "firstPageSize": 24,
+    "pageSize": 40,
+
+    "paths": {
+      "home": "/api/home",
+      "detail": "/api/videos/{id}",
+      "episode": "/api/videos/{id}/play?ep={episode}",
+      "search": "/api/search?q={keyword}&page={page}",
+      "category": "/api/videos?cate_id={cateId}&page={page}&size={size}",
+      "_tag-list_why": "★ 用 tag= 不是 cate_id=。站点那边 genre= 和 tags[]= 是两套东西：cate_id 走 10 个大方向，tag 走标签面板上那 240 个多选框。走错了不报错，只是「点标签出来还是默认列表」，看着像没过滤。",
+      "tag-list": "/api/videos?tag={slug}&page={page}&size={size}",
+      "tags": "/api/tags"
+    },
+
+    "categories": {
+      "_why": "站点自己的 10 个 genre，值是中文原词（它的 URL 里就是中文，没有代码）。cate_id 直接当 genre 查询串用。",
+      "裏番": "裏番",
+      "泡麵番": "泡麵番",
+      "Motion Anime": "Motion Anime",
+      "3DCG": "3DCG",
+      "2.5D": "2.5D",
+      "2D動畫": "2D動畫",
+      "AI生成": "AI生成",
+      "MMD": "MMD",
+      "Cosplay": "Cosplay",
+      "新番預告": "新番預告"
+    },
+
+    "fields": {
+      "_why": "适配器交上来的已经是我们的字段名了，这里只是照规矩列一遍；留空也能跑，因为 Hanime1Adapter 直接产出 id/title/cover/badge/score/tags 这套。",
+      "id": ["id"],
+      "title": ["title"],
+      "cover": ["cover"],
+      "badge": ["badge"],
+      "score": ["score"],
+      "tags": ["tags"]
+    },
+
+    "ui": {
+      "tabs": [
+        { "key": "裏番", "label": "裏番", "icon": "film" },
+        { "key": "泡麵番", "label": "泡麵番", "icon": "sparkle" },
+        { "key": "3DCG", "label": "3DCG", "icon": "grid" },
+        { "key": "2D動畫", "label": "2D動畫", "icon": "tv" },
+        { "key": "more", "label": "更多", "icon": "grid" }
+      ],
+      "categoryIds": {
+        "裏番": ["裏番"],
+        "泡麵番": ["泡麵番"],
+        "3DCG": ["3DCG"],
+        "2D動畫": ["2D動畫"],
+        "more": ["Motion Anime", "2.5D", "AI生成", "MMD", "Cosplay", "新番預告"]
+      },
+      "categoryLabels": {
+        "裏番": ["裏番"],
+        "泡麵番": ["泡麵番"],
+        "3DCG": ["3DCG"],
+        "2D動畫": ["2D動畫"],
+        "more": ["Motion Anime", "2.5D", "AI生成", "MMD", "Cosplay", "新番預告"]
+      },
+      "categoryTitles": {
+        "裏番": "裏番",
+        "泡麵番": "泡麵番",
+        "3DCG": "3DCG",
+        "2D動畫": "2D動畫",
+        "more": "更多分类"
+      },
+      "categoryLeads": {
+        "裏番": "hanime1.me 主分类。",
+        "泡麵番": "短篇。",
+        "3DCG": "3DCG 作品。",
+        "2D動畫": "2D 动画。",
+        "more": "其余分类。"
+      },
+      "_popularTags_why": "从站点那 240 个标签里挑 8 个，每个分区轮一个 —— 不从头截（那样会全是「無碼/AI解碼/中文字幕」这种规格词，看着像一排设置项）。",
+      "popularTags": [
+        ["中文字幕", "中文字幕"],
+        ["巨乳", "巨乳"],
+        ["JK", "JK"],
+        ["純愛", "純愛"],
+        ["NTR", "NTR"],
+        ["校園", "校園"],
+        ["後宮", "後宮"],
+        ["3P", "3P"]
+      ],
+      "publicPopularTags": [],
+
+      "_tagGroups_why": "站点标签面板的 7 个分区，code 必须和 Hanime1Adapter 交上来的 tag.group 一字不差 —— 对不上的组会被前端整组丢掉（不报错，只是页面上少一块）。TAG_SECTIONS 是唯一来源，wrapHanime1() 从它生成这张表。other 要留着：站点改字形时认不出的分区会折进去。",
+      "tagGroups": [
+        ["hanime-attr", "影片属性"],
+        ["relationship", "人物关系"],
+        ["hanime-role", "角色设定"],
+        ["style", "外貌身材"],
+        ["setting", "情境场所"],
+        ["plot", "故事剧情"],
+        ["hanime-act", "性交体位"],
+        ["other", "其他"]
+      ]
+    }
+  }
+}
