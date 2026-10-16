@@ -355,57 +355,66 @@
         page.classList.remove('is-paused');
         if (page === activePage) setChrome(page.closest('.feed'), true);
       });
-      // ── 媒体加载的生命周期，一次性打全 ────────────────────────────────
-      // 「徒然喜欢你」那次拿到的是 MediaError 4（格式不支持），可那条流在 Chrome
-      // 里 loadedmetadata 正常、1920x1080、readyState=4，从手机上 curl 也是
-      // 206 + video/mp4 —— 也就是说**格式没问题**，code=4 是媒体栈在别的地方
-      // 放弃的。光看 code 分不出是哪一步，所以把这几步都记上：
-      //
-      //   loadstart 有没有发     → 没发 = 元素本地就拒了；发了 = 真的去请求了
-      //   stalled / abort         → 请求发出去卡住 / 被中断
-      //   error 时的 currentSrc   → 是不是还有别的 src 掺和
-      //
-      // 只在调试期用：正常播放时这一串会刷屏，所以挂完就摘。
-      ['loadstart', 'loadedmetadata', 'loadeddata', 'canplay', 'progress', 'suspend', 'stalled', 'abort', 'emptied']
-        .forEach(name => video.addEventListener(name, () => {
-          if (name === 'progress') return;                 // 太多了
-          console.log('[video] ' + name + ' networkState=' + video.networkState
-            + ' readyState=' + video.readyState + ' src=' + (video.currentSrc || video.getAttribute('src') || '(空)').slice(0, 70));
-        }, { once: name !== 'progress' && name !== 'suspend' }));
-
       video.addEventListener('error', () => {
         if (video.dataset.ready !== '1') return;
-        // ── 这里原来是「悄悄把地址忘掉就算完」─────────────────────────────
-        // 后果是用户看到一片黑 + 一圈转不停的圈，没有报错、没有重试按钮，连
-        // 「到底哪儿错了」都拿不到。实测「徒然喜欢你」就是这样：链路全通，地址
-        // 在手机上 curl 也是 206 + video/mp4，但 `<video>` 就是不播，而界面上
-        // 一个字都不说 —— 只能靠猜。
+        // ── 这个 error 不一定真 ────────────────────────────────────────
+        // 实测（模拟器 Chrome，和 WebView 同一套 Blink）：给 `preload="none"` 的
+        // <video> 设完 src，**30ms 内先派发一个 code=4，然后照常 loadstart →
+        // loadedmetadata → loadeddata → canplay → play() 成功**。那一下是假的。
         //
-        // 现在把 MediaError 翻成人话摆到台面上，重试按钮照旧能用。
+        // 而这里原来是「一收到 error 就当场判死」：urlForget + 清 ready + 弹错误框。
+        // 于是把一次本来会成功的加载掐掉了 —— 「徒然喜欢你 App 播不了、网页能看」
+        // 就是这么来的：流没问题、网络没问题、编码没问题（在 Chrome 里
+        // loadedmetadata 1920x1080 / readyState=4，从手机上 curl 是 206 + video/mp4）。
+        //
+        // 所以先别下结论。给它 1.2 秒：真错的话那时候仍是 networkState=
+        // NETWORK_NO_SOURCE(3) 且 readyState=0；起来了就什么都不做。
+        const stamp = video.dataset.loadStamp || '';
         const me = video.error;
         const code = me ? me.code : 0;
-        const why = MEDIA_ERROR[code] || (code ? '未知错误' : '原因不明');
-        urlForget(page.dataset.videoId, Number(page.dataset.ep));
-        video.dataset.ready = '';
-        video.dataset.bound = '';
-        page.querySelector('.feed-spinner')?.classList.add('hidden');
-        const box = page.querySelector('.feed-error');
-        if (box) {
-          box.classList.remove('hidden');
-          const label = box.querySelector('.feed-error-text');
-          if (label) {
-            // 把地址的头也带上：有的 CDN 只回一小段就断，光看错误码分不出是
-            // 「这个域名不行」还是「这个地址过期了」。用竖线分隔而不是换行 ——
-            // .feed-error-text 不是 pre，\n 不换行。
-            const head = (video.currentSrc || '').replace(/^https?:\/\//, '').slice(0, 60);
-            label.textContent = '这个视频播不了：' + why + '（MediaError ' + code + '）'
-              + (head ? ' ｜ ' + head + '…' : '');
+        setTimeout(() => {
+          if (video.dataset.ready !== '1') return;              // 期间被 release / 切集了
+          if (video.dataset.loadStamp !== stamp) return;        // 已经换成新的 src 了
+          if (video.networkState !== 3 || video.readyState > 0) {
+            console.log('[video] 收到 error(code=' + code + ') 但流随后正常起来了，忽略');
+            return;
           }
-        }
-        // 同时也送去 logcat。界面是给用户看的，这行是给我看的 ——
-        // 「徒然喜欢你」那次就是没有任何一行日志能告诉我 `<video>` 出了什么事。
-        console.log('[video] error code=' + code + ' (' + why + ') src=' + (video.currentSrc || '').slice(0, 100));
+          const why = MEDIA_ERROR[code] || (code ? '未知错误' : '原因不明');
+          urlForget(page.dataset.videoId, Number(page.dataset.ep));
+          video.dataset.ready = '';
+          video.dataset.bound = '';
+          page.querySelector('.feed-spinner')?.classList.add('hidden');
+          const box = page.querySelector('.feed-error');
+          if (box) {
+            box.classList.remove('hidden');
+            const label = box.querySelector('.feed-error-text');
+            if (label) {
+              // 把地址的头也带上：有的 CDN 只回一小段就断，光看错误码分不出是
+              // 「这个域名不行」还是「这个地址过期了」。用竖线分隔而不是换行 ——
+              // .feed-error-text 不是 pre，\n 不换行。
+              const head = (video.currentSrc || '').replace(/^https?:\/\//, '').slice(0, 60);
+              label.textContent = '这个视频播不了：' + why + '（MediaError ' + code + '）'
+                + (head ? ' ｜ ' + head + '…' : '');
+            }
+          }
+          console.log('[video] error code=' + code + ' (' + why + ') src=' + (video.currentSrc || '').slice(0, 100));
+        }, 1200);
       });
+    }
+
+    /**
+     * 往 <video> 里装一个地址。**所有设 src 的地方都走它。**
+     *
+     * 存在的理由只有一个：盖一个「第几次加载」的戳。错误处理器要判断
+     * 「这个 error 属于哪一次加载」—— 给 `preload="none"` 的元素设完 src 会先
+     * 派发一个假的 code=4（实测 30ms，然后照常播起来），而 1.2 秒后做判断时，
+     * 用户可能已经滑到下一集、元素上换了新的 src。没有戳的话，上一集的假 error
+     * 会被算到下一集头上。
+     */
+    function loadInto(video, url) {
+      video.dataset.loadStamp = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
+      video.src = url;
+      try { video.load(); } catch (error) {}
     }
 
     function bindBar(page) {
@@ -522,8 +531,7 @@
       // 只走 WebView 原生 HLS：媒体请求不带 Origin，CDN 才给正片。
       // hls.js 那条路已删（它的 XHR 必带 Origin，CDN 见之返回 54 秒宣传片），
       // 连带把 CSP 的 connect-src / blob: 一起收回，见 build 说明。
-      video.src = url;
-      video.load();
+      loadInto(video, url);
       bindVideo(page);
       bindBar(page);
       applyRate(page.closest('.feed') || document, selectedRate());
@@ -683,8 +691,7 @@
       const rate = video.playbackRate;
       page.dataset.qualityPicked = url;
       video.dataset.ready = '1';                  // attach() 里那句判断用不到，直接重挂
-      video.src = url;
-      video.load();
+      loadInto(video, url);
       const restore = () => {
         video.removeEventListener('loadedmetadata', restore);
         try { if (at > 0) video.currentTime = at; } catch (error) {}
