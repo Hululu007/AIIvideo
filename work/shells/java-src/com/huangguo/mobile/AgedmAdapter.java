@@ -175,6 +175,16 @@ public final class AgedmAdapter {
         JSONObject video = raw.optJSONObject("video");
         if (video == null) throw new Exception("AGE动漫 里找不到这个 id：" + id);
 
+        // ── player_vip 在**响应顶层**，不在 video 里 ────────────────────────
+        // 而下面缓存的是 video 本身。于是 pickSource / lineOrder 里那句
+        // video.optString("player_vip") 永远拿空串，**站点给的线路优先级从来
+        // 没生效过** —— 一直退化成「按 playlists 的键序取第一个」。
+        //
+        // 不改缓存结构（缓存的就是 video，改动面太大），把这份顺序塞回 video 身上
+        // 带个下划线前缀。它不是站点字段，是我们自己的。
+        video.put("_player_vip", raw.optString("player_vip", ""));
+        video.put("_player_jx", raw.optString("player_jx", ""));
+
         JSONObject out = new JSONObject();
         out.put("id", String.valueOf(video.opt("id")));
         out.put("title", video.optString("name", ""));
@@ -221,10 +231,19 @@ public final class AgedmAdapter {
      * 挑一条线路。优先按 player_vip 给的顺序（站点自己标了「能直连」的那批），
      * 都没有就取第一个。
      */
+    /**
+     * 站点的线路优先级。它在**响应顶层**，detail() 会把它塞进 video 的 `_player_vip`。
+     * 顺手也认一下站点原名，免得旧缓存里那份走岔。
+     */
+    private static String playerVip(JSONObject video) {
+        String v = video.optString("_player_vip", "");
+        return v.length() > 0 ? v : video.optString("player_vip", "");
+    }
+
     private static String pickSource(JSONObject video) {
         JSONObject playlists = video.optJSONObject("playlists");
         if (playlists == null || playlists.length() == 0) return "";
-        String vip = video.optString("player_vip", "");
+        String vip = playerVip(video);
         if (vip.length() > 0) {
             String[] order = vip.split(",");
             for (int i = 0; i < order.length; i++) {
@@ -336,7 +355,7 @@ public final class AgedmAdapter {
      */
     private static String[] lineOrder(JSONObject video, JSONObject playlists) {
         java.util.LinkedHashSet<String> order = new java.util.LinkedHashSet<String>();
-        String vip = video.optString("player_vip", "");
+        String vip = playerVip(video);
         if (vip.length() > 0) {
             String[] parts = vip.split(",");
             for (int i = 0; i < parts.length; i++) {

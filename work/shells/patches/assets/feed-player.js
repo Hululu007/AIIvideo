@@ -355,11 +355,56 @@
         page.classList.remove('is-paused');
         if (page === activePage) setChrome(page.closest('.feed'), true);
       });
+      // ── 媒体加载的生命周期，一次性打全 ────────────────────────────────
+      // 「徒然喜欢你」那次拿到的是 MediaError 4（格式不支持），可那条流在 Chrome
+      // 里 loadedmetadata 正常、1920x1080、readyState=4，从手机上 curl 也是
+      // 206 + video/mp4 —— 也就是说**格式没问题**，code=4 是媒体栈在别的地方
+      // 放弃的。光看 code 分不出是哪一步，所以把这几步都记上：
+      //
+      //   loadstart 有没有发     → 没发 = 元素本地就拒了；发了 = 真的去请求了
+      //   stalled / abort         → 请求发出去卡住 / 被中断
+      //   error 时的 currentSrc   → 是不是还有别的 src 掺和
+      //
+      // 只在调试期用：正常播放时这一串会刷屏，所以挂完就摘。
+      ['loadstart', 'loadedmetadata', 'loadeddata', 'canplay', 'progress', 'suspend', 'stalled', 'abort', 'emptied']
+        .forEach(name => video.addEventListener(name, () => {
+          if (name === 'progress') return;                 // 太多了
+          console.log('[video] ' + name + ' networkState=' + video.networkState
+            + ' readyState=' + video.readyState + ' src=' + (video.currentSrc || video.getAttribute('src') || '(空)').slice(0, 70));
+        }, { once: name !== 'progress' && name !== 'suspend' }));
+
       video.addEventListener('error', () => {
         if (video.dataset.ready !== '1') return;
+        // ── 这里原来是「悄悄把地址忘掉就算完」─────────────────────────────
+        // 后果是用户看到一片黑 + 一圈转不停的圈，没有报错、没有重试按钮，连
+        // 「到底哪儿错了」都拿不到。实测「徒然喜欢你」就是这样：链路全通，地址
+        // 在手机上 curl 也是 206 + video/mp4，但 `<video>` 就是不播，而界面上
+        // 一个字都不说 —— 只能靠猜。
+        //
+        // 现在把 MediaError 翻成人话摆到台面上，重试按钮照旧能用。
+        const me = video.error;
+        const code = me ? me.code : 0;
+        const why = MEDIA_ERROR[code] || (code ? '未知错误' : '原因不明');
         urlForget(page.dataset.videoId, Number(page.dataset.ep));
         video.dataset.ready = '';
         video.dataset.bound = '';
+        page.querySelector('.feed-spinner')?.classList.add('hidden');
+        const box = page.querySelector('.feed-error');
+        if (box) {
+          box.classList.remove('hidden');
+          const label = box.querySelector('.feed-error-text');
+          if (label) {
+            // 把地址的头也带上：有的 CDN 只回一小段就断，光看错误码分不出是
+            // 「这个域名不行」还是「这个地址过期了」。用竖线分隔而不是换行 ——
+            // .feed-error-text 不是 pre，\n 不换行。
+            const head = (video.currentSrc || '').replace(/^https?:\/\//, '').slice(0, 60);
+            label.textContent = '这个视频播不了：' + why + '（MediaError ' + code + '）'
+              + (head ? ' ｜ ' + head + '…' : '');
+          }
+        }
+        // 同时也送去 logcat。界面是给用户看的，这行是给我看的 ——
+        // 「徒然喜欢你」那次就是没有任何一行日志能告诉我 `<video>` 出了什么事。
+        console.log('[video] error code=' + code + ' (' + why + ') src=' + (video.currentSrc || '').slice(0, 100));
       });
     }
 
@@ -407,6 +452,16 @@
 
     // 和 AgedmAdapter.PLAY_MARKER 对齐。改了那边这里也要改。
     const AGEDM_MARKER = 'agedm-wasm:';
+
+    // HTMLMediaElement 的 error.code。写成人话是因为「黑屏 + 一圈转不停的圈」
+    // 什么都说明不了，而 3 和 4 是完全不同的两件事：4 是容器/编码不认识（换一路
+    // 清晰度可能就好了），3 是流本身坏了（换线路）。不写出来就只能靠猜。
+    const MEDIA_ERROR = {
+      1: '加载被中止',
+      2: '网络错误',
+      3: '解码失败，流本身坏了',
+      4: '格式不支持，容器或编码不认识'
+    };
 
     /**
      * 更新转圈下面那行进度文字。空串 = 藏起来。
