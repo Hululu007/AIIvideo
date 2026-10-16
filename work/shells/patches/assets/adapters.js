@@ -263,11 +263,15 @@
     }
 
     function adaptEpisode(raw) {
+      // pick() 按 web.fields 的别名表找。适配器（比如 AGE动漫）直接按原名返回时，
+      // 配置里的别名表可能没有那个字面量，于是取到空 —— 播放地址就这么没了。
+      // 所以每个键都补一层同名字面量兜底。
+      const r = raw || {};
       return {
-        id: String(pick(raw, 'id')),
-        episode: pick(raw, 'episodeNumber'),
-        title: pick(raw, 'title') || '',
-        source: pick(raw, 'source') || '',
+        id: String(pick(r, 'id') || r.id || ''),
+        episode: pick(r, 'episodeNumber') || r.episodeNumber || r.ep_num,
+        title: pick(r, 'title') || r.title || '',
+        source: pick(r, 'source') || r.source || '',
         cover: '',
         nextUrl: ''
       };

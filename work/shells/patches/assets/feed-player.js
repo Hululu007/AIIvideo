@@ -230,7 +230,11 @@
         position: Math.floor((time || 0) * 1000),
         duration: Math.floor(dur * 1000),
         title: page.dataset.title || '',
-        cover: page.dataset.cover || ''
+        cover: page.dataset.cover || '',
+        // 这条记录属于哪个内容源。历史是按 id 索引的，而 id 只在源内部唯一 ——
+        // 不存源，换源之后要么点开报「找不到」，要么撞上同号的另一部片子。
+        //
+        source: window.HG_SOURCE_KEY || ''
       });
       bridgeCall('detail', { id: '__progress:set?payload=' + encodeURIComponent(payload) })
         .catch(() => {});
@@ -377,19 +381,37 @@
       });
     }
 
+    // 和 AgedmAdapter.PLAY_MARKER 对齐。改了那边这里也要改。
+    const AGEDM_MARKER = 'agedm-wasm:';
+
     async function attach(page) {
       const video = page.querySelector('video');
       if (!video || video.dataset.ready === '1') return video;
       const ep = Number(page.dataset.ep);
       let url = urlRecall(page.dataset.videoId, ep);
       let cover = '';
+      let returned = null;          // 只为出错时能把返回体打出来
       if (!url) {
         const info = await api('episode', { id: page.dataset.videoId, episode: ep });
+        returned = info;
         url = info.source || info.url;
         cover = info.cover || '';
+        // AGE动漫 那条线给的是一串密文（Java 侧只负责取，解要跑站点的 wasm），
+        // 解析会花两三秒，期间上面那圈 spinner 就是给这段留的。
+        if (url && url.indexOf(AGEDM_MARKER) === 0) {
+          if (!window.HG_AGEDM_PLAY) throw new Error('播放层没加载（hxm/agedm-play.js）');
+          try {
+            url = await window.HG_AGEDM_PLAY.resolve(url.slice(AGEDM_MARKER.length));
+          } catch (error) {
+            throw new Error('解析失败：' + (error && error.message ? error.message : String(error)));
+          }
+        }
+        // 这里**不能**对「不是 agedm 密文」的情况抛错 —— 除 AGE动漫 之外的每个源
+        // 拿到的都是普通 m3u8，那样的判断会把所有源都毙掉。曾经这么写过一版，
+        // 表现就是「好几个源看不了东西」。
         if (url) urlRemember(page.dataset.videoId, ep, url);
       }
-      if (!url) throw new Error('未取得播放地址');
+      if (!url) throw new Error('未取得播放地址｜返回体：' + JSON.stringify(returned).slice(0, 200));
       video.dataset.ready = '1';
       const poster = cover || page.dataset.cover;
       if (poster && !video.poster) video.poster = poster;

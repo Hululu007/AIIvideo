@@ -41,7 +41,8 @@ OUT_UNSIGNED="cz-mod.apk"
 OUT_ALIGNED="cz-aligned.apk"
 OUT_SIGNED="cz-final.apk"
 
-IGNORE=(--exclude=build --exclude=classes5.dex --exclude=site-web.js --exclude=.DS_Store)   # apktool 产物 + 由 java-src 现编的 dex，都不参与比对
+IGNORE=(--exclude=build --exclude=classes5.dex --exclude=site-web.js --exclude=.DS_Store \
+        --exclude=hxm.wasm.js)   # apktool 产物 + 由 java-src 现编的 dex + 别人的 wasm 转出的 base64
 
 # ---- Java 侧代码 -----------------------------------------------------------
 # SiteRepository.fetch 原来那 289 行 HttpURLConnection 逻辑搬到了 Java（要自定义
@@ -376,7 +377,18 @@ sync_patches() {
 
   for rel in "${changed[@]+"${changed[@]}"}" "${added[@]+"${added[@]}"}"; do
     mkdir -p "$PATCHES/$(dirname "$rel")"
-    cp "$WORK_TREE/$rel" "$PATCHES/$rel"
+    # 新目录（比如 assets/hxm/）会被 diff 整个报出来，得用 -R
+    if [ -d "$WORK_TREE/$rel" ]; then
+      cp -R "$WORK_TREE/$rel" "$PATCHES/$rel"
+    else
+      cp "$WORK_TREE/$rel" "$PATCHES/$rel"
+    fi
+  done
+
+  # diff 的 --exclude 只管比对、不管拷贝 —— 目录被整个端过来时，
+  # 里面那份排除项也跟着进来了（hxm.wasm.js 是别人的 wasm，不进仓库）。
+  for name in classes5.dex site-web.js hxm.wasm.js; do
+    find "$PATCHES" -name "$name" -type f -delete 2>/dev/null || true
   done
   if [ "${#removed[@]}" -gt 0 ]; then
     printf '%s\n' "${removed[@]}" > "$DELETED_LIST"

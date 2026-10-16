@@ -93,6 +93,25 @@ public final class UserSource {
     public static final String PROGRESS_PREFIX = "__progress:";
 
     /**
+     * 播放层解析的 HTTP 出口。`__http:get|post?payload=<urlencode 后的 JSON>`。
+     *
+     * ── 为什么要开这个口子 ────────────────────────────────────────────
+     * 页面 CSP 的 connect-src 是 'none'，网络一律走 Java —— 这是刻意的收紧，
+     * 所以这个出口也按同样的调子收着：只放行 https，且主机必须在下面的白名单里。
+     *
+     * 触发原因是 CORS 而不是 CSP：播放层的解析接口要带 Video-Parse-Sign 那几个
+     * 自定义头，对面的预检响应只回 access-control-allow-origin，没有
+     * access-control-allow-headers，浏览器根本不会把请求发出去。OkHttp 不受同源
+     * 策略管，借这条桥转一手就绕开了。
+     */
+    public static final String HTTP_PREFIX = "__http:";
+
+    private static final String[] HTTP_HOSTS = {
+        "jx.wuzhoupai.com",     // AGE动漫 的播放解析
+        "xcdn.khfed.com",       // 它的播放器资源
+    };
+
+    /**
      * 记一条观看进度，落到 AppStore 里，于是 api('library') 能读到它、
      * 进而被同步到账号后端。
      *
@@ -123,12 +142,114 @@ public final class UserSource {
             AppStore store = host.store();
             if (store == null) return fail(out, "拿不到 AppStore");
 
+            // 打出来：源身份决定了观看历史的过滤，传空的话记录就会变成「谁都算」。
+            log("记进度 " + id + " source=["
+                    + record.optString("source", "<没有这个字段>") + "]");
             store.recordProgress(record);
             out.put("ok", true);
             return out;
         } catch (Throwable e) {
             return fail(out, "记进度失败：" + e.getClass().getSimpleName() + " " + e.getMessage());
         }
+    }
+
+    private static JSONObject http(String body, JSONObject out) {
+        try {
+            String query = body;
+            int mark = body.indexOf('?');
+            if (mark >= 0) query = body.substring(mark + 1);
+            String payload = param(query, "payload");
+            if (payload.length() == 0) return fail(out, "HTTP 指令没有 payload");
+
+            JSONObject req = new JSONObject(payload);
+            String url = req.optString("url", "");
+            if (!url.startsWith("https://")) return fail(out, "只放行 https：" + url);
+            String host = URI.create(url).getHost();
+            boolean allowed = false;
+            for (String h : HTTP_HOSTS) {
+                if (h.equalsIgnoreCase(host)) { allowed = true; break; }
+            }
+            if (!allowed) return fail(out, "主机不在播放层白名单里：" + host);
+
+            java.util.Map<String, String> headers = new java.util.LinkedHashMap<String, String>();
+            JSONObject head = req.optJSONObject("headers");
+            if (head != null) {
+                for (Iterator<String> it = head.keys(); it.hasNext(); ) {
+                    String k = it.next();
+                    headers.put(k, head.optString(k, ""));
+                }
+            }
+
+            byte[] raw = body.startsWith("post")
+                    ? AiiHttp.postFormRaw(url, req.optString("body", ""), headers, 15)
+                    : AiiHttp.getRaw(url, headers, 15);
+
+            out.put("ok", true);
+            out.put("body", new String(raw, "UTF-8"));
+            return out;
+        } catch (Throwable e) {
+            return fail(out, "HTTP 失败：" + e.getClass().getSimpleName() + " " + e.getMessage());
+        }
+    }
+
+    /**
+     * 源身份 —— 这套配置把 `/api/videos/{id}` 翻成哪个地址（把 {id} 那一格挖掉）。
+     *
+     * ── 为什么不能用名字，也不能用配置地址 ──────────────────────────────
+     * 观看历史的条目是 `{id, …}`，而 **id 只在源内部唯一**：红果的 117 和
+     * AGE动漫 的 117 是两部不相干的片子。所以「这条历史能不能在当前源里打开」
+     * 本质上是问「这里的 id 会被翻到哪儿去」。
+     *
+     *   名字     会被人改，而且同一个站可以有两个名字（源列表里就同时有
+     *            agedm-decl 和 www.agedm.io）。用名字的话，改一次名历史全断。
+     *   配置地址 更稳，但同一个站的两份配置地址天然不同 —— 而那两份**确实不是
+     *            同一个源**：agedm-decl 是旧的零代码配置，没有 adapter，
+     *            `/api/videos/{id}` 落到普通路径上根本解不出 id；www.agedm.io
+     *            走 agedm 适配器，翻到 api.agedm.io/v2/detail/。分开是对的。
+     *
+     * 只有「id 往哪儿翻」决定 id 空间。翻到同一个地方 = 同一个空间 = 历史该互通；
+     * 翻到不同地方 = 硬混就是张冠李戴（静默播错片子，比报错糟得多）。
+     *
+     * 返回的串一律以 hgsrc: 开头 —— 版本标记。早期版本存的是「源名字」，没有
+     * 前缀；前端见到没前缀的按老数据处理（当「算」），否则升级之后所有人的
+     * 历史会一次性消失。
+     */
+    private static String identity(JSONObject config) {
+        if (config == null) return "";
+        String adapter = config.optString("adapter", "").trim();
+        String api = config.optString("api", "").trim();
+
+        if ("agedm".equals(adapter)) {
+            String base = api.length() > 0 ? api : "https://api.agedm.io";
+            return "hgsrc:agedm|" + trimSlash(base) + "/v2/detail/";
+        }
+        if ("cms".equals(adapter)) {
+            String cms = api.length() > 0 ? api : config.optString("playback", "").trim();
+            if (cms.length() > 0) return "hgsrc:cms|" + cms;
+        }
+
+        String origin = config.optString("origin", "").trim();
+        if (origin.length() > 0) {
+            JSONObject web = config.optJSONObject("web");
+            JSONObject paths = web == null ? null : web.optJSONObject("paths");
+            String detail = paths == null ? "" : paths.optString("detail", "");
+            return "hgsrc:rest|" + origin + trimId(detail);
+        }
+
+        // 说不出 id 往哪儿翻（配置没配全），就退回配置地址 —— 至少不会和别的源撞上。
+        return "hgsrc:cfg|" + config.optString("__url", "");
+    }
+
+    /** 把路径模板里 `{id}` 那一格挖掉。挖掉之后剩下的就是「id 空间」的边界。 */
+    private static String trimId(String template) {
+        int at = template.indexOf("{id}");
+        return at < 0 ? template : template.substring(0, at) + template.substring(at + 4);
+    }
+
+    private static String trimSlash(String url) {
+        String out = url;
+        while (out.endsWith("/")) out = out.substring(0, out.length() - 1);
+        return out;
     }
 
     public static JSONObject handle(Context context, SiteProfile profile, String command) {
@@ -138,6 +259,10 @@ public final class UserSource {
             // 播放进度上报也借这条桥。见 progress() 上面那段说明。
             if (command.startsWith(PROGRESS_PREFIX)) {
                 return progress(command.substring(PROGRESS_PREFIX.length()).trim(), out);
+            }
+            // 播放层解析的 HTTP 出口，见 HTTP_PREFIX 上面那段。
+            if (command.startsWith(HTTP_PREFIX)) {
+                return http(command.substring(HTTP_PREFIX.length()).trim(), out);
             }
             if (!command.startsWith(PREFIX)) return fail(out, "不是源设置指令");
 
@@ -172,6 +297,7 @@ public final class UserSource {
                 out.put("configured", current != null);
                 out.put("origin", current == null ? "" : current.optString("origin", ""));
                 out.put("url", current == null ? "" : current.optString("__url", ""));
+                out.put("identity", identity(current));
                 return out;
             }
 
@@ -241,6 +367,14 @@ public final class UserSource {
                 out.put("ok", true);
                 out.put("active", listing.optString("active", ""));
                 out.put("items", listing.optJSONArray("saved"));
+                // 当前生效那个源的身份。观看历史靠它判断「这条记录能不能在这个源里打开」。
+                // 算的是**当前配置**而不是列表里那条 —— 用户可能手改过配置文件，
+                // 列表里存的只是「从哪个地址拉的」，配置本身才是真相。见 identity()。
+                String ident = identity(read(context));
+                // 打出来看得见。源身份决定了观看历史能不能互通，出问题时
+                // 「算出来是什么」比「应该是多少」有用得多。
+                log("源身份 " + (ident.length() == 0 ? "(未配源)" : ident));
+                out.put("identity", ident);
                 return out;
             }
 
@@ -1422,11 +1556,46 @@ public final class UserSource {
         // 留空的前提是 home 得是绝对地址，否则首页不知道去哪取 —— 这条必须查，
         // 漏了就是「App 起来但首页永远空白」，用户完全不知道哪里错了。
         String origin = config.optString("origin", "").trim();
-        if (origin.length() == 0) {
+        // 有适配器就豁免：适配器自己拼 URL（agedm 用 api、cms 用 api），
+        // paths 那张表它根本不看 —— agedm.json 就是 origin 空 + 相对路径 + adapter。
+        boolean hasAdapter = config.optString("adapter", "").trim().length() > 0;
+        if (origin.length() == 0 && !hasAdapter) {
             if (!home.startsWith("https://")) {
                 return "缺少 origin（站点入口地址）；要么补上，要么把 web.paths.home 写成 https 绝对地址";
             }
-        } else {
+            // **整张表都要查，不能只查 home。**
+            //
+            // agedm-decl.json 就是只写了 home 的绝对地址、别的没写：校验放行、源能
+            // 切过去、首页也能看，但一点详情就报
+            //   Expected URL scheme 'http' or 'https' but no scheme was found for /api/v…
+            // —— 没有 origin，纯路径拼不出地址。那种错要等用户点开某部片子才出现，
+            // 归因特别难；不如在这一步就拦住，报一句人话。
+            //
+            // ⚠️ 只扫「配置里写了的键」是不够的 —— SiteProfile 会把 site-default.json
+            // 递归合并进来，默认的 paths.detail = /api/videos/{id} 是那么补上的。
+            // agedm-decl.json 就钻了这个空子：它只在 paths 里写了 home/recommend/
+            // newest（都是绝对地址），detail 压根没提，于是扫过去一片干净 ——
+            // 合并之后的 detail 却是条相对路径，一点详情就炸。
+            //
+            // 所以判据是「合并后会不会缺」，不是「配置里写没写」。detail 是必用的
+            // （点任何一部片子都要），它必须被显式覆盖成绝对地址。
+            String detail = paths.optString("detail", "").trim();
+            if (!detail.startsWith("https://")) {
+                return "没有 origin 也没有适配器时，web.paths.detail 必须写成 https 绝对地址"
+                        + "（现在是：" + (detail.length() == 0 ? "没写，会回落到默认的相对路径" : detail) + "）";
+            }
+            // 其余写了的一并查掉。前缀 @ 的是适配器简写（@labels / @playlists），跳过。
+            java.util.Iterator<String> pathNames = paths.keys();
+            while (pathNames.hasNext()) {
+                String key = pathNames.next();
+                String value = paths.optString(key, "").trim();
+                if (value.length() == 0 || value.startsWith("@")) continue;
+                if (!value.startsWith("https://")) {
+                    return "没有 origin 时，web.paths." + key + " 必须写 https 绝对地址（现在是："
+                            + value + "）";
+                }
+            }
+        } else if (origin.length() > 0) {
             try {
                 URI uri = new URI(origin);
                 if (!"https".equals(uri.getScheme())) return "origin 必须是 https 开头";
@@ -1454,6 +1623,7 @@ public final class UserSource {
             Iterator<String> names = shapes.keys();
             while (names.hasNext()) {
                 String action = names.next();
+                if (action.startsWith("_")) continue;             // _why 之类的注释键
                 if ("envelope".equals(action)) continue;          // 信封名，不是动作
                 if (!isAction(action)) {
                     return "web.shapes 里有个不认识的动作用作键：" + action;
@@ -1463,6 +1633,7 @@ public final class UserSource {
                 Iterator<String> shapeKeys = spec.keys();
                 while (shapeKeys.hasNext()) {
                     String shapeKey = shapeKeys.next();
+                    if (shapeKey.startsWith("_")) continue;       // 同上
                     if (!isShapeValue(spec.opt(shapeKey))) {
                         return "web.shapes." + action + "." + shapeKey
                                 + " 既不是取值路径，也不是 {div:[a,b]}";
@@ -1474,6 +1645,7 @@ public final class UserSource {
         Iterator<String> slugs = categories.keys();
         while (slugs.hasNext()) {
             String slug = slugs.next();
+            if (slug.startsWith("_")) continue;   // 自述键
             Object value = categories.opt(slug);
             String text = value == null ? "" : String.valueOf(value).trim();
             if (text.length() == 0 || "0".equals(text)) {

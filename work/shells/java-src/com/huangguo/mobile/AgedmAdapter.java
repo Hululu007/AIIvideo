@@ -24,17 +24,18 @@ import java.util.Map;
  * 而一旦让配置能表达「遍历 + 按位置访问」，它就不再是配置，是一门没有工具链的
  * 语言了。所以这一段留代码。
  *
- * ── 播放：播放地址是加密的，走同名采集源 ────────────────────────────────
- * 站点详情里给的不是 URL，是 `age_xxx` 密文 + 一个 Go/WASM（307KB）的签名解密门
- * （见 docs/2026-10-16-agedm-逆向.md 第四节）。硬啃不值得。
+ * ── 播放：密文交给 JS 侧的 wasm 解 ──────────────────────────────────────
+ * 站点详情里给的不是 URL，是 `age_xxx` 密文，要过一道 Go/WASM 的签名门。
+ * 那道门 2026-10-16 拆完了，链路见 assets/hxm/agedm-play.js 顶部；密码学部分
+ * 直接请对面那个 wasm 当黑盒（密钥抠不出来：全内存横扫 16/24/32 字节都不命中，
+ * 域名只用来查表选密钥）。
  *
- * 但有个现成的绕路：**它那 5 个播放源的代号就是苹果CMS 的采集站标识**
- * （bfzym3u8=暴风、lzm3u8=量子、ffm3u8=非凡、wjm3u8=无尽），AGE动漫 自己也是从
- * 这些站聚合的。同名作品在那些站上是**明文 m3u8**。所以配置里给一个采集站地址，
- * 播放时拿标题去搜、命中就用它的地址。
+ * 所以这里**只把密文交出去**，返回 `agedm-wasm:<token>`，JS 看到前缀就跑解析。
+ * 之所以不在 Java 里解：签名要调用那个 wasm，而 wasm 只有 WebView 能跑。
  *
- * 匹配要求**标题完全一致**（归一化空白之后）—— 宁可报「没找到」，也不要给用户
- * 放错片子。匹配过程打日志，对不上能看见。
+ * 下面 matchFromCms() 那套是上一版的绕路 —— 拿标题去同名苹果CMS 采集站搜明文。
+ * 留着是因为它在 wasm 那条路失手时还能顶一下（对面改了签名就用得上），
+ * 但目前没有调用方。
  *
  * ── 接口形状（2026-10-16 实测，全部裸请求可拉）────────────────────────
  *   /v2/home-list          →  {latest[12], recommend[12], week_list}
@@ -282,7 +283,7 @@ public final class AgedmAdapter {
         }
         if (video == null) throw new Exception("拿不到详情，无法播放：" + id);
 
-        String title = video.optString("name", "");
+        // player_vip 在**响应顶层**，不在 video 里。front 端也是从顶层读的。
         JSONObject playlists = video.optJSONObject("playlists");
         String source = pickSource(video);
         JSONArray eps = (playlists == null || source.length() == 0) ? null : playlists.optJSONArray(source);
@@ -291,22 +292,22 @@ public final class AgedmAdapter {
             throw new Exception("第 " + episode + " 集不存在（共 " + count + " 集）");
         }
         JSONArray pair = eps.optJSONArray(episode - 1);
-        String localName = pair == null ? "" : pair.optString(0, "");
-
-        String cms = profile == null ? "" : profile.rule("playback");
-        if (cms == null || cms.length() == 0) {
-            throw new Exception("AGE动漫 的播放地址是加密的，这个源只能浏览。"
-                    + "想能播的话，在配置里加一个 playback 指向苹果CMS 采集站（同名作品在那儿是明文）");
+        String token = pair == null ? "" : pair.optString(1, "");
+        if (!token.startsWith("age_")) {
+            throw new Exception("这一集没有可解的播放密文（线路 " + source + "）");
         }
 
-        String url = matchFromCms(cms, title, episode);
+        // 真正的解析在 JS 侧：它要跑站点那个 TinyGo wasm 算签名。
+        // 这里只把密文交给它 —— 见 assets/hxm/agedm-play.js。
         JSONObject out = new JSONObject();
-        out.put("id", id);
-        out.put("ep_num", episode);
-        out.put("title", localName.length() == 0 ? ("第 " + episode + " 集") : localName);
-        out.put("video_url", url);
+        out.put("source", PLAY_MARKER + token);
+        out.put("cover", video.optString("cover", ""));
         return out;
     }
+
+    /** JS 侧认这个前缀，拿后面的密文去跑 wasm 解析。 */
+    public static final String PLAY_MARKER = "agedm-wasm:";
+
 
     /**
      * 去苹果CMS 采集站上找同名作品，取第 episode 集的地址。

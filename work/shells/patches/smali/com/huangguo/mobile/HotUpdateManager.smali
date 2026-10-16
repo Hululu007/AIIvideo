@@ -3101,10 +3101,13 @@
     # 改造版收口（原值 connect-src https: + img-src/media-src/default-src 各带 blob:）：
     #   connect-src 回到 'none' —— 全应用无 fetch / XMLHttpRequest / WebSocket / sendBeacon
     #   / EventSource，网络一律走 Java 桥的 HttpURLConnection，不受 CSP 管。
+    #   script-src 加了 'wasm-unsafe-eval' —— AGE动漫 播放层的签名走一个 TinyGo wasm，
+    #   没这个关键字 Chrome 会拒绝 WebAssembly.instantiate。加它只放开 wasm 编译，
+    #   不放宽脚本来源（仍是 'self'）也不放开网络。
     #   去掉三处 blob: —— 只有 hls.js 的 MSE 会造 blob URL，那条路已删。
     #   保留 media-src 的 https:（原生 <video src> 指向国内 HLS）与 img-src 的 data:
     #   （Java 的 cover 动作返回 data:image/jpeg;base64）。
-    const-string v1, "default-src \'self\' data:; script-src \'self\' \'unsafe-inline\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: https:; media-src \'self\' https: data:; connect-src \'none\'; frame-src \'none\'; object-src \'none\'; base-uri \'self\'; form-action \'none\'"
+    const-string v1, "default-src \'self\' data:; script-src \'self\' \'unsafe-inline\' \'wasm-unsafe-eval\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: https:; media-src \'self\' https: data:; connect-src \'none\'; frame-src \'none\'; object-src \'none\'; base-uri \'self\'; form-action \'none\'"
 
     invoke-interface {v14, v0, v1}, Ljava/util/Map;->put(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
 

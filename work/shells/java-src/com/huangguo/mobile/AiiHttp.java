@@ -461,6 +461,51 @@ public final class AiiHttp {
         }
     }
 
+    /**
+     * 带自定义头的朴素 GET。播放层解析要用它取播放页（对面按 User-Agent 分流）。
+     */
+    public static byte[] getRaw(String url, java.util.Map<String, String> headers, int timeoutSeconds) throws Exception {
+        Request.Builder builder = new Request.Builder().url(url).header("Accept-Encoding", "identity");
+        if (headers != null) {
+            for (java.util.Map.Entry<String, String> e : headers.entrySet()) builder.header(e.getKey(), e.getValue());
+        }
+        log("GET " + hostOfUrl(url) + pathOfUrl(url));
+        Response response = plainClient(timeoutSeconds).newCall(builder.build()).execute();
+        try {
+            ResponseBody body = response.body();
+            return body == null ? new byte[0] : body.bytes();
+        } finally {
+            response.close();
+        }
+    }
+
+    /**
+     * 表单体的朴素 POST。
+     *
+     * 播放层的解析接口要带 Video-Parse-Sign / -Time / -Uuid / -Version 这几个自定义头，
+     * 而直连会被浏览器的 CORS 预检拦下 —— 对面只回 access-control-allow-origin，
+     * 没有 access-control-allow-headers，自定义头过不去。OkHttp 不受同源策略管，走这里。
+     */
+    public static byte[] postFormRaw(String url, String formBody,
+                                     java.util.Map<String, String> headers, int timeoutSeconds) throws Exception {
+        okhttp3.RequestBody payload = okhttp3.RequestBody.create(
+                formBody == null ? "" : formBody,
+                okhttp3.MediaType.parse("application/x-www-form-urlencoded; charset=UTF-8"));
+        Request.Builder builder = new Request.Builder().url(url).post(payload).header("Accept-Encoding", "identity");
+        if (headers != null) {
+            for (java.util.Map.Entry<String, String> e : headers.entrySet()) builder.header(e.getKey(), e.getValue());
+        }
+        log("POST " + hostOfUrl(url) + pathOfUrl(url));
+        Response response = plainClient(timeoutSeconds).newCall(builder.build()).execute();
+        try {
+            if (!response.isSuccessful()) throw new IOException("HTTP " + response.code() + " @ " + url);
+            ResponseBody body = response.body();
+            return body == null ? new byte[0] : body.bytes();
+        } finally {
+            response.close();
+        }
+    }
+
     private static OkHttpClient client(SiteProfile profile) {
         final String want = proxyRaw();
         OkHttpClient existing = client;

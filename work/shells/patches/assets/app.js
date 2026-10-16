@@ -31,6 +31,8 @@ function bridgeCall(action, args = {}) {
     catch (error) { callbacks.delete(id); reject(error); }
   });
 }
+// 播放层（hxm/http.js）要用同一条桥。它是本模块作用域里的东西，得显式挂出去。
+window.HG_BRIDGE = bridgeCall;
 // 源相关的桥指令统一入口。__source:* 走的是 detail 那条桥（MainActivity 的 dispatch
 // 是按编号跳的 packed-switch，加动作要同时改两张表 —— 本工程最容易出事的地方），
 // 这里包一层，调用方只管写指令。
@@ -559,7 +561,9 @@ async function changeBanner(targetIndex, direction, automatic = false) {
   finally { bannerChanging = false; scheduleBannerAuto(); }
 }
 function continueWatchingItem() {
-  return asArray(state.library?.progress)[0] || null;
+  // 要在当前源里挑。不挑的话，换源之后首页那张「继续观看」卡片还是上一个源的
+  // 片子，点下去就是「找不到这个 id」—— 和历史列表同一个坑。
+  return asArray(state.library?.progress).find(sameSource) || null;
 }
 function continueWatchingMarkup() {
   const item = continueWatchingItem();
@@ -738,11 +742,16 @@ function updateCategoryFooter() {
   observeCategoryEnd();
 }
 
+// 和 UserSource.identity() 的前缀对齐。改了那边这里也要改。
+const IDENTITY_PREFIX = 'hgsrc:';
+
 function renderLibrary() {
   const data = state.library || { progress: [], bookmarks: [] };
   const query = state.libraryQuery.trim().toLocaleLowerCase();
   const matches = item => String(item.title || '').toLocaleLowerCase().includes(query);
-  const progress = asArray(data.progress).filter(matches);
+  // 不是当前内容源的记录直接不显示 —— 它们的 id 在这个源里没有意义，露出来
+  // 只会让人点进去撞错。记录本身没删，切回那个源还在。
+  const progress = asArray(data.progress).filter(sameSource).filter(matches);
   const bookmarks = asArray(data.bookmarks).filter(matches);
   const historyActive = state.libraryTab === 'history';
   const historyCards = progress.map(item => {
@@ -815,6 +824,28 @@ async function refreshSources() {
   const active = state.sources.find(item => item.active);
   state.sourceName = active ? (active.name || active.url) : '';
   state.sourceCount = state.sources.length;
+  // 挂出去给 feed-player.js 用：上报观看进度时要带上「这条属于哪个源」。
+  //
+  // 存的是**源身份**（Java 侧 UserSource.identity() 算的），不是源名字。
+  // 规则：这套配置把 /api/videos/{id} 翻成哪个地址，把 {id} 挖掉剩下的那串。
+  // 名字会被人改、同一个站还能挂两个名字，靠名字的话改一次名历史就全断；
+  // 而 id 只在源内部唯一，只有「翻到哪儿」才决定了历史能不能互通。
+  window.HG_SOURCE_KEY = listing.identity || '';
+}
+
+// 这条历史记录属不属于当前内容源。
+//
+// 三种情况当「算」，都按当前源显示：
+//   · 记录压根没记来源   —— 这次改造之前的老记录
+//   · 记的不是源身份     —— 早期版本存的是「源名字」，没有 hgsrc: 前缀。
+//                          不加这条，升级之后所有人的历史会一次性消失。
+//   · 当前源身份还没读出来 —— 首屏那几帧
+function sameSource(item) {
+  const mine = window.HG_SOURCE_KEY || '';
+  const theirs = String(item?.source || '');
+  if (!theirs || !mine) return true;
+  if (theirs.indexOf(IDENTITY_PREFIX) !== 0) return true;
+  return theirs === mine;
 }
 
 function goSourceSettings() {
@@ -953,17 +984,22 @@ function renderSkeleton() {
 }
 function renderError(error, retry) {
   if (state.route === 'detail') window.AndroidHost?.setDetailMode?.(false);
+  // 详情页出错时**必须**留条退路。正常详情页顶部有个「返回」按钮，可出错时整屏
+  // 被换成只有「重试」的错误页 —— 那个按钮跟着没了，用户就卡在一屏什么都做不了
+  // 的界面上。最典型的触发：换了内容源之后点观看历史里上一个源的条目，那个 id
+  // 在新源里查不到，详情必失败。
+  const escape = retry === 'detail' ? '<button type="button" data-back="1">返回</button>' : '';
   if (/站点连接失败|站点请求失败|failed to connect|unable to resolve host|unknownhost|connectexception|sockettimeoutexception|timed? out|network is unreachable|connection reset|connection refused|网络|连接失败|无法连接/i.test(error?.message || '')) {
     content.innerHTML = `<div class="error-state error-state--network" role="alert">
       <div class="error-main">
         <svg class="error-icon" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="24" cy="24" r="21"/><path d="m12 24 6-5 6 5 6-5 6 5"/></svg>
         <h1>网络走丢了</h1>
       </div>
-      <div class="error-footer"><p>正在自动重试…也可以点下面的按钮立即重试。</p><button type="button" data-retry="${esc(retry)}">重新尝试</button></div>
+      <div class="error-footer"><p>正在自动重试…也可以点下面的按钮立即重试。</p>${escape}<button type="button" data-retry="${esc(retry)}">重新尝试</button></div>
     </div>`;
     return;
   }
-  content.innerHTML = `<div class="error-state">${esc(error.message || '加载失败，请稍后重试')}<button type="button" data-retry="${esc(retry)}">重试</button></div>`;
+  content.innerHTML = `<div class="error-state">${esc(error.message || '加载失败，请稍后重试')}${escape}<button type="button" data-retry="${esc(retry)}">重试</button></div>`;
 }
 
 function rememberScreen() {
@@ -1839,8 +1875,24 @@ document.addEventListener('click', async event => {
   const historyCard = event.target.closest('[data-history-id]');
   if (historyCard) {
     const id = historyCard.dataset.historyId;
-    if (historyCard.dataset.historyCompleted === 'true') goDetail(id, historyCard);
-    else goDetail(id).then(() => feedFrom(id, Number(historyCard.dataset.historyEpisode || 1)));
+    const episode = Math.max(1, Number(historyCard.dataset.historyEpisode) || 1);
+    const wantsPlay = historyCard.dataset.historyCompleted !== 'true';
+    const source = contentSource;
+    const token = routeToken + 1;
+    // 和 resumeFromHome 走同一条路：**先确认详情真的加载出来了**再决定要不要进
+    // 播放器。goDetail 内部把错误 catch 掉了、照样 resolve，所以原来那句
+    // `goDetail(id).then(() => feedFrom(...))` 在详情失败时也会进播放器 ——
+    // 播放器拿不到地址，又盖在错误页上，两个错误叠一起还退不出来。
+    Promise.resolve(wantsPlay ? goDetail(id) : goDetail(id, historyCard)).then(() => {
+      if (!wantsPlay) return;
+      if (routeToken !== token || contentSource !== source || state.route !== 'detail'
+          || state.detailLoading || String(state.detail?.id) !== id) return;
+      if (episode > asArray(state.detail.episodes).length) {
+        toast('这一集在当前内容源里没有，可能在别的源里', true);
+        return;
+      }
+      feedFrom(id, episode);
+    }).catch(error => toast(error.message || '打开失败，请重试', true));
     return;
   }
   if (event.target.closest('[data-all-tags]')) { goTags(); return; }

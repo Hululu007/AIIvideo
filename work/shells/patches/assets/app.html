@@ -96,6 +96,14 @@
   <script src="feed-player.js"></script>
   <script src="cover.js"></script>
   <script src="adapters.js"></script>
+  <!-- AGE动漫 播放层：wasm 加解密 + 走 Java 桥的 HTTP。顺序不能换 ——
+       hxm-exec 定义 Go，hxm.wasm 提供字节，md5 推导密钥，http 是网络出口，agedm-play 串起来。 -->
+  <script src="hxm/hxm-exec.js"></script>
+  <script src="hxm/hxm.wasm.js"></script>
+  <script src="hxm/md5.js"></script>
+  <script src="hxm/hxm.js"></script>
+  <script src="hxm/http.js"></script>
+  <script src="hxm/agedm-play.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
