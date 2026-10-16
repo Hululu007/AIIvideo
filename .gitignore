@@ -1,0 +1,55 @@
+# ── APK 工作树（70MB+，14000 个文件）──────────────────────────────────
+# cz_repack/ = 原始样本 + patches/，是**推导出来的**，不是源码。
+# clean / verify 走的是 .build/clean-tree/，根本不读它。
+# fast（从工作树打包）要用，但那是本地开发路径。
+#
+# 我们改的每一个文件都在 patches/ 里（24 个文件，716KB），一个不少。
+work/shells/cz_repack/
+
+# ── 其它派生目录 ──────────────────────────────────────────────────────
+# .build 是基准树 + 干净树 + 比对基准，398MB
+work/shells/.build/
+# apktool d 的输出
+work/shells/cz_extract/
+# jadx 反编译产物，各 54MB，随时能重生成
+work/rev_cz/
+work/shells/cz_src/
+
+# ── 构建产物 ──────────────────────────────────────────────────────────
+# 仓库里只放源码，APK 走 GitHub Releases。
+#
+# 两个原因：① 二进制不进 git 历史（每发一版就多 8MB，永远删不掉）；
+# ② APK 里烧着账号服务器的实际地址和 appId，放 Releases 至少是个显式的动作，
+#    而不是「随便 clone 一下就有了」。
+AIIvideo.apk
+/work/shells/cz-final.apk.idsig
+work/shells/cz-aligned.apk
+work/shells/cz-mod.apk
+work/shells/cz-final.apk
+work/chengzi-noads.apk
+
+# ── 第三方原始样本 ────────────────────────────────────────────────────
+# 这是**别人的应用**，不是这个项目的代码，提交上来等于二次分发。
+#
+# 但它是 clean 唯一的输入。想从零重建的话，自己放一份到
+# work/shells/chengzi-v0.3.15.apk（build.sh clean 找不到会明确告诉你）。
+# 不放也能用 —— 只是只有 fast 那条路，没有可复现证明。
+work/shells/chengzi-v0.3.15.apk
+
+# ── 过程中的截图（25MB）───────────────────────────────────────────────
+# README 用的三张在 docs/shots/ 里。
+work/shots/
+
+# ── 账号后端的密钥和数据库 ────────────────────────────────────────────
+# pgdata 里是所有人的口令哈希，.env 里是数据库口令和后端 appId。
+server/account/.env
+server/account/pgdata/
+server/account/backups/
+
+# ── 杂项 ──────────────────────────────────────────────────────────────
+.DS_Store
+__pycache__/
+*.pyc
+
+# 签名中间产物
+*.idsig

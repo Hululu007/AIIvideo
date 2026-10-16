@@ -1,0 +1,50 @@
+# AIIvideo 账号后端：PostgreSQL + Parse 兼容 API。
+#
+# 端口只绑 127.0.0.1：外面进来的一律走 Caddy（它用的是 host 网络，
+# 能直接看到这个回环端口），数据库那 5432 一步都不出 compose 网络。
+#
+# 起：docker compose up -d --build
+# 看：docker compose logs -f api
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: aii
+      POSTGRES_USER: aii
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 没设，先 cp .env.example .env}
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aii -d aii"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # 内存不大（2G），给 Postgres 一个明确的头上限，免得和别的容器抢
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - max_connections=50
+
+  api:
+    build: ./api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://aii:${POSTGRES_PASSWORD}@db:5432/aii
+      PARSE_APP_ID: ${PARSE_APP_ID}
+      PARSE_CLIENT_KEY: ${PARSE_CLIENT_KEY}
+      # 见 main.py 的 PUBLIC_BASE —— 头像 URL 得拼成外网看得见的绝对地址
+      PUBLIC_BASE: ${PUBLIC_BASE}
+    ports:
+      - "127.0.0.1:8090:8090"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8090/healthz')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10

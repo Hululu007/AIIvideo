@@ -1,0 +1,471 @@
+{
+  "_note": "AGE动漫（www.agedm.io / m.agedm.io）。数据层是 api.agedm.io/v2/，未鉴权、无 Cookie、无 Referer 校验，任何 UA 都能拉。字段名、枚举值、响应形状全部按 2026-10-16 真机探测结果写。",
+  "_status": "2026-10-16 真机实测：路径那条拦路虎已经拆了 —— 现在 paths 支持 https 绝对地址，origin 可以留空（设备 7f8f5254 上用一份 origin 为空、home 指向 sslip 绝对地址的配置验证过，首页正常渲染）。所以这份配置现在**只剩两处对不上**：① 响应形状（我们的 data 信封 + featured/latest/cate_rec / items+pagination / episodes[],agedm 给的是 {latest,recommend,week_list} / {total,videos} / video.playlists{}）；② 播放直链（WASM 门）。元数据层的字段、枚举、形状已逐条摸清并复核，见 docs/2026-10-16-agedm-逆向.md。",
+  "adapter": "agedm",
+  "api": "https://api.agedm.io",
+  "cover": {
+    "mode": "plain",
+    "_why": "封面接口一律返回 **百度图床的代理地址**：https://gimg{0-4}.baidu.com/gimg/app=2001&n=0&g=0n&fmt=jpeg&src=<urlencoded 真图>。真图在 cdn.aqdstatic.com:966/age/covers/{id}.jpg。代理那一层没有加密，但多跳一次百度、而且带一串 query。适配器可以顺手把 src= 里的真地址解出来直接用 —— 那样 allowedHosts 只要留 cdn.aqdstatic.com 一个（端口不进 host 白名单）。不去解的话就把下面五个列全。",
+    "allowedHosts": [
+      "gimg0.baidu.com",
+      "gimg1.baidu.com",
+      "gimg2.baidu.com",
+      "gimg3.baidu.com",
+      "gimg4.baidu.com"
+    ],
+    "hostRewrites": {},
+    "realOrigin": "https://cdn.aqdstatic.com:966"
+  },
+  "web": {
+    "firstPageSize": 12,
+    "pageSize": 24,
+    "paths": {
+      "home": "/v2/home-list",
+      "detail": "/v2/detail/{id}",
+      "search": "/v2/search?query={keyword}&page={page}",
+      "category": "/v2/catalog?genre={genre}&label={label}&letter={letter}&year={year}&season={season}&status={status}&resource={resource}&region={region}&order={order}&page={page}&size={size}",
+      "tag-list": "/v2/catalog?label={keyword}&region=all&year=all&order=time&page={page}&size={size}",
+      "tags": "@labels",
+      "episode": "@playlists"
+    },
+    "catalog": {
+      "_why": "目录接口的九个筛选维度。**参数名有坑**：genre 不是「类型」而是「版本」（TV/剧场版/OVA），真正的类型叫 label。值全部是中文原文，不是代码 —— region=日本 有效，region=jp 返回全站。",
+      "params": {
+        "region": {
+          "label": "地区",
+          "values": [
+            "all",
+            "日本",
+            "中国",
+            "欧美"
+          ],
+          "default": "all"
+        },
+        "genre": {
+          "label": "版本",
+          "values": [
+            "all",
+            "TV",
+            "剧场版",
+            "OVA"
+          ],
+          "default": "all"
+        },
+        "letter": {
+          "label": "首字母",
+          "values": [
+            "all",
+            "A",
+            "B",
+            "C",
+            "D",
+            "E",
+            "F",
+            "G",
+            "H",
+            "I",
+            "J",
+            "K",
+            "L",
+            "M",
+            "N",
+            "O",
+            "P",
+            "Q",
+            "R",
+            "S",
+            "T",
+            "U",
+            "V",
+            "W",
+            "X",
+            "Y",
+            "Z"
+          ],
+          "default": "all"
+        },
+        "year": {
+          "label": "年份",
+          "values": [
+            "all",
+            "2026",
+            "2025",
+            "2024",
+            "2023",
+            "2022",
+            "2021",
+            "2020",
+            "2019",
+            "2018",
+            "2017",
+            "2016",
+            "2015",
+            "2014",
+            "2013",
+            "2012",
+            "2011",
+            "2010",
+            "2009",
+            "2008",
+            "2007",
+            "2006",
+            "2005",
+            "2004",
+            "2003",
+            "2002",
+            "2001",
+            "2000"
+          ],
+          "default": "all"
+        },
+        "season": {
+          "label": "季度",
+          "values": [
+            "all",
+            "1",
+            "4",
+            "7",
+            "10"
+          ],
+          "default": "all",
+          "_note": "只有月份数字，没有「月」字。桌面站显示成「1月」，接口收的是 1。"
+        },
+        "status": {
+          "label": "状态",
+          "values": [
+            "all",
+            "连载",
+            "完结",
+            "未播放"
+          ],
+          "default": "all"
+        },
+        "label": {
+          "label": "类型",
+          "values": [
+            "all",
+            "搞笑",
+            "运动",
+            "励志",
+            "热血",
+            "战斗",
+            "竞技",
+            "校园",
+            "青春",
+            "爱情",
+            "恋爱",
+            "冒险",
+            "后宫",
+            "百合",
+            "治愈",
+            "萝莉",
+            "魔法",
+            "悬疑",
+            "推理",
+            "奇幻",
+            "科幻",
+            "游戏",
+            "神魔",
+            "恐怖",
+            "血腥",
+            "机战",
+            "战争",
+            "犯罪",
+            "历史",
+            "社会",
+            "职场",
+            "剧情",
+            "伪娘",
+            "耽美",
+            "童年",
+            "教育",
+            "亲子",
+            "真人",
+            "歌舞",
+            "肉番",
+            "美少女",
+            "轻小说",
+            "吸血鬼",
+            "女性向",
+            "泡面番",
+            "欢乐向"
+          ],
+          "default": "all"
+        },
+        "resource": {
+          "_note": "匹配松且大小写规则不一致：BDRIP 和 bdrip 都认（606），但 AGERIP 认、agerip 不认（0）。AGE-RIP / AGE 这种前缀写法也命中同一批。用字典里给的那两个值，别自己变形。",
+          "label": "资源",
+          "values": [
+            "all",
+            "BDRIP",
+            "AGERIP"
+          ],
+          "default": "all"
+        },
+        "order": {
+          "label": "排序",
+          "values": [
+            "time",
+            "name",
+            "hits"
+          ],
+          "default": "time",
+          "_note": "time=时间，hits=点击量。传中文「点击量」也认，但枚举里给的是 hits。"
+        }
+      },
+      "page": {
+        "size": 24,
+        "maxSize": 100
+      },
+      "response": {
+        "total": "数字（不是字符串）",
+        "videos": "数组，元素见 report 第三节"
+      }
+    },
+    "categories": {
+      "_why": "这个是【对不上】的地方，先留着形状占位。我们的 validate() 要求 categories 的值是正整数 cate_id，而 agedm 的筛选维度全是命名字符串（region=日本&label=搞笑），没有任何数字 id。所以现在的配置校验会直接拒掉这一份。见报告第四节第 1 条。",
+      "_todo": "改成 presets：每个入口一个完整的查询预设，而不是 slug→数字。"
+    },
+    "ui": {
+      "_why": "底部导航按 agedm 自己的筛选维度切，不用它那 47 个类型 —— 类型太多，放进子分类条。",
+      "tabs": [
+        {
+          "key": "new",
+          "label": "新番",
+          "icon": "fire"
+        },
+        {
+          "key": "tv",
+          "label": "TV",
+          "icon": "tv"
+        },
+        {
+          "key": "movie",
+          "label": "剧场版",
+          "icon": "film"
+        },
+        {
+          "key": "ova",
+          "label": "OVA",
+          "icon": "star"
+        },
+        {
+          "key": "rank",
+          "label": "排行",
+          "icon": "grid"
+        }
+      ],
+      "categoryLabels": {
+        "_why": "每个入口下面的子分类条 = 类型（label 参数）。和 categoryIds 一一对应。",
+        "new": [
+          "全部",
+          "搞笑",
+          "热血",
+          "战斗",
+          "奇幻",
+          "恋爱",
+          "日常",
+          "悬疑"
+        ],
+        "tv": [
+          "全部",
+          "搞笑",
+          "热血",
+          "奇幻",
+          "校园",
+          "恋爱",
+          "悬疑",
+          "科幻"
+        ],
+        "movie": [
+          "全部",
+          "奇幻",
+          "恋爱",
+          "冒险",
+          "剧情",
+          "科幻"
+        ],
+        "ova": [
+          "全部",
+          "搞笑",
+          "恋爱",
+          "奇幻",
+          "治愈"
+        ],
+        "rank": [
+          "全部",
+          "热血",
+          "奇幻",
+          "恋爱",
+          "战斗",
+          "搞笑"
+        ]
+      },
+      "categoryTitles": {
+        "new": "本季新番",
+        "tv": "TV 动画",
+        "movie": "剧场版",
+        "ova": "OVA",
+        "rank": "人气排行"
+      },
+      "categoryLeads": {
+        "new": "当季连载中的作品。",
+        "tv": "按电视台播出的常规动画。",
+        "movie": "剧场版与动画电影。",
+        "ova": "OVA 与 OAD。",
+        "rank": "按点击量排。"
+      },
+      "presets": {
+        "_why": "每个入口的查询参数默认值。适配器拿它 + 用户选的子分类拼成 catalog 请求。",
+        "new": {
+          "status": "连载",
+          "year": "2026",
+          "season": "10"
+        },
+        "tv": {
+          "genre": "TV"
+        },
+        "movie": {
+          "genre": "剧场版"
+        },
+        "ova": {
+          "genre": "OVA"
+        },
+        "rank": {
+          "order": "hits"
+        }
+      },
+      "popularTags": [
+        [
+          "搞笑",
+          "搞笑"
+        ],
+        [
+          "热血",
+          "热血"
+        ],
+        [
+          "奇幻",
+          "奇幻"
+        ],
+        [
+          "恋爱",
+          "恋爱"
+        ],
+        [
+          "战斗",
+          "战斗"
+        ],
+        [
+          "校园",
+          "校园"
+        ],
+        [
+          "悬疑",
+          "悬疑"
+        ],
+        [
+          "治愈",
+          "治愈"
+        ]
+      ],
+      "publicPopularTags": [],
+      "tagGroups": [
+        [
+          "cms",
+          "全部分类"
+        ]
+      ]
+    },
+    "fields": {
+      "_why": "两套字段命名并存，而且不一致：目录/搜索用 snake_case（tags_arr / name_original），首页列表用 PascalCase 且是另一套名字（AID / Title / PicSmall / NewTitle / Href），详情把主体包在 video 里。别名能盖住标量，盖不住结构。",
+      "id": [
+        "id",
+        "AID"
+      ],
+      "title": [
+        "name",
+        "Title"
+      ],
+      "cover": [
+        "cover",
+        "PicSmall",
+        "PicUrl"
+      ],
+      "score": [
+        "star"
+      ],
+      "tags": [
+        "tags_arr",
+        "tagsArr",
+        "tags"
+      ],
+      "description": [
+        "intro",
+        "intro_clean"
+      ],
+      "category": [
+        "type"
+      ],
+      "episodeCount": [
+        "uptodate",
+        "NewTitle"
+      ],
+      "badge": [
+        "status"
+      ],
+      "playAt": [
+        "premiere",
+        "time_format_1"
+      ],
+      "episodeNumber": [
+        "ep_num"
+      ]
+    }
+  },
+  "playlists": {
+    "_why": "详情响应里的 video.playlists，key 是采集源标识，值是 [集名, 加密地址] 的数组。这些 key **就是苹果CMS 的采集站代号** —— bfzym3u8=暴风、lzm3u8=量子、ffm3u8=非凡、wjm3u8=无尽。同一个源我们已经在用了，所以播放有绕路，见报告第三节。",
+    "label": {
+      "qiyi": "爱奇艺",
+      "qq": "腾讯",
+      "youku": "优酷",
+      "mgtv": "芒果",
+      "bilibili": "B站",
+      "baba": "巴巴云",
+      "qiqi": "七七云",
+      "sohu": "搜狐",
+      "tt": "TT云",
+      "panda": "熊猫",
+      "pptv": "PPTV",
+      "letv": "乐视",
+      "xigua": "西瓜",
+      "migutv": "咪咕",
+      "my": "蚂蚁云",
+      "wy": "微软云",
+      "baidu": "千度云",
+      "zjm3u8": "自建云",
+      "99m3u8": "九九云",
+      "tkm3u8": "天空",
+      "ffm3u8": "非凡",
+      "bfzym3u8": "暴风",
+      "wjm3u8": "无尽",
+      "hnm3u8": "红牛",
+      "lzm3u8": "计算云",
+      "wolong": "凤雏云",
+      "sdm3u8": "闪电",
+      "kbm3u8": "快播",
+      "bjm3u8": "八戒",
+      "xkm3u8": "想看",
+      "tpm3u8": "淘片"
+    },
+    "vipHint": "player_vip 是「能直连」的源清单，逗号分隔，界面上打 VIP 角标的那几个",
+    "encrypted": true,
+    "encryptedPrefix": "age_",
+    "resolver": {
+      "vip": "https://jx.wuzhoupai.com:8443/vip/?url=",
+      "zj": "https://jx.wuzhoupai.com:8443/m3u8/?url=",
+      "api": "https://jx.wuzhoupai.com:8443/vip/Api.php",
+      "wasm": "https://xcdn.khfed.com:8443/jx/20230723ver/Play/jx.wuzhoupai.com.wasm?v=20260512"
+    }
+  }
+}

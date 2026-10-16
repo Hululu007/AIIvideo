@@ -1,0 +1,30 @@
+version: 3.0.3
+apkFileName: chengzi-v0.3.15.apk
+usesFramework:
+  ids:
+  - 1
+sdkInfo:
+  minSdkVersion: 26
+  targetSdkVersion: 36
+versionInfo:
+  versionCode: 10000
+  versionName: 1.0.0
+resourcesInfo:
+  packageId: 127
+doNotCompress:
+- arsc
+- png
+- META-INF/androidx.annotation_annotation-experimental.version
+- META-INF/androidx.arch.core_core-runtime.version
+- META-INF/androidx.core_core-ktx.version
+- META-INF/androidx.core_core.version
+- META-INF/androidx.customview_customview-poolingcontainer.version
+- META-INF/androidx.customview_customview.version
+- META-INF/androidx.exifinterface_exifinterface.version
+- META-INF/androidx.lifecycle_lifecycle-runtime.version
+- META-INF/androidx.recyclerview_recyclerview.version
+- META-INF/androidx.versionedparcelable_versionedparcelable.version
+- META-INF/androidx.webkit_webkit.version
+- assets/dexopt/baseline.prof
+- assets/dexopt/baseline.profm
+- okhttp3/internal/publicsuffix/publicsuffixes.gz

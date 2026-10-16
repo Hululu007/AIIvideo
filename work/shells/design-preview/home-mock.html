@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=390, initial-scale=1">
+<title>Midnight Marquee — 首页概念稿</title>
+<style>
+  :root{
+    --ink:#14100C;        /* 夜幕：暖黑，不是冷灰黑 */
+    --char:#211A13;       /* 卡片/面板：暖炭色 */
+    --char-2:#2B2219;     /* 浮起的面板：底部 dock */
+    --gold:#E3A530;       /* 主色：霓虹灯泡金 */
+    --gold-bright:#F4C765;
+    --ember:#C84B3A;      /* 副色：霓虹管红，标热门/18+ */
+    --paper:#F1E8D6;      /* 正文色：暖米白，不是纯白 */
+    --smoke:#A39685;      /* 次要文字 */
+    --line:rgba(241,232,214,.12);
+    --serif:"Noto Serif CJK SC","Source Han Serif SC","Songti SC",serif;
+    --sans:"Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:#0a0807}
+  body{font-family:var(--sans);color:var(--paper);width:390px;margin:0 auto}
+  .screen{width:390px;min-height:844px;background:var(--ink);position:relative;overflow:hidden}
+
+  /* ---- 顶栏 ---- */
+  .top{height:60px;display:flex;align-items:center;gap:11px;padding:8px 16px 8px}
+  .avatar{width:34px;height:34px;border-radius:50%;background:var(--char-2);border:1px solid var(--line);flex:none}
+  .search{flex:1;height:38px;border-radius:13px;background:var(--char);border:1px solid var(--line);display:flex;align-items:center;gap:8px;padding:0 12px;color:var(--smoke);font-size:12.5px}
+  .search svg{width:15px;height:15px;flex:none}
+
+  /* ---- 英雄位：片场海报 ---- */
+  .hero{margin:6px 16px 0;border-radius:14px;overflow:hidden;position:relative;height:300px;background:#000}
+  .hero img{width:100%;height:100%;object-fit:cover;object-position:60% 30%;display:block;filter:saturate(1.04) contrast(1.05)}
+  .grain{position:absolute;inset:0;opacity:.16;mix-blend-mode:overlay;pointer-events:none;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+  .hero:after{content:"";position:absolute;inset:0;
+    background:linear-gradient(180deg,rgba(20,16,12,0) 38%,rgba(20,16,12,.55) 66%,rgba(20,16,12,.94) 100%),
+               linear-gradient(90deg,rgba(20,16,12,.55) 0%,rgba(20,16,12,0) 46%)}
+  .flag{position:absolute;left:16px;top:14px;z-index:2;display:inline-flex;align-items:center;gap:5px;color:var(--gold-bright);font-size:11px;font-weight:600;letter-spacing:.02em}
+  .flag i{width:5px;height:5px;border-radius:50%;background:var(--ember)}
+  .hero-copy{position:absolute;left:18px;right:18px;bottom:18px;z-index:2}
+  .hero-copy h2{font-family:var(--serif);font-weight:800;font-size:30px;line-height:1.12;letter-spacing:.01em;margin:0 0 9px;max-width:230px;
+    text-shadow:0 2px 14px rgba(0,0,0,.45)}
+  .hero-copy p{font-size:12px;line-height:1.6;color:rgba(241,232,214,.78);margin:0 0 15px;max-width:230px;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .hero-row{display:flex;align-items:center;gap:10px}
+  .cta{background:var(--gold);color:#241a06;border:0;border-radius:10px;height:38px;padding:0 16px;font-weight:800;font-size:13px;font-family:var(--sans)}
+  .ticket{position:relative;display:inline-flex;align-items:center;gap:4px;height:38px;padding:0 10px 0 12px;background:var(--char);border:1px solid var(--line);color:var(--gold-bright);font-size:12px;font-weight:700;
+    clip-path:polygon(0 0,100% 0,100% 100%,0 100%,0 62%,6px 50%,0 38%)}
+  .ticket b{font-size:14px}
+  .dots{display:flex;justify-content:center;gap:5px;margin:12px 0 2px}
+  .dots i{width:5px;height:5px;border-radius:5px;background:var(--line)}
+  .dots i.on{width:18px;background:var(--gold)}
+
+  /* ---- 分区标题 ---- */
+  .sec{margin:22px 0 12px;padding:0 16px;display:flex;align-items:center;justify-content:space-between}
+  .sec h3{display:flex;align-items:center;gap:8px;margin:0;font-size:17px;font-weight:700;letter-spacing:-.01em}
+  .sec h3:before{content:"";width:3px;height:14px;border-radius:2px;background:var(--gold)}
+  .sec a{color:var(--smoke);font-size:11.5px;font-family:var(--sans)}
+
+  /* ---- 片单 ---- */
+  .shelf{display:grid;grid-template-rows:repeat(2,auto);grid-auto-flow:column;grid-auto-columns:104px;column-gap:10px;row-gap:16px;padding:0 16px 4px;overflow-x:auto}
+  .card{width:104px}
+  .poster{position:relative;height:140px;border-radius:9px;overflow:hidden;background:var(--char)}
+  .poster img{width:100%;height:100%;object-fit:cover;display:block}
+  .score{position:absolute;left:0;bottom:7px;display:inline-flex;align-items:center;gap:3px;height:19px;padding:0 7px 0 8px;background:rgba(20,16,12,.78);color:var(--gold-bright);font-size:10.5px;font-weight:800;backdrop-filter:blur(2px);
+    clip-path:polygon(0 0,100% 0,100% 100%,6px 100%,0 50%)}
+  .card .t{margin-top:7px;font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--paper)}
+  .card .m{margin-top:3px;font-size:10px;color:var(--smoke)}
+
+  /* ---- 底部 dock ---- */
+  .dock{position:absolute;left:14px;right:14px;bottom:14px;height:60px;border-radius:20px;background:var(--char-2);border:1px solid var(--line);
+    display:grid;grid-template-columns:repeat(4,1fr);align-items:center;box-shadow:0 14px 30px rgba(0,0,0,.45)}
+  .dock .it{display:flex;flex-direction:column;align-items:center;gap:4px;color:var(--smoke);font-size:10px}
+  .dock .it svg{width:19px;height:19px}
+  .dock .it.on{color:var(--gold-bright)}
+  .dock .it.on .ic{filter:drop-shadow(0 0 7px rgba(227,165,48,.75))}
+</style>
+</head>
+<body>
+<div class="screen">
+
+  <div class="top">
+    <div class="avatar"></div>
+    <div class="search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 5 5"/></svg>
+      搜索剧名或 #标签
+    </div>
+  </div>
+
+  <div class="hero">
+    <img src="img/hero-still.jpg" alt="">
+    <div class="grain"></div>
+    <div class="flag"><i></i>本周焦点 · 独家精选</div>
+    <div class="hero-copy">
+      <h2>高三爱情故事</h2>
+      <p>2000年前后，B中老师老施离婚后净身出户，与妹妹相依为命……</p>
+      <div class="hero-row">
+        <button class="cta">立即观看</button>
+        <span class="ticket"><b>9.7</b>分</span>
+      </div>
+    </div>
+  </div>
+  <div class="dots"><i></i><i class="on"></i><i></i><i></i><i></i></div>
+
+  <div class="sec"><h3>精选推荐</h3><a>更多 ›</a></div>
+  <div class="shelf">
+    <div class="card"><div class="poster"><img src="img/poster-a.jpg" alt=""><span class="score">9.4</span></div><div class="t">女友帮我操闺蜜</div><div class="m">共 8 集</div></div>
+    <div class="card"><div class="poster"><img src="img/poster-b.jpg" alt=""><span class="score">9.2</span></div><div class="t">长生录</div><div class="m">共 47 集</div></div>
+    <div class="card"><div class="poster"><img src="img/poster-c.jpg" alt=""><span class="score">9.3</span></div><div class="t">美丽新世系统</div><div class="m">共 9 集</div></div>
+    <div class="card"><div class="poster"><img src="img/poster-d.jpg" alt=""><span class="score">9.6</span></div><div class="t">神瞳觉醒 第一季</div><div class="m">共 21 集</div></div>
+    <div class="card"><div class="poster"><img src="img/poster-a.jpg" alt=""><span class="score">8.9</span></div><div class="t">少妇白洁</div><div class="m">共 42 集</div></div>
+    <div class="card"><div class="poster"><img src="img/poster-b.jpg" alt=""><span class="score">9.0</span></div><div class="t">豪门弃少</div><div class="m">共 50 集</div></div>
+    <div class="card"><div class="poster"><img src="img/poster-c.jpg" alt=""><span class="score">8.8</span></div><div class="t">夜市人生</div><div class="m">共 30 集</div></div>
+    <div class="card"><div class="poster"><img src="img/poster-d.jpg" alt=""><span class="score">9.1</span></div><div class="t">回到校园那一年</div><div class="m">共 24 集</div></div>
+  </div>
+
+  <div class="dock">
+    <div class="it on"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"/></svg></span>首页</div>
+    <div class="it"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect x="3" y="5" width="18" height="15" rx="2"/><path d="M3 10h18M8 5l3 5m3-5 3 5"/></svg></span>剧场</div>
+    <div class="it"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="m12 2 1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8zM19 17l.6 1.4L21 19l-1.4.6L19 21l-.6-1.4L17 19l1.4-.6z"/></svg></span>AI</div>
+    <div class="it"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="8" r="3.5"/><path d="M4.5 21c.5-4.3 3-6.5 7.5-6.5s7 2.2 7.5 6.5"/></svg></span>我的</div>
+  </div>
+
+</div>
+</body>
+</html>

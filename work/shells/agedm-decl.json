@@ -1,0 +1,43 @@
+{
+  "_note": "③④ 的验收：**零代码**的一份配置，把 AGE动漫 的首页和「更多」列表拉下来。用的是 https://api.agedm.io/v2/ 那套接口。没写任何适配器。",
+  "origin": "",
+  "doh": { "enabled": false },
+  "cover": {
+    "mode": "plain",
+    "_why": "封面是百度图床代理地址（gimg0-4.baidu.com/gimg/...?src=真图），白名单要精确匹配、不支持通配符，所以五个都列上。",
+    "allowedHosts": ["gimg0.baidu.com", "gimg1.baidu.com", "gimg2.baidu.com", "gimg3.baidu.com", "gimg4.baidu.com"]
+  },
+  "web": {
+    "firstPageSize": 12,
+    "pageSize": 12,
+    "categories": { "all": 1 },
+    "paths": {
+      "home": "https://api.agedm.io/v2/home-list",
+      "recommend": "https://api.agedm.io/v2/catalog?genre=all&label=all&letter=all&year=all&season=all&status=all&resource=all&region=all&order=hits&page={page}&size={size}",
+      "newest": "https://api.agedm.io/v2/catalog?genre=all&label=all&letter=all&year=all&season=all&status=all&resource=all&region=all&order=time&page={page}&size={size}"
+    },
+    "shapes": {
+      "_why": "④ 那一层。agedm 的接口是裸的（没有 data 信封），首页是 {latest, recommend, week_list}，列表是 {total, videos} 且没有页码数 —— 页数得自己算。",
+      "envelope": "",
+      "home": { "featured": "recommend", "latest": "latest" },
+      "list": { "items": "videos", "pages": { "div": ["total", "$pageSize"] } }
+    },
+    "fields": {
+      "_why": "③ 那一层。首页的列表用 AID/Title/PicSmall/NewTitle（PascalCase），目录用 id/name/cover/uptodate（snake_case）——两套名字混在同一张表里，pick 按顺序取第一个有值的，各取各的。",
+      "id": ["AID", "id"],
+      "title": ["Title", "name"],
+      "cover": ["PicSmall", "cover"],
+      "badge": ["NewTitle", "uptodate"],
+      "description": ["intro"],
+      "score": ["star"]
+    },
+    "ui": {
+      "tabs": [{ "key": "all", "label": "全部", "icon": "grid" }],
+      "categoryIds": { "all": ["all"] },
+      "categoryLabels": { "all": ["全部"] },
+      "categoryTitles": { "all": "AGE动漫" },
+      "categoryLeads": { "all": "分类来自 api.agedm.io。" },
+      "popularTags": [], "publicPopularTags": [], "tagGroups": []
+    }
+  }
+}

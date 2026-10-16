@@ -1,0 +1,70 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"PingFang SC, Hiragino Sans GB, Microsoft YaHei, sans-serif","fontSize":"14px","lineColor":"#475569","actorBkg":"#f1f5f9","actorBorder":"#94a3b8","actorTextColor":"#0f172a","signalColor":"#475569","signalTextColor":"#334155","noteBkgColor":"#fef9c3","noteBorderColor":"#ca8a04","noteTextColor":"#713f12"},"sequence":{"actorMargin":44,"messageMargin":32,"noteMargin":10,"width":180}}}%%
+sequenceDiagram
+  autonumber
+
+  participant JS as WebView · JS
+  participant BR as JS 桥
+  participant JV as Java 原生层
+  participant GH as GitHub Releases
+  participant API as cab3f REST API
+  participant IMG as 图片 CDN
+  participant HLS as yd-hls HLS
+
+  Note over JS: 冷启动 —— app.html 与全部 JS 来自 APK 本地资源，不走网络
+  JS->>JS: 加载 appassets.androidplatform.net/assets/app.html
+
+  JV->>GH: GET hot-update.json
+  GH-->>JV: payload + signature
+  JV->>JV: ECDSA 验签，公钥 pin 在 assets<br/>再比 minVersionCode 是否不超过 50
+  JV->>GH: GET resources-r16.zip
+  GH-->>JV: site.json + theme.json + theme/national-day.svg
+  JV-->>JS: window.HotRuntime 得到 revision 16
+
+  Note over JS,API: 内容引导 —— 冷启动直接钉到黄果源
+  JS->>BR: content-status
+  BR->>JV: AppStore
+  BR-->>JS: unlocked false
+  JS->>BR: enter-private，密码 ssgnb
+  JS->>BR: confirm-private-age
+  JS->>JS: contentSource 置为 huangguo
+
+  Note over JS,API: 首屏 —— 一次 /api/home 拉起整个首页
+  JS->>BR: detail，id 传 /api/home
+  BR->>JV: SiteRepository.detail 识别 /api/ 前缀
+  JV->>API: HttpURLConnection GET /api/home<br/>UA 与 Referer 由 SiteProfile 模板拼
+  API-->>JV: JSON 约 12KB
+  JV-->>BR: JSON 字符串
+  BR-->>JS: Promise resolve
+  JS->>JS: 渲染 hero、精选推荐、最近上新
+
+  Note over JS,IMG: 封面是加密图，解密在 Java 里做
+  JS->>BR: cover，url
+  BR->>JV: SiteRepository.coverData
+  JV->>IMG: GET 密文图
+  IMG-->>JV: AES-CBC 密文
+  JV->>JV: 解密后再修 JPEG 头，第 6 字节异或 0x0E
+  JV-->>BR: 回传 data URL，MIME 是 image/jpeg
+  BR-->>JS: 塞进 img.src
+
+  Note over JS,API: 进详情页
+  JS->>BR: detail，id 323
+  JV->>API: GET /api/videos/323
+  API-->>JV: 剧集元数据
+  JV-->>JS: 渲染详情
+
+  Note over JS,HLS: 播放 —— 唯一一条从 WebView 直接出去的流量
+  JS->>BR: episode，id 323，ep 1
+  BR->>JV: detail，id 传 /api/videos/323/play?ep=1
+  JV->>API: GET /api/videos/323/play?ep=1
+  API-->>JV: video_url，指向 yd-hls 的 m3u8，带 auth_key
+  JV-->>JS: video_url
+  JS->>HLS: video.src 直接赋 m3u8<br/>媒体请求不经桥，也不带 Origin
+  HLS-->>JS: m3u8 播放列表
+  HLS-->>JS: TS 分片流，硬件解码走 c2.qti.avc.decoder
+  JS->>BR: episode，ep 2
+  Note right of JS: 相邻集预加载
+
+  JS->>BR: hot-ready，回传 revision 与 bootId
+  Note over JV: 回执给 HotUpdateManager
+
+  Note over JS,API: 失败时不回退 HTML 抓取 —— 那条路要走被污染的域名，40 秒起步<br/>改为页面错误态，按 2s / 5s / 12s 退避重试
