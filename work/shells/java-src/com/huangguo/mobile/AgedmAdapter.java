@@ -302,7 +302,56 @@ public final class AgedmAdapter {
         JSONObject out = new JSONObject();
         out.put("source", PLAY_MARKER + token);
         out.put("cover", video.optString("cover", ""));
+
+        // ── 2026-10-16：把**所有**线路一起交出去 ───────────────────────────
+        // 以前只给首选那条，解析失败就整部片播不了。实测「萝球社！OAD」只有一条
+        // `tt` 线路，那条回 Code=9，于是这部剧在 App 里彻底没救 —— 而别的片
+        // 多数有 5 条线路（xigua / ffm3u8 / bfzym3u8 / wjm3u8 / lzm3u8）。
+        //
+        // 线路之间是**独立**的：一条服务端没受理，不代表下一条也不行。所以顺序
+        // 交给 JS 侧一条条试，谁先出 m3u8 就用谁。这里只搬 [名字, 密文] 两格 ——
+        // 它要在桥上走一趟，别塞用不到的东西。
+        JSONArray lines = new JSONArray();
+        String[] order = lineOrder(video, playlists);
+        for (int i = 0; i < order.length; i++) {
+            JSONArray list = playlists.optJSONArray(order[i]);
+            if (list == null || episode > list.length()) continue;
+            JSONArray p = list.optJSONArray(episode - 1);
+            String t = p == null ? "" : p.optString(1, "");
+            if (!t.startsWith("age_")) continue;
+            JSONArray one = new JSONArray();
+            one.put(order[i]);
+            one.put(t);
+            lines.put(one);
+        }
+        out.put("lines", lines);
         return out;
+    }
+
+    /**
+     * 线路的尝试顺序：`player_vip` 里那串优先，剩下的按 playlists 自己的键序接在后面。
+     *
+     * 以前的 pickSource 只返回**第一条**；现在要一条条试，所以顺序得整条列出来。
+     * 站点给的 player_vip 是它自己认为的好坏次序，我们照抄，不自己排。
+     */
+    private static String[] lineOrder(JSONObject video, JSONObject playlists) {
+        java.util.LinkedHashSet<String> order = new java.util.LinkedHashSet<String>();
+        String vip = video.optString("player_vip", "");
+        if (vip.length() > 0) {
+            String[] parts = vip.split(",");
+            for (int i = 0; i < parts.length; i++) {
+                String key = parts[i].trim();
+                if (key.length() > 0 && playlists.optJSONArray(key) != null) order.add(key);
+            }
+        }
+        if (playlists != null) {
+            Iterator<String> keys = playlists.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                if (playlists.optJSONArray(key) != null) order.add(key);
+            }
+        }
+        return order.toArray(new String[0]);
     }
 
     /** JS 侧认这个前缀，拿后面的密文去跑 wasm 解析。 */

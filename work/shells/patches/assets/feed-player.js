@@ -408,6 +408,20 @@
     // 和 AgedmAdapter.PLAY_MARKER 对齐。改了那边这里也要改。
     const AGEDM_MARKER = 'agedm-wasm:';
 
+    /**
+     * 更新转圈下面那行进度文字。空串 = 藏起来。
+     *
+     * 为什么要有它：AGE动漫 的解析要跑站点那个 307 KB 的 wasm、还要一条条试线路，
+     * 这十几秒里界面上如果只有一圈转不停的 spinner，用户没法分辨是在干活还是卡死了。
+     * 有了这行字，「取播放页… 2/6」和「线路 ffm3u8（3/5）」自己就把话说清楚了。
+     */
+    function setSpinText(page, text) {
+      const el = page.querySelector('.feed-spinner-text');
+      if (!el) return;
+      if (text) { el.textContent = text; el.classList.remove('hidden'); }
+      else { el.textContent = ''; el.classList.add('hidden'); }
+    }
+
     async function attach(page) {
       const video = page.querySelector('video');
       if (!video || video.dataset.ready === '1') return video;
@@ -421,13 +435,24 @@
         url = info.source || info.url;
         cover = info.cover || '';
         // AGE动漫 那条线给的是一串密文（Java 侧只负责取，解要跑站点的 wasm），
-        // 解析会花两三秒，期间上面那圈 spinner 就是给这段留的。
+        // 解析要跑 wasm、还要一条条试线路，最长能到十几秒 —— 期间那圈 spinner
+        // 和下面那行文字就是给这段留的。
         if (url && url.indexOf(AGEDM_MARKER) === 0) {
           if (!window.HG_AGEDM_PLAY) throw new Error('播放层没加载（hxm/agedm-play.js）');
+          const step = text => setSpinText(page, text);
+          setSpinText(page, '解析播放地址…');
           try {
-            url = await window.HG_AGEDM_PLAY.resolve(url.slice(AGEDM_MARKER.length));
+            // lines 是 Java 侧按 player_vip 排好序的全部线路。用它一条条试 ——
+            // 以前只试第一条，第一条挂了后面几条从没被碰过。
+            // 拿不到 lines（旧版 Java 侧）就退回单条，行为不变。
+            const lines = Array.isArray(info.lines) ? info.lines : null;
+            url = lines && lines.length
+              ? await window.HG_AGEDM_PLAY.resolveAny(lines, step)
+              : await window.HG_AGEDM_PLAY.resolve(url.slice(AGEDM_MARKER.length), step);
           } catch (error) {
             throw new Error('解析失败：' + (error && error.message ? error.message : String(error)));
+          } finally {
+            setSpinText(page, '');
           }
         }
         // 这里**不能**对「不是 agedm 密文」的情况抛错 —— 除 AGE动漫 之外的每个源
@@ -651,6 +676,7 @@
               <div class="feed-stage">
                 <video playsinline webkit-playsinline preload="none"></video>
                 <div class="feed-spinner"></div>
+                <b class="feed-spinner-text hidden"></b>
                 <div class="feed-error hidden"><span class="feed-error-text"></span><button type="button" class="feed-retry">重试</button></div>
                 <div class="feed-speed">2×</div>
                 <div class="feed-seek"><b class="feed-seek-delta">快进 0 秒</b><span class="feed-seek-clock">0:00 / 0:00</span></div>

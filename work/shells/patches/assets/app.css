@@ -137,6 +137,12 @@ html[data-theme=dark] .continue-card .continue-action{background:#302a1e;border-
 /* spinner / error 现在挂在 .feed-stage 下，舞台不再是 flex 容器，这里显式居中。 */
 .feed-spinner{position:absolute;top:50%;left:50%;width:34px;height:34px;margin:-17px 0 0 -17px;box-sizing:border-box;border:3px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:feed-spin .8s linear infinite}
 .feed-spinner.hidden{display:none}
+/* 解析加密播放地址时的进度文字。AGE动漫 那条链要跑 wasm、要一条条试线路，最长能到
+   十几秒 —— 只有一圈转不停的 spinner 时，用户分不清是在干活还是卡死了。
+   文案由 feed-player.js 逐步更新（「取播放页… 2/6」「线路 ffm3u8（3/5）」）。 */
+.feed-spinner-text{position:absolute;top:calc(50% + 30px);left:0;right:0;padding:0 24px;box-sizing:border-box;
+  color:rgba(255,255,255,.72);font-size:12px;font-weight:600;text-align:center;pointer-events:none}
+.feed-spinner-text.hidden{display:none}
 .feed-error{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:12px;width:100%;padding:0 24px;box-sizing:border-box;color:#fff;font-size:14px;line-height:1.5;text-align:center}
 .feed-error.hidden{display:none}
 .feed-error button{min-height:40px;padding:0 18px;border:1px solid rgba(255,255,255,.4);border-radius:20px;background:rgba(255,255,255,.12);color:#fff;font:inherit}
