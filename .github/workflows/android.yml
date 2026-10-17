@@ -1,0 +1,80 @@
+# AIIvideo —— 构建与产物检查
+#
+# 这个 workflow 只做三件事：编译、出 APK、断言 APK 内容。
+# 不跑真机测试（GitHub 的 runner 没有 arm64 设备，也没有 libvlc 需要的环境）。
+#
+# 版本号来自 work/android/app/build.gradle.kts 的 versionCode/versionName，
+# 改了那里才会产出新版本；这个文件不需要跟着改。
+
+name: android
+
+on:
+  push:
+    paths:
+      - 'work/android/**'
+      - '.github/workflows/android.yml'
+  pull_request:
+    paths:
+      - 'work/android/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: work/android
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 装 platform 36（libvlc 3.7.7 要求 compileSdk >= 36）
+        run: sdkmanager "platforms;android-36" "build-tools;34.0.0"
+
+      - name: 缓存 Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('work/android/**/*.gradle.kts', 'work/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
+      - name: 写 local.properties
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+
+      - name: 编译
+        run: ./gradlew :app:compileDebugJavaWithJavac :app:mergeDebugAssets
+
+      - name: 单元测试（42 个用例）
+        run: ./gradlew :app:testDebugUnitTest
+
+      - name: 汇总测试结果
+        if: always()
+        run: python3 scripts/test-summary.py
+
+      - name: 构建 release（无签名，只验能否出包）
+        run: ./gradlew :app:assembleRelease
+
+      - name: 断言 APK 内容
+        run: |
+          apk=$(find app/build/outputs/apk/release -name '*.apk' | head -1)
+          echo "APK: $apk"
+          python3 scripts/check-apk.py "$apk"
+
+      - name: 上传产物（仅手动触发时）
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: aiivideo-release
+          path: work/android/app/build/outputs/apk/release/*.apk
+          retention-days: 7

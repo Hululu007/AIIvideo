@@ -58,4 +58,19 @@
 - 应用外壳基于一个已有的安卓应用重打包改造，改造部分全部以补丁集形式维护。
 - 「壳 + 自带源」这个交互范式来自 [TVBox](https://github.com/o0HalfLife0o/TVBoxOSC) 一系。
 
-构建、目录结构与真机调试见 [开发说明](docs/开发说明.md)。
+## 构建
+
+源码在 [`work/android/`](work/android/)（Gradle 工程，不是 apktool 重打包）。
+
+```bash
+cd work/android
+./scripts/build.sh verify    # 清空重建 + 42 个单测 + 断言 APK
+./scripts/build.sh install   # 构建 → 装真机 → 冷启动 → 截图
+```
+
+需要 JDK 17 和 Android SDK 36。签名配置见
+[`keystore.properties.example`](work/android/keystore.properties.example)（密钥不入库）。
+
+架构说明、桥指令清单、测试与踩过的坑见 [`work/android/README.md`](work/android/README.md)；
+业务与协议层面（账号后端、播放器、热更通道）见 [开发说明](docs/开发说明.md)
+—— 注意那篇的「发版清单」「目录结构」等节描述的是旧链路，开头有说明。
