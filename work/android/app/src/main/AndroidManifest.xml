@@ -8,7 +8,7 @@
 
     <application
         android:allowBackup="false"
-        android:extractNativeLibs="false"
+        android:extractNativeLibs="true"
         android:icon="@mipmap/ic_launcher"
         android:label="AIIvideo"
         android:name="com.huangguo.mobile.HuangGuoApp"

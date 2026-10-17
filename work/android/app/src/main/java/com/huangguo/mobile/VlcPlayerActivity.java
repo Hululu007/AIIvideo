@@ -168,11 +168,20 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     /**
      * 这台设备上到底能不能用内置播放器。
      *
-     * 不能只查 nativeLibraryDir 里有没有 libvlc.so —— 本包是
-     * android:extractNativeLibs="false"，so 不解压到磁盘，那个目录永远是空的，
-     * 链接器直接从 APK 里 mmap。所以真正可靠的判据是「试着加载一次」：
-     * LibVLC.loadLibraries() 在 so 缺失/ABI 不匹配时抛 UnsatisfiedLinkError，
-     * 拿到就算能用。
+     * 判据是「试着加载一次」：LibVLC.loadLibraries() 在 so 缺失/ABI 不匹配时抛
+     * UnsatisfiedLinkError，拿到就算能用。
+     *
+     * **不要改成查 nativeLibraryDir 里有没有 libvlc.so。** 那个目录的内容取决于
+     * manifest 的 android:extractNativeLibs，两种取值都出现过：
+     *
+     *   "false"（1.0.23 及以前）so 留在 APK 里，链接器直接 mmap，目录永远是空的
+     *   "true" （1.0.24 起）   安装时解压，目录里才有实体文件
+     *
+     * 也就是说「目录非空」只在当前配置下成立，换个配置就静默判错（表现为播放器
+     * 起不来、页面退回网页播放器）。试加载在两种配置下都对。
+     *
+     * 为什么从 false 换成 true：下载体积 56.0 → 26.2 MB（libvlc.so 能 deflate 了），
+     * 代价是多占 23MB 磁盘。真机实测冷启动无可测差异，播放路径完全等价。
      *
      * 结果缓存住，理由见上面那句 45MB。
      */

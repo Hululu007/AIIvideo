@@ -24,6 +24,73 @@
 
 ---
 
+## 原生库集成 —— 已验证通过（2026-10-17）
+
+> ⚠️ **2026-10-18 更新：本节描述的是旧链路（apktool 重打包），已经不存在了。**
+> 项目已改成 Gradle 正面工程（`work/android/`），塞 .so 只需放 `jniLibs/` 或引 AAR，
+> 下面那套「doNotCompress + zipalign -p 4」的手工配方作废。
+>
+> 结论层面**唯一还有用的**是那句「传递依赖要自己捆」——但它也只对 `extractNativeLibs="false"`
+> 成立。现在配置是 `"true"`（安装时解压），系统库之外的依赖照样得捆，`libc++_shared.so`
+> 仍要跟 `libvlc.so` 一起进包（libvlc 那个 9MB 就是这么来的）。
+>
+> 代理核心的体积实测见 `docs/开发说明.md` 的「so 打包方式」一节。
+
+要决定的是「App 能不能内置一个代理核心（mihomo / Xray）」。前置问题是构建层：
+这个项目是 apktool 重打包、没有 Gradle、从来没塞过 .so，而 manifest 里写着
+`android:extractNativeLibs="false"` —— 那要求 .so **不压缩 + 4KB 页对齐**。
+这条不通，后面所有讨论都白搭。
+
+**结论：通了。** 五项检查全过：
+
+| 检查 | 结果 |
+|---|---|
+| apktool 导入 `lib/` | ✅ 构建日志出现 `I: Importing lib...` |
+| .so 落位 | ✅ `lib/arm64-v8a/libX.so` |
+| 不压缩 | ✅ `unzip -v` 显示 **Stored, 0%** |
+| 4KB 页对齐 | ✅ offset 6918144 = 1689×4096；`zipalign -c -p 4` 通过 |
+| 真加载 | ✅ 真机 `System.loadLibrary()` 成功，日志「原生库探针 OK」 |
+
+### 唯一一个坑：传递依赖要自己捆
+
+第一次拿 `/system/lib64/liblog.so` 当载荷，`dlopen` **找到了文件但失败**：
+
+```
+dlopen failed: library "libc++.so" not found: needed by libtestprobe.so
+```
+
+**这条错误反过来证明打包是对的** —— 它已经成功打开 APK 内的库了，失败发生在之后
+的依赖解析。系统的 `libc++.so` 不暴露给 App 命名空间。
+
+把 `libc++.so` 一起放进 `lib/arm64-v8a/` 就过了。所以接真核心时，**先查它的
+`DT_NEEDED`，把每个非系统库一起捆**。mihomo / Xray 的 gomobile 产物大概率依赖
+`libc++_shared.so`（约 1 MB/ABI）。
+
+### 配方（四步，已固化）
+
+```text
+① cz_repack/lib/<abi>/*.so                   把库放进去
+② apktool.yml 的 doNotCompress 加一行 - so   （已加，留在配置里了）
+③ build.sh 的 zipalign 已经是 -p 4           （本来就对，不用改）
+④ System.loadLibrary("名字")                 从 java-src 调，不用碰 smali
+```
+
+第 ④ 步是这次验证出来的额外收获：**加载原生库不需要改 smali**，在 java-src 里
+加个静态方法就行，`build.sh` 会把它编进 classes5.dex。
+
+### 下一步的前置（还没装）
+
+```text
+Go        1.27.2   已装
+NDK       未装
+gomobile  未装
+```
+
+所以接真核心有两条路：装 NDK + gomobile 自己编（要下几个 G），或者直接用
+别人打好的 AAR 只取里面的 `.so` 和 `classes.jar`。
+
+---
+
 ## 单站 HTML 适配器（2026-10-17 **真机跑通**）
 
 设备 `7f8f5254` 上首页 / 分类 / 详情 / 播放 / 标签**五层全通**，画面已渲染。
@@ -351,28 +418,28 @@ build.sh 配置自检    ⬜   还没加 CMS 分支
 
 # 其它待办
 
-## 账号后端接到自己的服务器
+## 账号后端接到自己的服务器 —— **已完成**（核实于 2026-10-17）
 
-**当前**：`HuangGuoApp.onCreate` 里初始化 Parse，指向第三方 BaaS：
+**已上线的形态**：`HuangGuoApp.onCreate` 里 serverUrl 指向自己的 VPS：
 
 ```smali
-const-string v0, "https://parseapi.back4app.com/"
+const-string v0, "https://149.104.21.177.sslip.io/api/"
 Parse.initialize(appId, clientKey, v0)
 ```
 
-appId 和 clientKey 在 `R$string.smali` 的 `back4app_app_id` / `back4app_client_key`。
+自建服务在 `server/account/`（Parse REST 子集 + PostgreSQL），VPS 上以 Docker 跑着
+`account-api-1` + `account-db-1`（postgres:16-alpine），和 Caddy 同机。
 
-**触发条件**：只在登录态才连。`MainActivity.onResume` 里先 `ParseUser.getCurrentUser()`
-判空，没有登录用户直接跳过 `AccountService.sync()`。所以没登录的机器上这条线是静的。
+**appId / clientKey**：还是 `res/values/strings.xml` 里那两个（`back4app_app_id` /
+`back4app_client_key`，名字是历史遗留），服务端 `PARSE_APP_ID` 与之一致，不然每个
+请求都是 403。要换 key 得两端同时改。
 
-**要做**：把 serverUrl 换成自建 Parse Server（或换掉整套账号服务），两个 key 从
-`strings.xml` 挪到自己的配置里。
+**核实记录**（2026-10-17）：`GET /api/classes/_User` 带 appId 请求返回
+`{"code":206,"error":"没有 session token"}` —— Parse REST 语义正确，链路活着。
+smali 里已搜不到任何 `parseapi.back4app.com` 引用。
 
-**服务器**：`149.104.21.177`（Ubuntu 24.04，2G 内存，Docker）现在只跑着 Caddy 的静态
-文件服务。口令在 `~/.dsh-secret/hg-vps.pass`，操作脚本 `~/.dsh-secret/vps-run.sh`。
-
-**注意**：`AccountService` 里还有头像上传（`huangguo-avatars` 这个 SharedPreferences 是
-本地缓存，不是远端桶），换后端时一并核对。
+**遗留**（不紧急）：字段名 `back4app_*` 只是名字难看，换名要动 `strings.xml` +
+`R$string.smali` 两处，属于「纯洁癖项」，单独一轮做。
 
 ---
 

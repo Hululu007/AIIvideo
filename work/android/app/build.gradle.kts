@@ -76,6 +76,21 @@ android {
 
     packaging {
         resources.excludes += setOf("META-INF/*.kotlin_module", "META-INF/DEPENDENCIES")
+
+        // 和 manifest 的 android:extractNativeLibs="true" 必须成对出现，否则 Gradle
+        // 会警告行为未定义。两条一起决定 so 是「安装时解压到 lib/<abi>/」还是
+        // 「不压缩留在 APK 里由链接器 mmap」：
+        //
+        //   false（旧） 56.0 MB 下载 / 58.7 MB 磁盘
+        //   true （现在）26.2 MB 下载 / 81.5 MB 磁盘
+        //
+        // 换 true 的唯一动机是下载体积省 53% —— libvlc.so 45MB 能 deflate 到 20.7MB。
+        // 代价是安装时多解压 54MB、多占 23MB 磁盘。真机实测（23113RKC6C / Android 16）：
+        // 冷启动 5 次 311~400ms vs 旧配置 341~414ms，量不出差异；播放路径完全等价。
+        // 别看到「解压到磁盘」就以为会拖慢启动 —— 两种配置运行时都是 mmap，没人整份读。
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 
     lint {
