@@ -1,0 +1,56 @@
+# 南+ 茶馆 (fid-9) 发帖草稿 — 已填入表单，未提交
+# 标题: 无敌看片王,视频流刷所有
+# 图（新，按贴内顺序）:
+#   黄果   https://i.mij.rip/2026/10/17/5f6f18169a98ce5fe4d7fc6743080a39.jpeg  del: https://mjj.today/i/Q1QeIpM/delete/b5a851cec06e21d42f8a99da7d97f69517e4cbfe88789383
+#   age    https://i.mij.rip/2026/10/17/9537f9b6bc69f5bf6a24fee49299a881.jpeg  del: https://mjj.today/i/Q1QeWiN/delete/3fbbdcbe3ddcc3fa5eb146a65149fa0acc884bb417c3db12
+#   hanime https://i.mij.rip/2026/10/17/d5a43d6f2ecd82d01e85e90740999bf3.jpeg  del: https://mjj.today/i/Q1QeYWH/delete/b5a5d7e100fe1449be02e46251d38366cac80396f03d8ec5
+#   量子cms https://i.mij.rip/2026/10/17/9f5279b2c23b6081b6d5692836c51c2a.jpeg  del: https://mjj.today/i/Q1Qe1ke/delete/9bb3d5bc77f9a11eb5296184556be848f5bdf0a5475946cf
+# 旧图（已从帖里换掉，需要清理时删）:
+#   https://mjj.today/i/Q1QLTkz/delete/ec2ea939713d9f135a2f57f631d74fe529fc8cbca75d2a4b
+#   https://mjj.today/i/Q1QL7v0/delete/a2c695a3218ac90e8ae64aa0da790904d518a15a1501329c
+#   https://mjj.today/i/Q1QLOFD/delete/4da6aa034350c943982b7c9909c58e158793ee93ad73c2a1
+#   https://mjj.today/i/Q1QL8Xp/delete/cb8c293078269e5a2b8b7d8e2506c30966a9a2eec02d1dc3
+
+前几天,用黄果的app要付费,在网页上看 又不爽,所以开发了一个app,现在支持黄果,age(正常看动漫的),hanime(看里番的),苹果cms(把tvbox的给兼容过来了)
+
+竖屏是主界面。上下滑切集，左右滑拖进度，一屏宽差不多 120 秒，拖的时候中间会显示要跳到哪儿。横屏只转播放区，页面不跟着转。倍速、画面翻转、断点续播都在。
+
+下面几张是同一个 app 接了不同的源，界面长什么样全是源给的，入口我一个都没写死。
+
+[img]https://i.mij.rip/2026/10/17/5f6f18169a98ce5fe4d7fc6743080a39.jpeg[/img]
+
+黄果的源，底部那排剧场/AI 是它自己的。
+
+[img]https://i.mij.rip/2026/10/17/9537f9b6bc69f5bf6a24fee49299a881.jpeg[/img]
+
+age 的源，分类页那 45 个标签来自站点自己的筛选字典。
+
+[img]https://i.mij.rip/2026/10/17/d5a43d6f2ecd82d01e85e90740999bf3.jpeg[/img]
+
+hanime 的源，裏番、泡麵番、3DCG 这些 tab 也是站上搬的。
+
+[img]https://i.mij.rip/2026/10/17/9f5279b2c23b6081b6d5692836c51c2a.jpeg[/img]
+
+苹果CMS 的采集接口，菜单直接变成电影/连续剧/动漫/综艺。
+
+源地址，下面这几个复制到 设置 → 内容源 就行：
+
+黄果
+https://149.104.21.177.sslip.io/huangguo.json
+
+age（动漫）
+https://149.104.21.177.sslip.io/agedm.json
+
+hanime（里番）
+【填 hanime1 源地址】
+
+星辰
+【填星辰源地址】
+
+苹果CMS 的站不用配置文件，直接把采集接口贴进去：
+https://cj.lziapi.com/api.php/provide/vod
+
+收藏和观看历史存在手机本地，不登录也能用。登录唯一的作用是换手机的时候同步一下，不想要就一直别登。
+
+下载，8M 出头，安卓 8.0 以上：
+https://github.com/zhaoruizhe81/AIIvideo/releases/latest

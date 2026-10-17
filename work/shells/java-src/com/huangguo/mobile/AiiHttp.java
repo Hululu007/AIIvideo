@@ -154,6 +154,29 @@ public final class AiiHttp {
 
     private AiiHttp() {}
 
+    // ── 原生库集成探针（临时，验证完删掉）────────────────────────────
+    //
+    // 要验证的事：cz_repack/lib/arm64-v8a/*.so 能不能被打进 APK、并且真的加载起来。
+    // 这个项目是 apktool 重打包、没有 Gradle，从来没塞过原生库；而 manifest 里
+    // 写着 extractNativeLibs="false" —— 那要求 .so **不压缩 + 4KB 页对齐**，
+    // 任何一条不满足都会在加载时失败，报错还很难懂（通常只是一句
+    // "couldn't find library"）。
+    //
+    // 探针挂在第一次请求上，而不是去改 MainActivity 的 smali：这里够早，
+    // 而且 AiiHttp 在 java-src 里，改动可逆。测完整块删掉。
+    private static volatile boolean nativeProbed = false;
+
+    private static void probeNativeOnce() {
+        if (nativeProbed) return;
+        nativeProbed = true;
+        try {
+            System.loadLibrary("testprobe");
+            log("原生库探针 OK：libtestprobe 已加载");
+        } catch (Throwable e) {
+            log("原生库探针失败：" + e.getClass().getSimpleName() + " " + e.getMessage());
+        }
+    }
+
     // ── 对外入口 ──────────────────────────────────────────────────────
 
     /**
@@ -161,6 +184,7 @@ public final class AiiHttp {
      * 签名与改造前的 SiteRepository.fetch 对齐，异常语义也一样（抛 Exception）。
      */
     public static byte[] get(String url, SiteProfile profile) throws Exception {
+        probeNativeOnce();
         // 按适配器分流。cms 那类源的地址是「CMS 接口」，不是「origin + 路径」，
         // 走不了下面的解析/DoH 那一套 —— 由 CmsAdapter 自己拼 URL、自己映射形状。
         // 它返回的必须是**我们内部的 JSON 形状**，这样前端的 adapters.js 不用改。
@@ -859,6 +883,24 @@ public final class AiiHttp {
         SmartDns(SiteProfile profile) { this.profile = profile; }
 
         @Override public List<InetAddress> lookup(String hostname) throws UnknownHostException {
+            // ── 配置里钉死的地址优先 ──────────────────────────────────────
+            // 有些入口域名，三条解析路径给出的都是不能用的答案：
+            //   · 运营商 DNS  → 一个证书已过期的 IP
+            //   · 阿里 DoH    → 0.0.0.0
+            //   · 腾讯 DoH    → 5 个真地址，但只有一两个偶尔能连上
+            // 这种时候任何「解析」都是碰运气，唯一能做的是把能用那个写死。
+            // 配置顶层写：  "hosts": { "例子.com": ["1.2.3.4", "5.6.7.8"] }
+            List<String> pinned = pinned(hostname, profile);
+            if (!pinned.isEmpty()) {
+                List<InetAddress> list = new ArrayList<InetAddress>(pinned.size());
+                for (int i = 0; i < pinned.size(); i++) {
+                    try { list.add(InetAddress.getByName(pinned.get(i))); } catch (Exception ignored) {}
+                }
+                if (!list.isEmpty()) {
+                    log("按配置钉死 " + hostname + " → " + list.size() + " 个地址");
+                    return list;
+                }
+            }
             if (!dohEnabled(profile)) return Dns.SYSTEM.lookup(hostname);
             List<String> ips = resolve(hostname, profile);
             if (ips.isEmpty()) {
@@ -877,6 +919,28 @@ public final class AiiHttp {
             log("DoH " + hostname + " → " + out.size() + " 个地址");
             return out;
         }
+    }
+
+    /**
+     * 配置里有没有给这个域名钉死地址。
+     *
+     * 读的是顶层 `hosts`：`{ "域名": ["1.2.3.4", …] }`。空/没写都返回空表，
+     * 走原来的 DoH 那条路 —— 这是个例外通道，不该影响别的源。
+     */
+    private static List<String> pinned(String host, SiteProfile profile) {
+        List<String> out = new ArrayList<String>();
+        if (profile == null || host == null) return out;
+        try {
+            JSONObject hosts = profile.object("hosts");
+            if (hosts == null) return out;
+            JSONArray list = hosts.optJSONArray(host);
+            if (list == null) return out;
+            for (int i = 0; i < list.length(); i++) {
+                String ip = list.optString(i, "").trim();
+                if (ip.length() > 0 && usable(ip)) out.add(ip);
+            }
+        } catch (Throwable ignored) {}
+        return out;
     }
 
     static List<String> resolve(String host, SiteProfile profile) {
@@ -984,12 +1048,38 @@ public final class AiiHttp {
                 if (record.optInt("type", 0) != 1) continue;
                 String data = record.optString("data", "");
                 // 只要 IPv4：这条链路上没通 v6，返回去反而让 OkHttp 白试一轮。
-                if (data.length() > 0 && data.indexOf(':') < 0 && !out.contains(data)) out.add(data);
+                if (data.length() == 0 || data.indexOf(':') >= 0) continue;
+                if (!usable(data)) continue;
+                if (!out.contains(data)) out.add(data);
             }
         } catch (Exception e) {
             log("DoH 应答解析失败：" + e);
         }
         return out;
+    }
+
+    /**
+     * 这个 A 记录能不能拿去连。
+     *
+     * ── 为什么必须筛 ────────────────────────────────────────────────────
+     * 实测阿里 DoH（dns.alidns.com）对 `cab3f.nt17g20k.cc` 的应答是
+     * **`0.0.0.0`** —— 那不是「没查到」，那是运营商的毒答案，把它当地址用
+     * 只会去连一个必然失败的地方。
+     *
+     * 而 lookupDoh 是「多问一家再合并」，阿里先回 0.0.0.0 会让它凑不满 3 个，
+     * 于是继续问腾讯、把腾讯那几个真地址也加进来 —— 结果列表变成
+     * `[0.0.0.0, 43.229.39.228, …]`，**毒答案排在第一个**，每次请求都先白试
+     * 一遍它。筛掉之后 OkHttp 才会从能用那个开始试。
+     */
+    private static boolean usable(String ip) {
+        if (ip == null) return false;
+        String s = ip.trim();
+        if (s.length() == 0) return false;
+        if ("0.0.0.0".equals(s) || "127.0.0.1".equals(s)) return false;
+        if (s.startsWith("0.") || s.startsWith("127.")) return false;
+        // 255.255.255.255 之类：首字节全 1 的广播地址
+        if (s.startsWith("255.")) return false;
+        return true;
     }
 
     private static JSONArray dohServers(SiteProfile profile) {
