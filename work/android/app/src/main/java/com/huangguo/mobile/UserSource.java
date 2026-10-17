@@ -289,6 +289,10 @@ public final class UserSource {
             if (command.startsWith(PLAYER_PREFIX)) {
                 return player(context, command.substring(PLAYER_PREFIX.length()).trim(), out);
             }
+            // 内置代理核心。同样借 detail 桥，见 PROXY_PREFIX 上面那段。
+            if (command.startsWith(PROXY_PREFIX)) {
+                return proxyCore(context, command.substring(PROXY_PREFIX.length()).trim(), out);
+            }
             if (!command.startsWith(PREFIX)) return fail(out, "不是源设置指令");
 
             String body = command.substring(PREFIX.length()).trim();
@@ -1959,6 +1963,296 @@ public final class UserSource {
         return "";
     }
 
+    // ── 内置代理核心 ──────────────────────────────────────────────────
+    //
+    // 这一块把阶段 1 的 ProxyCore、阶段 2 的 AiiHttp.effectiveProxy() 接到前端。
+    // 三件事：存用户的选择（模式 + 节点），启停核心，以及把所有状态合成一个
+    // 「当前到底走哪条」的答复 —— 前端不自己拼这个结论，因为「模式是内置、但核心
+    // 起不来、于是回落到外部代理」这种情况在页面上有三种写法，只该有一处判断。
+    //
+    // ── 为什么走 detail 桥而不是新增 dispatch 动作 ────────────────────
+    // MainActivity.dispatch 是 packed-switch 按编号跳的，索引和稀疏哈希表耦合，
+    // 加一个动作要同时改两张表（见本文件开头 PREFIX 那段）。这里沿用 __source:
+    // 那一招，新增一个 __proxy: 前缀，MainActivity 一行都不用动。
+    //
+    // ── 三种模式的语义 ────────────────────────────────────────────────
+    //   direct    直连。核心停掉。用户手填的地址**留着**不清 —— 那是他以前填的，
+    //             不是这次选的模式，清掉之后从「外部」切到「直连」再切回去就丢了。
+    //   builtin   内置核心。核心起不来就报错，**不回落**到外部地址：用户明确选了
+    //             这条，静默改走另一条等于把出口换了还不说。
+    //   external  用户手填的地址，沿用原来的 proxy:set。切过来时停核心 ——
+    //             effectiveProxy() 让内置优先，两者同时在场的话，用户明明选了
+    //             「外部」却仍旧从内置出去，这是最难解释的一种错。
+    //
+    // 真正决定流量走向的仍然是 AiiHttp.effectiveProxy()：核心在跑就用核心的，
+    // 否则用用户手填的。模式只决定「切的时候要不要拉起/停掉核心」和「页面怎么显示」。
+    public static final String PROXY_PREFIX = "__proxy:";
+
+    /** 模式与节点存在这里。节点带 uuid/密码，和 aii-net 一样是应用私有目录下的明文 XML。 */
+    private static final String PROXY_STORE = "aii-proxy-core";
+    private static final String CORE_MODE_KEY = "mode";
+    private static final String CORE_LINK_KEY = "link";
+
+    static final String MODE_DIRECT = "direct";
+    static final String MODE_BUILTIN = "builtin";
+    static final String MODE_EXTERNAL = "external";
+
+    /** 正在启停时的重入闸。核心自己 synchronized，这里挡的是前端连点两下那两次。 */
+    private static volatile boolean coreBusy = false;
+
+    /**
+     * `__proxy:` 的分发。
+     *
+     *   status                       核心状态 + 当前生效的出口（合成结论）
+     *   start?link=<分享链接>          解析并启动，返回 status
+     *   start?node=<节点 JSON>         同上，节点已经是 JSON 时走这条
+     *   stop                         停核心，返回 status
+     *   test                         通过核心测一次延迟，返回 ms
+     *   mode?value=direct|builtin|external   切换模式（切到 builtin 会顺手拉起核心）
+     *   boot                         冷启动读盘并恢复内置核心（设置页首次加载时调）
+     *
+     * 所有分支都返回同一套字段：{ok, mode, running, port, socksUrl, host, effective,
+     * external, busy, node, error, unavailable}，前端拿到就整块重画。
+     */
+    private static JSONObject proxyCore(Context context, String body, JSONObject out) {
+        try {
+            String action = body;
+            String query = "";
+            int mark = body.indexOf('?');
+            if (mark >= 0) {
+                action = body.substring(0, mark);
+                query = body.substring(mark + 1);
+            }
+            if ("status".equals(action)) return proxyStatus(context, out);
+            if ("start".equals(action)) {
+                return proxyStart(context, param(query, "link"), param(query, "node"), out);
+            }
+            if ("stop".equals(action)) return proxyStop(context, out);
+            // 清掉存过的节点。独立一条而不是让 start 收空串：空串在 start 的语义里
+            // 是「用存过的那条」，两者混着会把「清空」变成「再启动一次」。
+            if ("clear".equals(action)) {
+                ProxyCore.get(context).stop();
+                AiiHttp.invalidateClients();
+                setProxyLink(context, "");
+                return proxyStatus(context, out);
+            }
+            if ("test".equals(action)) return proxyTest(context, out);
+            if ("mode".equals(action)) return proxyMode(context, param(query, "value"), out);
+            if ("boot".equals(action)) return proxyBoot(context, out);
+            return fail(out, "不认识的代理指令：" + action);
+        } catch (Throwable e) {
+            return fail(out, "代理指令失败：" + e.getClass().getSimpleName() + " " + e.getMessage());
+        }
+    }
+
+    private static android.content.SharedPreferences proxyStore(Context context) {
+        return context.getSharedPreferences(PROXY_STORE, Context.MODE_PRIVATE);
+    }
+
+    static String proxyMode(Context context) {
+        String mode = proxyStore(context).getString(CORE_MODE_KEY, MODE_DIRECT);
+        if (MODE_BUILTIN.equals(mode) || MODE_EXTERNAL.equals(mode)) return mode;
+        return MODE_DIRECT;
+    }
+
+    private static void setProxyMode(Context context, String mode) {
+        proxyStore(context).edit().putString(CORE_MODE_KEY, mode).apply();
+    }
+
+    /** 存分享链接原文。比存解析后的 JSON 少一个「字段名谁说了算」的问题。 */
+    private static String proxyLink(Context context) {
+        String link = proxyStore(context).getString(CORE_LINK_KEY, "");
+        return link == null ? "" : link.trim();
+    }
+
+    private static void setProxyLink(Context context, String link) {
+        proxyStore(context).edit().putString(CORE_LINK_KEY, link == null ? "" : link.trim()).apply();
+    }
+
+    /**
+     * 合成一份状态。前端只读这一份。
+     *
+     * `effective` 是页面顶上那行「现在走哪条」的唯一来源：内核在跑 → 本地 SOCKS5；
+     * 不在跑但用户填过外部地址 → 那个地址；都没有 → 空串（直连）。
+     * 这和 AiiHttp.effectiveProxy() 是同一个结论，但这边额外知道「为什么没在跑」。
+     */
+    private static JSONObject proxyStatus(Context context, JSONObject out) throws Exception {
+        // effectiveProxy() 要 appContext，init 是幂等的，先保证它在。
+        AiiHttp.init(context);
+        ProxyCore core = ProxyCore.get(context);
+        boolean running = core.isRunning();
+        int port = running ? core.port() : 0;
+
+        String effective = AiiHttp.effectiveProxy();
+        String raw = AiiHttp.proxyRaw();
+
+        out.put("ok", true);
+        out.put("mode", proxyMode(context));
+        out.put("running", running);
+        out.put("port", port);
+        out.put("socksUrl", running ? core.socksUrl() : "");
+        out.put("host", running ? "127.0.0.1:" + port : "");
+        out.put("effective", effective == null ? "" : effective);
+        out.put("external", raw);
+        out.put("busy", coreBusy);
+        // 节点只回「哪台机器」，不带 uuid —— 这份答复会被 logcat 记下来。
+        XrayConfig.Node node = core.currentNode();
+        out.put("node", node == null ? "" : node.describe());
+        // lastError 是「上一次失败」，成功之后 ProxyCore 自己会清空；
+        // unavailableReason() 是一旦不可用就永远存在的结论，两者分开报。
+        out.put("error", core.lastError() == null ? "" : core.lastError());
+        out.put("unavailable", ProxyCore.unavailableReason() == null ? "" : ProxyCore.unavailableReason());
+        out.put("link", proxyLink(context));
+        return out;
+    }
+
+    private static JSONObject proxyStart(Context context, String link, String nodeJson, JSONObject out)
+            throws Exception {
+        String text = link == null ? "" : link.trim();
+        boolean hasNodeJson = nodeJson != null && nodeJson.trim().length() > 0;
+        if (text.length() > 0) setProxyLink(context, text);
+        // 存过的那条留到**解析成功之后**才用：一条粘贴错的链接如果先落盘再解析，
+        // 用户下次点「保存并启动」会拿到上次那条坏链接，报的错还跟这次无关。
+        // 所以这里只读不写，落盘在下面的解析成功处。
+        if (text.length() == 0 && !hasNodeJson) text = proxyLink(context);
+        if (text.length() == 0 && !hasNodeJson) {
+            return fail(out, "还没有节点配置，先粘一条 vmess:// 或 ss:// 分享链接");
+        }
+
+        XrayConfig.Node node;
+        try {
+            node = text.length() > 0
+                    ? XrayConfig.parseShareLink(text)
+                    : nodeFromJson(new JSONObject(nodeJson));
+        } catch (IllegalArgumentException e) {
+            // 解析失败不动已存的那条 —— 好链接不该被一条手误覆盖掉。
+            return fail(out, e.getMessage() == null ? "节点配置看不懂" : e.getMessage());
+        }
+        if (text.length() > 0) setProxyLink(context, text);
+
+        coreBusy = true;
+        try {
+            ProxyCore core = ProxyCore.get(context);
+            // start() 返回 false 时状态已经复位（阶段 1 的约定），不用先 stop 再重试。
+            if (!core.start(node)) {
+                // 启动失败**不改路由**：既不动用户的代理串，也不碰 AiiHttp 的任何状态。
+                // 把代理置空等于静默退回直连，用户会以为代理生效了。
+                JSONObject failed = proxyStatus(context, out);
+                if (failed.optBoolean("ok", false)) {
+                    failed.put("ok", false);
+                    failed.put("error", core.lastError() == null ? "核心没能启动" : core.lastError());
+                }
+                log("内置核心启动失败：" + failed.optString("error"));
+                return failed;
+            }
+            // 核心起来了 → 立刻让旧客户端作废。只改标志不够：OkHttp 的连接池和
+            // TLS 会话挂在已建好的实例上，不换实例的话它们还连着原来的出口。
+            AiiHttp.invalidateClients();
+            setProxyMode(context, MODE_BUILTIN);
+            log("内置核心已启动 → " + node.describe());
+            return proxyStatus(context, out);
+        } finally {
+            coreBusy = false;
+        }
+    }
+
+    private static JSONObject proxyStop(Context context, JSONObject out) throws Exception {
+        ProxyCore.get(context).stop();
+        // 停了也必须作废：否则下一次请求还在用那条已经关掉的本地端口。
+        AiiHttp.invalidateClients();
+        // 停核心不改模式 —— 用户点「停止」多半只是想临时断一下，
+        // 模式保持 builtin，下次启动还会自己拉起来。
+        return proxyStatus(context, out);
+    }
+
+    private static JSONObject proxyTest(Context context, JSONObject out) {
+        ProxyCore core = ProxyCore.get(context);
+        if (!core.isRunning()) {
+            try {
+                out.put("ok", false);
+                out.put("error", "核心没在跑，先启动再测");
+                out.put("ms", -1);
+            } catch (Exception ignored) {}
+            return out;
+        }
+        long started = System.currentTimeMillis();
+        long ms = core.measureDelay();
+        try {
+            if (ms <= 0) {
+                out.put("ok", false);
+                // AAR 里超时写死 12 秒，到这里还没回来的就是节点不通或本机没网。
+                out.put("error", "测不通（" + (System.currentTimeMillis() - started) + "ms 内没有响应）");
+                out.put("ms", -1);
+            } else {
+                out.put("ok", true);
+                out.put("ms", ms);
+            }
+        } catch (Exception ignored) {}
+        return out;
+    }
+
+    private static JSONObject proxyMode(Context context, String value, JSONObject out) throws Exception {
+        String mode = value == null ? "" : value.trim();
+        if (!MODE_DIRECT.equals(mode) && !MODE_BUILTIN.equals(mode) && !MODE_EXTERNAL.equals(mode)) {
+            return fail(out, "模式只能是 direct / builtin / external");
+        }
+
+        if (MODE_DIRECT.equals(mode)) {
+            ProxyCore.get(context).stop();
+            AiiHttp.invalidateClients();
+            setProxyMode(context, MODE_DIRECT);
+            return proxyStatus(context, out);
+        }
+
+        if (MODE_EXTERNAL.equals(mode)) {
+            ProxyCore.get(context).stop();
+            AiiHttp.invalidateClients();
+            setProxyMode(context, MODE_EXTERNAL);
+            return proxyStatus(context, out);
+        }
+
+        // builtin：有存过的节点就立刻拉起；没有就先记下模式，等用户粘链接。
+        setProxyMode(context, MODE_BUILTIN);
+        if (proxyLink(context).length() == 0) return proxyStatus(context, out);
+        return proxyStart(context, "", "", out);
+    }
+
+    /**
+     * 冷启动。设置页第一次加载时调一次，按盘上的模式恢复内置核心。
+     *
+     * 起不来不算失败 —— 回 status 让页面把原因写在状态行上，而不是弹一个崩溃。
+     * 切后台不停核心：后台可能正在播音频，一停就是断流。进程被杀核心自然没了，
+     * 不需要 onTerminate（它本来也不保证被调）。
+     */
+    private static JSONObject proxyBoot(Context context, JSONObject out) throws Exception {
+        if (MODE_BUILTIN.equals(proxyMode(context))
+                && !ProxyCore.get(context).isRunning()
+                && proxyLink(context).length() > 0) {
+            proxyStart(context, "", "", new JSONObject());
+        }
+        return proxyStatus(context, out);
+    }
+
+    /** 前端的 node JSON → XrayConfig.Node。字段名和 XrayConfig 前向生成时一致。 */
+    private static XrayConfig.Node nodeFromJson(JSONObject json) {
+        XrayConfig.Node node = new XrayConfig.Node(
+                json.optString("protocol", "vmess"),
+                json.optString("server", ""),
+                json.optInt("port", 443));
+        node.uuid = json.optString("uuid", "");
+        node.method = json.optString("method", "");
+        node.alterId = json.optInt("alterId", 0);
+        node.security = json.optString("security", "auto");
+        node.network = json.optString("network", "tcp");
+        node.tls = json.optString("tls", "none");
+        node.path = json.optString("path", "/");
+        node.host = json.optString("host", "");
+        node.serviceName = json.optString("serviceName", "");
+        node.flow = json.optString("flow", "");
+        node.fingerprint = json.optString("fingerprint", "");
+        return node;
+    }
+
     // ── 播放器要原生帮忙的两件事 ──────────────────────────────────────
 
     /**
@@ -2336,6 +2630,18 @@ public final class UserSource {
         // ② 网络代理。setProxy 同时把两个 OkHttp 客户端置空，下一次请求按直连重建。
         String proxyProblem = AiiHttp.setProxy("");
         if (proxyProblem != null) failed.append("proxy ").append(proxyProblem).append(' ');
+
+        // ②' 内置核心。**必须在这里显式停**：setProxy("") 清的是用户手填的那个串，
+        //    而内置核心在跑的时候 AiiHttp.effectiveProxy() 根本不看它 —— 核心的
+        //    socksUrl() 优先。不停的话，用户点完「恢复出厂设置」被告知已直连，
+        //    实际流量还从节点出去。下面 clearPreferences 会连 aii-proxy-core 一起清，
+        //    但清盘只改内存和 XML，停不了 native 那边已经在跑的 goroutine。
+        try {
+            ProxyCore.get(context).stop();
+            AiiHttp.invalidateClients();
+        } catch (Throwable e) {
+            failed.append("core ").append(e.getClass().getSimpleName()).append(' ');
+        }
 
         // ③ 本机数据：片单、头像索引、DoH 缓存、更新器的记录……（两份例外见
         //    clearPreferences 的说明：hot-updates 与 content-access 不清）

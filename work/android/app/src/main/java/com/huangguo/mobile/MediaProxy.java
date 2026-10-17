@@ -103,26 +103,82 @@ public final class MediaProxy {
      *
      * 超时给得比一般请求长：一集 90 MB，虽然每次只取一个 Range，但播放途中
      * 连着取的时候别让读超时把连接掐了。
+     *
+     * ── 代理（为什么跟随 AiiHttp.effectiveProxy()）────────────────────
+     * 这 4 个域是视频 CDN。以前 MediaProxy 是完全直连的，因为当初接手它们
+     * 只是为了绕开 h2 那个 403，跟路由无关。
+     *
+     * 但内置核心一起来，只代理 API 不代理 CDN 是个半吊子状态：封面、接口都通了，
+     * 视频仍卡在同一个连不上的 CDN 上，用户看到的是「能刷出列表但点开就转圈」，
+     * 比全不通还难解释。所以这里跟随同一条代理串。
+     *
+     * 代价说清楚：CDN 本地能直连时，这么走是绕路。要直连就别启动内置核心 ——
+     * 那是唯一开关，没有「核心开、媒体却直连」的组合。真需要那种组合的话，
+     * 在这里加判断即可（UrlPattern 之外，AiiHttp 已经有了 host 的形态）。
      */
     private static volatile OkHttpClient mediaClient;
+    private static volatile String mediaAppliedProxy = null;
+
+    /** 代理来源变了（内置核心启停 / 用户改手填地址）时调用，下一条请求重建。 */
+    static void invalidate() {
+        synchronized (MediaProxy.class) {
+            mediaClient = null;
+            mediaAppliedProxy = null;
+            relayClient = null;
+            relayAppliedProxy = null;
+        }
+    }
 
     private static OkHttpClient client() {
+        final String want = AiiHttp.effectiveProxy();
         OkHttpClient c = mediaClient;
-        if (c == null) {
-            synchronized (MediaProxy.class) {
-                c = mediaClient;
-                if (c == null) {
-                    c = new OkHttpClient.Builder()
-                            .protocols(Collections.singletonList(Protocol.HTTP_1_1))
-                            .connectTimeout(15, TimeUnit.SECONDS)
-                            .readTimeout(30, TimeUnit.SECONDS)
-                            .writeTimeout(15, TimeUnit.SECONDS)
-                            .build();
-                    mediaClient = c;
-                }
+        if (c != null && want.equals(mediaAppliedProxy)) return c;
+        synchronized (MediaProxy.class) {
+            if (mediaClient == null || !want.equals(mediaAppliedProxy)) {
+                OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                        .protocols(Collections.singletonList(Protocol.HTTP_1_1))
+                        .connectTimeout(15, TimeUnit.SECONDS)
+                        .readTimeout(30, TimeUnit.SECONDS)
+                        .writeTimeout(15, TimeUnit.SECONDS);
+                // 解析和鉴权复用 AiiHttp 那一套：外部代理的写法（socks5://、user:pass@）
+                // 只该有一个实现，否则两边认得的格式会慢慢分叉。
+                String broken = AiiHttp.attachProxy(builder, want);
+                if (broken != null) log("代理地址认不出来，媒体直连：" + broken);
+                mediaClient = builder.build();
+                mediaAppliedProxy = want;
             }
+            return mediaClient;
         }
-        return c;
+    }
+
+    /**
+     * 给 {@link VlcRelay} 用的客户端：同一套代理，但读超时放得很长。
+     *
+     * 为什么不能直接复用 {@link #client()}：那个 readTimeout 是 30 秒，是按
+     * 「WebView 每次取一个 Range」设计的。VlcRelay 是把整条流顺序搬给 libVLC，
+     * 一部片可能连着读几十分钟，中间只要有一次 30 秒没吐字节就会被掐断。
+     * 这里给 0（无限），断连由 TCP 自己发现 —— 用户按暂停时 VLC 会主动关连接。
+     *
+     * 注意不要把它和 mediaClient 混用同一个字段：两者的超时语义不同，
+     * 谁覆盖谁都会让另一方行为出错。
+     */
+    private static volatile OkHttpClient relayClient;
+    private static volatile String relayAppliedProxy = null;
+
+    static synchronized OkHttpClient relayClient() {
+        final String want = AiiHttp.effectiveProxy();
+        OkHttpClient c = relayClient;
+        if (c != null && want.equals(relayAppliedProxy)) return c;
+        OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                .protocols(Collections.singletonList(Protocol.HTTP_1_1))
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(0, TimeUnit.MILLISECONDS)
+                .writeTimeout(0, TimeUnit.MILLISECONDS);
+        String broken = AiiHttp.attachProxy(builder, want);
+        if (broken != null) log("中继代理地址认不出来，媒体直连：" + broken);
+        relayClient = builder.build();
+        relayAppliedProxy = want;
+        return relayClient;
     }
 
     /**

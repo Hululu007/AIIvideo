@@ -795,3 +795,9 @@ html[data-theme=dark] #setup-overlay .setup-market-copy small{color:#98989f}
 .player-options button{flex:1 1 auto;min-height:40px;padding:0 14px;border:1px solid rgba(127,127,127,.35);border-radius:12px;background:transparent;color:inherit;font:inherit;font-size:13px}
 .player-options button.is-on{border-color:#ff8a3d;background:rgba(255,138,61,.14);font-weight:600}
 .player-options button[disabled]{opacity:.4}
+/* 代理状态行。只在三种状态下变色：连着（绿）、起不来（红）、其余保持 muted。
+   颜色用变量取不到（现有主题里没有这号语义色），所以直接给两个对照度够的值。 */
+.settings-player .field-hint.is-live{color:#1f9d55;font-weight:600}
+.settings-player .field-hint.is-bad{color:#c0392b;font-weight:600}
+html[data-theme=dark] .settings-player .field-hint.is-live{color:#4ade80}
+html[data-theme=dark] .settings-player .field-hint.is-bad{color:#ff6b5e}

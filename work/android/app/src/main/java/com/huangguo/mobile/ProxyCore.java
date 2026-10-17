@@ -1,0 +1,446 @@
+package com.huangguo.mobile;
+
+import android.content.Context;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.util.Random;
+import libv2ray.CoreCallbackHandler;
+import libv2ray.CoreController;
+import libv2ray.Libv2ray;
+
+/**
+ * AIIvideo —— 本地代理核心（libv2ray 的 Xray）。
+ *
+ * 做的事情只有一件：在本机 127.0.0.1 上开一个 SOCKS5，把挑好的节点接上去。
+ * 不建 VpnService、不改系统路由、不碰 iptables —— 需要走代理的组件
+ * （OkHttp 走 AiiHttp 的 proxy 设置、libVLC 走它的 socks 选项）各自连过来。
+ * 这样只有我们明确让它走的流量才出去，装了什么别的 App 都不受影响。
+ *
+ * ── 为什么不用 VpnService ────────────────────────────────────────
+ * VpnService 是全局的：一旦起来，整台手机的流量都跟着走，用户关掉 App 之前
+ * 一直挂着。而这个应用的代理需求只是「取数据 + 播放」两条链路，走全局等于
+ * 给所有 App 增加故障面。代价是别的 App 拿不到这条代理 —— 那是本意。
+ *
+ * ── 生命周期 ─────────────────────────────────────────────────────
+ *   ensureEnv(context)   进程内一次，加载 .so 并告诉核心去哪里找 geoip.dat
+ *   start(node)          选端口 → 生成配置 → startLoop；返回能否起来
+ *   stop()               stopLoop 并释放
+ *
+ * 全部方法都可重入：连点两下「开启」不会起第二个核心，只会把上一次的结论返回。
+ *
+ * ⚠ 真机验证留给阶段 4 —— 这里的 native 调用在 JVM 单测里跑不了（.so 只有
+ *   arm64-v8a），所以 XrayConfig 被拆出去做纯 JVM 断言，这个类只做接线。
+ */
+public final class ProxyCore {
+
+    /** 本地端口候选区间。避开 1080（v2rayNG 的默认，会和用户装的其他客户端撞）。 */
+    static final int PORT_MIN = 20000;
+    static final int PORT_MAX = 40000;
+
+    private static final int PROBE_ATTEMPTS = 24;
+
+    /** 连通性测试 URL。204 最轻，不产生响应体。 */
+    static final String PROBE_URL = "https://www.gstatic.com/generate_204";
+
+    private static final String TAG = "AIIvideo";
+
+    /** 进程内单例。核心的 .so 是进程级的，多开没有意义。 */
+    private static volatile ProxyCore instance;
+
+    private static volatile boolean envReady = false;
+    private static volatile String envError = null;
+
+    private final Context appContext;
+    private CoreController controller;
+    private volatile int port;
+    private volatile XrayConfig.Node currentNode;
+    private volatile String lastError;
+
+    private ProxyCore(Context context) {
+        this.appContext = context.getApplicationContext();
+    }
+
+    public static ProxyCore get(Context context) {
+        ProxyCore local = instance;
+        if (local != null) return local;
+        synchronized (ProxyCore.class) {
+            if (instance == null) instance = new ProxyCore(context);
+            return instance;
+        }
+    }
+
+    // ── 环境 ──────────────────────────────────────────────────────────
+
+    /**
+     * 初始化核心环境。幂等，失败也不会反复重试 —— 缺 .so 的机器（32 位）
+     * 重试一百次还是缺，把结论记下来给 UI 一句话就够了。
+     *
+     * @return 是否可用
+     */
+    public boolean ensureEnv() {
+        if (envReady) return true;
+        if (envError != null) return false;
+        synchronized (ProxyCore.class) {
+            if (envReady) return true;
+            if (envError != null) return false;
+            try {
+                // checkVersionX 是最轻量的探活：它只有 1 行，但会触发 Libv2ray 的
+                // 静态块 → Seq.touch() → System.loadLibrary("gojni")。
+                // 换成一个真正的 startLoop 才能发现的问题，这里没必要。
+                String version = Libv2ray.checkVersionX();
+                // 两个参数的实际作用（2026-10-18 查 libgojni.so 的符号确认）：
+                //
+                // envPath：数据目录的父目录（/data/data/<pkg>）。它为 nil 时核心会退化，
+                //   所以必须传。但 **geoip.dat / geosite.dat 不走这个路径** —— libgojni.so
+                //   里有 AAssetManager_open / AAsset_read 这套 Android asset API，
+                //   那两个文件是 AAR 放进 assets/ 后由它直接读 APK 的。
+                //   改 envPath 不会让 geoip 找不到，别在这上面浪费时间排查。
+                //
+                // key：XUDP 的 base key，传空串即不启用。我们不用 XUDP。
+                Libv2ray.initCoreEnv(appContext.getFilesDir().getParent(), "");
+                envReady = true;
+                log("核心就绪 " + version);
+                return true;
+            } catch (Throwable e) {
+                envError = shortOf(e);
+                log("核心不可用（多半是这台机器没有 arm64 的 libgojni.so）：" + envError);
+                return false;
+            }
+        }
+    }
+
+    /** available 给人看的结论，null 表示可用。 */
+    public static String unavailableReason() {
+        return envError;
+    }
+
+    // ── 启停 ──────────────────────────────────────────────────────────
+
+    /**
+     * 用给定节点起核心。同一个节点重复调用是空操作。
+     *
+     * @return 起来了（或本来就在跑）返回 true
+     */
+    public synchronized boolean start(XrayConfig.Node node) {
+        if (node == null) {
+            lastError = "没有可用节点";
+            return false;
+        }
+        if (!ensureEnv()) {
+            lastError = "核心不可用：" + envError;
+            return false;
+        }
+        if (isRunning() && sameNode(node, currentNode)) return true;
+        if (isRunning()) stop();
+
+        int chosen = 0;
+        CoreController pending = null;
+        try {
+            chosen = pickPort();
+            String config = XrayConfig.buildString(node, chosen);
+            pending = new CoreController(new Handler());
+            // startLoop 是同步的：它把配置交给核心并起 goroutine，配置不合法会抛。
+            // 所以「抛了」等于「没起来」，不用再查 getIsRunning()。
+            pending.startLoop(config);
+            controller = pending;
+            port = chosen;
+            currentNode = copy(node);
+            lastError = null;
+            log("已启动 " + node.describe() + " → socks5://127.0.0.1:" + chosen);
+            return true;
+        } catch (Throwable e) {
+            // 只把 controller 置空是**不够的**：CoreController 在 native 那边登记了一个
+            // Go 对象（refnum + trackGoRef），不主动 stopLoop 就永远不会被回收。
+            // 用户「点开 → 失败 → 改配置 → 再点」来几轮，进程里就攒下几个僵尸核心，
+            // 每个都还占着自己的 goroutine 和内存，而 Java 这边已经没人能碰到它们。
+            //
+            // stopLoop 必须是「尽力」：配置非法时它本身也可能抛，但那不能掩盖
+            // 真正的错误原因 —— lastError 记的永远是启动失败的那条，不是清理失败。
+            releaseQuietly(pending);
+            controller = null;
+            port = 0;
+            currentNode = null;
+            lastError = shortOf(e);
+            log("启动失败（端口 " + chosen + "）：" + lastError);
+            return false;
+        }
+    }
+
+    /** 丢掉一个没起来的 controller。失败只记日志 —— 清理失败不该盖住调用方要看的错因。 */
+    private static void releaseQuietly(CoreController dying) {
+        if (dying == null) return;
+        try {
+            dying.stopLoop();
+        } catch (Throwable e) {
+            log("清理半死的核心时异常：" + shortOf(e));
+        }
+    }
+
+    /** 停。没跑的时候调也没关系 —— 阶段 4 的「关闭代理」按钮不需要先问状态。 */
+    public synchronized void stop() {
+        CoreController dying = controller;
+        // 先把状态清干净再停 —— 反过来的话，stopLoop 走到一半抛异常时
+        // 界面读到的还是「在跑」，而实际上核心已经半死不活了。
+        controller = null;
+        port = 0;
+        currentNode = null;
+        if (dying == null) return;
+        releaseQuietly(dying);
+        log("已停止");
+    }
+
+    // ── 状态 ──────────────────────────────────────────────────────────
+
+    /**
+     * 核心是否在跑。
+     *
+     * 同时问两处：本地有没有 controller，以及 native 那边的 getIsRunning()。
+     * 只信本地字段的话，核心自己崩了（panic 之后 goroutine 全退）这里还报 true，
+     * 阶段 4 的 UI 就会显示「已连接」而实际所有请求都在超时。
+     */
+    public boolean isRunning() {
+        CoreController current = controller;
+        if (current == null) return false;
+        try {
+            return current.getIsRunning();
+        } catch (Throwable e) {
+            return false;
+        }
+    }
+
+    /** 当前本地 SOCKS5 端口，0 表示没跑。 */
+    public int port() {
+        return isRunning() ? port : 0;
+    }
+
+    /**
+     * 喂给 AiiHttp.setProxy 的形态。没跑返回空串 —— 空串在 AiiHttp 里就是直连，
+     * 正好是「代理关掉」该有的语义，调用方不用写 if。
+     */
+    public String socksUrl() {
+        int live = port();
+        return live <= 0 ? "" : "socks5://127.0.0.1:" + live;
+    }
+
+    /**
+     * 喂给 libVLC 的 `:socks=` 的形态，即 `127.0.0.1:<port>`。
+     *
+     * **libVLC 不接受 scheme**：`:socks=socks5://127.0.0.1:23456` 会被它当成
+     * 一个叫 `socks5` 的主机名去解析，然后连接超时，报错信息里看不出是这个原因
+     * （表现只是「播不了」，和真正被墙一模一样）。所以这个剥离必须有一处权威实现，
+     * 别让调用方各自拼字符串。
+     *
+     * 没跑返回空串，调用方判 `length() > 0` 即可。
+     */
+    public String socksHostPort() {
+        int live = port();
+        return live <= 0 ? "" : "127.0.0.1:" + live;
+    }
+
+    /** 上一次失败的原因，null 表示没失败过。给 UI 一句话。 */
+    public String lastError() {
+        return lastError;
+    }
+
+    public XrayConfig.Node currentNode() {
+        return currentNode == null ? null : copy(currentNode);
+    }
+
+    /**
+     * 测延迟。走的是当前核心，所以测不通 = 节点不通，不是本机网络问题。
+     * 12 秒超时是 AAR 里写死的。
+     *
+     * @return 毫秒；-1 表示没在跑或测不通
+     */
+    public long measureDelay() {
+        return measureDelay(PROBE_URL);
+    }
+
+    public long measureDelay(String url) {
+        CoreController current = controller;
+        if (current == null) return -1L;
+        try {
+            return current.measureDelay(url == null || url.isEmpty() ? PROBE_URL : url);
+        } catch (Throwable e) {
+            log("测延迟失败：" + shortOf(e));
+            return -1L;
+        }
+    }
+
+    /**
+     * 上下行累计字节。key 用 "proxy" 这个 outbound tag —— Xray 的统计名是
+     * {@code <tag>>>>} 与 {@code <tag><<<}，这里按 AAR 的 queryStats(tag, direct)
+     * 约定传即可。
+     *
+     * 读一次会**清零**（AAR 的注释写明 queryStats「retrieves and resets」），
+     * 所以调用方要自己累加，别当累计值用。
+     */
+    public long[] stats() {
+        CoreController current = controller;
+        if (current == null) return new long[] {0L, 0L};
+        try {
+            long up = current.queryStats(XrayConfig.TAG_OUT, "uplink");
+            long down = current.queryStats(XrayConfig.TAG_OUT, "downlink");
+            return new long[] {up, down};
+        } catch (Throwable e) {
+            return new long[] {0L, 0L};
+        }
+    }
+
+    // ── 端口 ──────────────────────────────────────────────────────────
+
+    /**
+     * 选一个空闲的回环端口。
+     *
+     * 用 ServerSocket(0) 让系统挑：它知道哪些端口真的能 bind，比自己 random 一个
+     * 去试准。读到端口号后立刻 close，再交给 Xray —— 中间有几毫秒窗口，本机
+     * 回环端口被抢的概率极低，而且真抢了 startLoop 会抛，上层看到的是「启动失败」
+     * 而不是「连上了但不通」。
+     *
+     * 为什么不固定端口：1080 是 v2rayNG 的默认值，用户装了两套客户端就撞；
+     * 而固定一个冷门值又会在重装/前后台切换时被 TIME_WAIT 粘住。
+     */
+    static int pickPort() throws IOException {
+        return pickPort(PORT_MIN, PORT_MAX);
+    }
+
+    /**
+     * 区间内的空闲端口。
+     *
+     * 先让系统分配一个（它是真的在 bind 一次，比抽签准），落在区间内就用；
+     * 落在外头就抽签 + probe。早先的版本「区间外也直接返回系统给的那个」，
+     * 结果实测拿到 63518 —— 区间约束形同虚设，而 63518 这类高位口正是
+     * 系统给短命连接的临时口范围，更容易撞上 TIME_WAIT。
+     *
+     * 系统分配只试一次：它给的结果对区间没有任何倾向性，多试几次不如直接抽签。
+     */
+    static int pickPort(int min, int max) throws IOException {
+        if (min <= 0 || max > 65535 || min >= max) {
+            throw new IllegalArgumentException("端口区间不合法：" + min + "-" + max);
+        }
+        int free = freePort();
+        if (free >= min && free <= max) return free;
+
+        Random random = new Random();
+        for (int i = 0; i < PROBE_ATTEMPTS; i++) {
+            int candidate = min + random.nextInt(max - min);
+            if (probe(candidate)) return candidate;
+        }
+        throw new IOException("区间 " + min + "-" + max + " 内没有空闲端口");
+    }
+
+    /** 系统分配的空闲端口，0 表示拿不到。 */
+    static int freePort() {
+        ServerSocket socket = null;
+        try {
+            // 绑 127.0.0.1 而不是通配：Xray 的 inbound 也只绑回环。
+            // 不这么写的话，可能拿到一个「通配地址上占用、回环上空着」的端口。
+            socket = new ServerSocket();
+            socket.setReuseAddress(true);
+            socket.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0));
+            return socket.getLocalPort();
+        } catch (IOException e) {
+            return 0;
+        } finally {
+            closeQuietly(socket);
+        }
+    }
+
+    /** 能不能在这个端口上 bind。能就是空闲。 */
+    static boolean probe(int candidate) {
+        ServerSocket socket = null;
+        try {
+            // 端口 0 会被 ServerSocket 当成「随便给一个」，绕开区间约束，
+            // 顺手也把区间检查重复一遍。
+            if (candidate <= 0 || candidate > 65535) return false;
+            socket = new ServerSocket();
+            socket.setReuseAddress(true);
+            socket.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), candidate));
+            return true;
+        } catch (IOException e) {
+            return false;
+        } finally {
+            closeQuietly(socket);
+        }
+    }
+
+    private static void closeQuietly(ServerSocket socket) {
+        if (socket == null) return;
+        try {
+            socket.close();
+        } catch (IOException ignored) {
+        }
+    }
+
+    // ── 内部 ──────────────────────────────────────────────────────────
+
+    /**
+     * 核心回调。三个方法都必须快速返回 —— 它们跑在 Go 调过来的线程上，
+     * 阻塞会拖住核心自己的调度。
+     */
+    private static final class Handler implements CoreCallbackHandler {
+        @Override
+        public long onEmitStatus(long code, String message) {
+            // code 非 0 是错误。这里只记日志不抛：抛出去只会变成一条
+            // 看不出所以然的 Go 侧 panic 堆栈。
+            if (code != 0) log("核心状态 " + code + " " + message);
+            return 0;
+        }
+
+        @Override
+        public long shutdown() {
+            return 0;
+        }
+
+        @Override
+        public long startup() {
+            return 0;
+        }
+    }
+
+    /** 同一个节点就不重启核心 —— 重启会打断正在播放的流。 */
+    private static boolean sameNode(XrayConfig.Node a, XrayConfig.Node b) {
+        if (a == null || b == null) return false;
+        return equal(a.protocol, b.protocol) && equal(a.server, b.server) && a.port == b.port
+                && equal(a.uuid, b.uuid) && equal(a.method, b.method) && a.alterId == b.alterId
+                && equal(a.network, b.network) && equal(a.tls, b.tls) && equal(a.path, b.path)
+                && equal(a.host, b.host);
+    }
+
+    private static boolean equal(String a, String b) {
+        return a == null ? b == null : a.equals(b);
+    }
+
+    private static XrayConfig.Node copy(XrayConfig.Node source) {
+        if (source == null) return null;
+        XrayConfig.Node node = new XrayConfig.Node(source.protocol, source.server, source.port);
+        node.uuid = source.uuid;
+        node.method = source.method;
+        node.alterId = source.alterId;
+        node.security = source.security;
+        node.network = source.network;
+        node.tls = source.tls;
+        node.path = source.path;
+        node.host = source.host;
+        node.fingerprint = source.fingerprint;
+        node.flow = source.flow;
+        node.serviceName = source.serviceName;
+        return node;
+    }
+
+    /** 异常只留一句，不打堆栈 —— 这行会进 logcat，而用户看不到堆栈。 */
+    private static String shortOf(Throwable e) {
+        String message = e.getMessage();
+        if (message == null || message.trim().isEmpty()) return e.getClass().getSimpleName();
+        return e.getClass().getSimpleName() + ": " + message;
+    }
+
+    private static void log(String message) {
+        try {
+            android.util.Log.d(TAG, "[core] " + message);
+        } catch (Throwable ignored) {
+        }
+    }
+}

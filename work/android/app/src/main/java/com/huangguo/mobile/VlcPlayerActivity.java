@@ -323,6 +323,36 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         }
     }
 
+    // ── 媒体流走内置核心 ────────────────────────────────────────────
+    //
+    // 这条路走的是「换地址」，不是「加选项」。原因见下面 relayUrl 的注释：
+    // libVLC 的 media option 在这套 Android 构建上对 HTTP 取流全部无效，
+    // 实测过 :socks / :http-proxy / 全局 --socks 三种，SOCKS 端口始终零连接。
+    //
+    // 所以 VLC 拿到的是一个本机 HTTP 地址（VlcRelay），真正取流的是 OkHttp，
+    // 代理、TLS、Range 全在 OkHttp 那边，和 AiiHttp 走同一套 effectiveProxy()。
+    //
+    // 已知限制：核心重启会换端口，此时 VLC 正在播的那条流会断。不做热切换 ——
+    // VLC 出错重试会重走 startVlc/switchTo，那时 relayUrl() 读到新端口能自己恢复。
+    // 另外 VlcRelay 自己的监听端口一旦启动就不变，所以换的核心端口不影响它。
+
+    /**
+     * 把播放地址换成中继地址。
+     *
+     * **这是让 VLC 走代理的唯一可行办法。** 它的 media option（:socks / :http-proxy）
+     * 实测全都不生效 —— 那两个选项挂在 Live555 的 RTSP 栈上，对 HTTP 取流没用。
+     * 所以改成「换地址」：给 VLC 一个本机 HTTP 地址，背后是走代理的 OkHttp。
+     *
+     * 没有内置核心（或中继起不来）时原样返回，行为等同于直连 —— 和以前一样。
+     */
+    private String relayUrl(String url) {
+        if (url == null || url.length() == 0) return url;
+        // 判据（核心在不在跑、要不要绕）全在 VlcRelay.wrap 里，这里不再重复判断 ——
+        // 两处各判一次，早晚会有一处改漏，然后表现成「核心开着但视频直连」。
+        String wrapped = VlcRelay.wrap(url);
+        return wrapped == null ? url : wrapped;
+    }
+
     private void startVlc(String url) {
         ArrayList<String> options = new ArrayList<String>();
         options.add("--no-video-title-show");
@@ -353,7 +383,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
 
         player.setEventListener(this);
 
-        Media media = new Media(libVLC, Uri.parse(url));
+        Media media = new Media(libVLC, Uri.parse(relayUrl(url)));
         // 有些站的 CDN 会校验 Referer/UA，缺了就只回一小段或直接 403。页面那边
         // 拿不到这两个头（同样是 WebView 的限制），在这里补上。
         String referer = payload.optString("referer", "");
@@ -1376,7 +1406,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             updateEpisodeUi();
             return;
         }
-        Media media = new Media(libVLC, Uri.parse(url));
+        Media media = new Media(libVLC, Uri.parse(relayUrl(url)));
         media.setHWDecoderEnabled(hwDecode, false);
         String referer = payload.optString("referer", "");
         String agent = payload.optString("ua", "");

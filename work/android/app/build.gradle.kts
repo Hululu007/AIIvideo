@@ -123,6 +123,17 @@ dependencies {
     // libVLC：自带 FFmpeg 软解，so 只留 arm64-v8a
     implementation("org.videolan.android:libvlc-all:3.7.7")
 
+    // libv2ray（2dust/AndroidLibV2rayLite 打出来的 AAR）：给 app 起一个本地 SOCKS5，
+    // 让 OkHttp 与 libVLC 自己走代理，不碰 VpnService、不改系统路由。
+    //
+    // 仓库里这份是精简过的：原包 68MB 带四个 ABI，这里 20.4MB —— 只留
+    // arm64-v8a/libgojni.so（42MB，压缩后约 20MB）+ classes.jar + geoip/geosite。
+    // 上面 splits.abi 已经 include 了 arm64-v8a，两边口径一致：32 位机器上
+    // libgojni.so 不会出现，ProxyCore.available() 返回 false，功能整体退成直连。
+    //
+    // 放进 app/libs 并进 git，比「去某个地址下载」多换一份可复现的构建。
+    implementation(files("libs/libv2ray.aar"))
+
     testImplementation("junit:junit:4.13.2")
     // 单测的 classpath 里 android.jar 排在前面，它的 org.json 是空壳
     // （put() 不存值、size() 恒 0）。换成真的实现，否则所有断言都失真 ——

@@ -333,7 +333,10 @@ const state = {
   // 源市场 {loading, items, error}；TVBox 导入 {url, loading, items, error}
   market: null, marketReturn: null, tvbox: null,
   // 内置播放器能力 {native, abi}；null = 还没问过
-  nativeInfo: null
+  nativeInfo: null,
+  // 内置代理核心的状态 {mode, running, port, host, node, error, effective, ...}；
+  // 由 __proxy:status 合成，前端只读不算 —— 见 renderProxySettings 上面那段。
+  proxyCore: null
 };
 // 子分类下标。state.sub 只预置了内置那套的两个 key，而换源之后 state.tab 是配置
 // 里给的任意 key（苹果CMS 那边是 "1"/"2"/"3"…），取不到就得回 0 —— 不然
@@ -1258,7 +1261,7 @@ function renderSettings() {
     <section class="settings-storage"><h2>本地存储</h2><button type="button" data-clear="cache">清理内容缓存</button></section>
       <section><button type="button" class="settings-link" data-market="1"><span><strong>源市场</strong><small>粘一个源清单地址，点卡片就能用</small></span>${icon('arrow')}</button></section>
       <section><button type="button" class="settings-link" data-source-settings="1"><span><strong>内容源</strong><small>${state.sourceName ? esc(state.sourceName + '（' + state.sourceCount + ' 个已保存）') : '未配置'}</small></span>${icon('arrow')}</button></section>
-      <section><button type="button" class="settings-link" data-proxy-settings="1"><span><strong>网络代理</strong><small>${state.proxy ? esc(state.proxy) : '直连。有机场的话填这里可以绕开慢链路'}</small></span>${icon('arrow')}</button></section>
+      <section><button type="button" class="settings-link" data-proxy-settings="1"><span><strong>网络代理</strong><small>${esc(proxySummary())}</small></span>${icon('arrow')}</button></section>
       <section><button type="button" class="settings-link" data-player-settings="1"><span><strong>播放器</strong><small>${playerSummary()}</small></span>${icon('arrow')}</button></section>
     <section class="settings-reset"><h2>恢复出厂设置</h2>
       <p>退出登录，并清掉这台设备上的收藏、观看历史、内容缓存、内容源和代理，回到刚装好、还没填源的样子。账号本身和云端的片单不受影响，重新登录还能拿回来。</p>
@@ -1541,19 +1544,134 @@ function goSourceSettings() {
   content.querySelector('#source-value')?.focus();
 }
 
+// ── 网络代理 ──────────────────────────────────────────────────────────
+//
+// 三条路：直连 / 内置核心 / 外部地址。前面那条老链路（手填一个地址自己搭代理）
+// 还留着，因为它是唯一不依赖核心能不能在这台机器上跑起来的办法 —— 老设备没
+// arm64，内置核心根本起不来（ProxyCore.unavailableReason() 会给原因）。
+//
+// 页面不自己推导「现在到底走哪条」：Java 的 __proxy:status 已经把核心状态、
+// 用户手填值、以及 AiiHttp.effectiveProxy() 的结论合成了一份。这里只负责显示，
+// 因为「模式是内置、核心没起来、于是回落到外部」这三种事实的交叉判断只该有一处。
+const PROXY_MODES = [
+  { value: 'direct', label: '直连', note: '所有请求都不走代理。' },
+  { value: 'builtin', label: '内置核心', note: '粘一条分享链接，App 自己在本机起 SOCKS5。' },
+  { value: 'external', label: '外部地址', note: '自己有一个代理（路由器、电脑上跑的那个）。' }
+];
+
+// __proxy: 走 detail 桥，和 __source: 同一个套路。加动作不用碰 dispatch 那两张表。
+async function proxyCoreCommand(command) {
+  const reply = await bridgeCall('detail', { id: '__proxy:' + command });
+  const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
+  return result || {};
+}
+
+// 状态只放一份在 state 上，渲染和操作都读它，操作完把新状态整块换掉。
+function proxyState() {
+  if (!state.proxyCore) state.proxyCore = { mode: 'direct', running: false, loaded: false };
+  return state.proxyCore;
+}
+
+function applyProxyCore(status) {
+  // 合并不是覆盖：失败答复（ok:false 只带 error）不该把上一次读到的 mode/port
+  // 抹成 undefined —— 那样页面会在「内置核心」和「直连」之间闪一下。
+  const patch = {};
+  Object.keys(status || {}).forEach(key => { if (status[key] !== undefined) patch[key] = status[key]; });
+  state.proxyCore = { ...proxyState(), ...patch, loaded: true };
+  if (state.route === 'proxy-settings') renderProxySettings();
+  return state.proxyCore;
+}
+
+// 冷启动恢复一次：盘上是「内置核心」就顺手拉起，不然用户重启完 App 会发现
+// 昨晚开的代理今天没了，而页面上还写着「内置核心」。
+//
+// force = 每次进设置页都要重问一次。状态是会**自己变**的（核心可能崩了、用户可能
+// 在别处点了停止），所以「刚才查过」不能当成「现在还这样」—— 只靠启动时那一次，
+// 进设置页看到的可能还是启动那一刻的画面。页面重画时读内存那份，避免闪烁。
+function bootProxyCore(force) {
+  const core = proxyState();
+  if (core.booting) return core.booting;
+  if (core.loaded && !force) return Promise.resolve(core);
+  core.booting = proxyCoreCommand(force ? 'status' : 'boot')
+    .then(applyProxyCore)
+    .catch(error => { core.booting = null; core.error = error.message || '代理状态读不到'; applyProxyCore({}); })
+    .then(value => { core.booting = null; return value; });
+  return core.booting;
+}
+
+/** 设置页那一行的副标题。三种模式 + 核心在不在跑，一句话说完。 */
+function proxySummary() {
+  const core = proxyState();
+  const mode = core.mode || 'direct';
+  if (mode === 'builtin') {
+    if (core.running) return '内置核心 · ' + (core.host || '') + ' 已连接' + (core.node ? ' · ' + core.node : '');
+    return core.error ? '内置核心没能启动：' + core.error : '内置核心 · 未启动';
+  }
+  if (mode === 'external') return core.external ? '外部地址 · ' + core.external : '外部地址 · 还没填';
+  return '直连。有机场或自建代理的话在这儿换一条路';
+}
+
 function renderProxySettings() {
-  const current = state.proxy || '';
+  const core = proxyState();
+  const mode = core.mode || 'direct';
+  const option = (item, on) =>
+    `<button type="button" data-proxy-mode="${item.value}" aria-checked="${on ? 'true' : 'false'}" class="${on ? 'is-on' : ''}">${item.label}</button>`;
+
+  // 状态行。核心在跑时给端口，没跑时给原因 —— 「未启动」和「起不来」对用户是两件事。
+  let statusLine;
+  if (mode === 'builtin') {
+    if (core.running) statusLine = `${esc(core.host || '127.0.0.1')} 已连接${esc(core.node ? ' · ' + core.node : '')}`;
+    else if (core.unavailable) statusLine = '这台设备跑不了内置核心：' + esc(core.unavailable);
+    else if (core.error) statusLine = esc(core.error);
+    else statusLine = '未启动';
+  } else if (mode === 'external') {
+    statusLine = core.external ? '走 ' + esc(core.external) : '还没填地址，等于直连';
+  } else {
+    statusLine = '直连';
+  }
+  const statusTone = core.running && mode === 'builtin' ? ' is-live' : (core.error && mode === 'builtin' ? ' is-bad' : '');
+
   content.innerHTML = `<div class="settings-page"><button type="button" class="listing-back" data-back="1">${icon('back')} 返回设置</button><h1>网络代理</h1>
-    <section class="settings-account">
+    <section class="settings-player">
+      <h2>连接方式</h2>
+      <p>${esc(PROXY_MODES.find(item => item.value === mode)?.note || '')}</p>
+      <div class="player-options">${PROXY_MODES.map(item => option(item, item.value === mode)).join('')}</div>
+      <p class="field-hint${statusTone}">状态：${statusLine}</p>
+      ${core.effective ? `<p class="field-hint">当前实际出口：${esc(core.effective)}</p>` : ''}
+      <p id="proxy-core-error" class="auth-error" role="alert" hidden></p>
+    </section>
+    ${mode === 'builtin' ? `<section class="settings-player">
+      <h2>节点配置</h2>
+      <p>粘一条 vmess:// 或 ss:// 分享链接。核心只在本机 127.0.0.1 开一个 SOCKS5，不接管系统流量，别的 App 不受影响。</p>
+      <form id="proxy-core-form" class="password-form">
+        <label for="proxy-link">分享链接</label>
+        <input id="proxy-link" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="vmess://… 或 ss://…" value="${esc(core.link || '')}">
+        <p class="field-hint">这一条会存在 App 的私有目录里，包含 uuid / 密码，卸载即清。</p>
+        <p id="proxy-core-form-error" class="auth-error" role="alert" hidden></p>
+        <button type="submit">保存并启动</button>
+      </form>
+      <div class="player-options">
+        <button type="button" data-proxy-core="stop"${core.running ? '' : ' disabled'}>停止</button>
+        <button type="button" data-proxy-core="test"${core.running ? '' : ' disabled'}>测试连通性</button>
+      </div>
+      <p id="proxy-core-test" class="field-hint" hidden></p>
+      <p class="field-hint">核心会一直跑到你手动停止或重启手机。切到后台不停 —— 后台可能在放音频。</p>
+    </section>` : ''}
+    ${mode === 'external' ? `<section class="settings-account">
+      <h2>代理地址</h2>
       <p>填了之后所有请求都走它。适合有代理的人用来绕开慢链路。</p>
       <form id="proxy-form" class="password-form">
         <label for="proxy-value">代理地址</label>
-        <input id="proxy-value" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="127.0.0.1:7890 或 socks5://127.0.0.1:7891" value="${esc(current)}">
+        <input id="proxy-value" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="127.0.0.1:7890 或 socks5://127.0.0.1:7891" value="${esc(state.proxy || '')}">
         <p class="field-hint">支持 host:port、http://host:port、socks5://host:port。留空表示直连。</p>
         <p id="proxy-error" class="auth-error" role="alert" hidden></p>
         <button type="submit">保存</button>
       </form>
-    </section></div>`;
+    </section>` : ''}
+    ${mode === 'direct' ? `<section class="settings-player">
+      <p class="field-hint">直接连。之前配过的节点和地址都还留着，切回去就能用。</p>
+    </section>` : ''}
+  </div>`;
 }
 
 function playerSummary() {
@@ -1626,7 +1744,10 @@ function goProxySettings() {
   if (state.route !== 'settings') goSettings();
   state.proxyReturn = captureScreen();
   setRoute('proxy-settings');
+  // 先用上次那份状态画一屏（不然会白一下），再问 Java 要一次真实的。
   renderProxySettings();
+  bootProxyCore(true);
+  // 只有「外部地址」模式下才有那个输入框 —— 别的模式下别抢焦点弹键盘。
   content.querySelector('#proxy-value')?.focus();
 }
 
@@ -2750,6 +2871,29 @@ document.addEventListener('submit', async event => {
     await saveSourceNote(noteForm.dataset.sourceNoteForm, noteForm.querySelector('#source-note')?.value);
     return;
   }
+  // 内置核心的节点配置。和上面 proxy-form 的区别：这条不仅要存，还要**启动**，
+  // 而且失败时不改路由 —— Java 那边起不来就原样回来一句错，页面只显示不动别的。
+  if (event.target.id === 'proxy-core-form') {
+    event.preventDefault();
+    const input = document.getElementById('proxy-link');
+    const error = document.getElementById('proxy-core-form-error');
+    const button = event.target.querySelector('button[type="submit"]');
+    if (!input || !button) return;
+    button.disabled = true;
+    button.textContent = '正在启动…';
+    if (error) error.hidden = true;
+    try {
+      const status = await proxyCoreCommand('start?link=' + encodeURIComponent(input.value.trim()));
+      applyProxyCore(status);
+      if (status.ok === false) throw new Error(status.error || '核心没能启动');
+      toast(status.running ? '已连接 ' + (status.host || '') : '已保存，但核心没起来');
+    } catch (problem) {
+      if (error) { error.textContent = problem.message; error.hidden = false; }
+    } finally {
+      if (button.isConnected) { button.disabled = false; button.textContent = '保存并启动'; }
+    }
+    return;
+  }
   if (event.target.id !== 'password-form') return;
   event.preventDefault();
   const form = event.target;
@@ -2830,6 +2974,48 @@ document.addEventListener('click', async event => {
     else if (key === 'cache') savePlayerPrefs({ cache: Number(value) });
     else if (key === 'autoFallback') savePlayerPrefs({ autoFallback: value === 'on' });
     renderPlayerSettings();
+    return;
+  }
+  const proxyModeButton = event.target.closest('[data-proxy-mode]');
+  if (proxyModeButton) {
+    const value = proxyModeButton.dataset.proxyMode;
+    // 已经是这个模式就别再走一趟：切到 builtin 会真的去启核心，
+    // 而用户点一下已选中的按钮只是想「确认」，不该触发一次启停。
+    if (value === (proxyState().mode || 'direct')) return;
+    proxyModeButton.disabled = true;
+    proxyCoreCommand('mode?value=' + encodeURIComponent(value))
+      .then(applyProxyCore)
+      .catch(problem => toast(problem.message, true))
+      .then(() => { if (state.route === 'proxy-settings') renderProxySettings(); });
+    return;
+  }
+  const coreAction = event.target.closest('[data-proxy-core]');
+  if (coreAction) {
+    const action = coreAction.dataset.proxyCore;
+    coreAction.disabled = true;
+    if (action === 'stop') {
+      proxyCoreCommand('stop')
+        .then(applyProxyCore)
+        .catch(problem => toast(problem.message, true));
+      return;
+    }
+    // 测试连通性单独一条：它不重画整页（那样会把刚写进 status 的毫秒数擦掉），
+    // 只把结果写到下面那行提示里。
+    const label = document.getElementById('proxy-core-test');
+    if (label) { label.hidden = false; label.classList.remove('is-bad'); label.textContent = '正在测…'; }
+    proxyCoreCommand('test').then(result => {
+      if (!label) return;
+      label.hidden = false;
+      if (result.ok && Number(result.ms) > 0) {
+        label.classList.remove('is-bad');
+        label.textContent = `通了 · ${result.ms}ms`;
+      } else {
+        label.classList.add('is-bad');
+        label.textContent = result.error || '测不通';
+      }
+    }).catch(problem => {
+      if (label) { label.hidden = false; label.classList.add('is-bad'); label.textContent = problem.message; }
+    }).then(() => { coreAction.disabled = !proxyState().running; });
     return;
   }
   if (event.target.closest('[data-source-settings]')) { goSourceSettings(); return; }
@@ -3119,6 +3305,12 @@ document.getElementById('age-exit').addEventListener('click', () => { document.g
 // 而 bridgeCall 会把它带进每个请求；先过闸门的话，设置页那次 __source:get 会带着
 // 默认的 'hongguo' 发出去，被路由到红果源，报一个跟源配置毫无关系的错。
 // 闸门放在它之后：既不影响 contentReady，又能在拉接口之前把没配源的用户拦下。
+//
+// 代理核心**不能挂在闸门后面**：HGSetup.ensure() 在没配源的机器上永远不 resolve
+// （它故意吊着等用户在设置页填源），于是「内置核心」模式下的用户在填源之前，
+// 重新打开 App 会发现昨晚开的代理没了 —— 而代理跟内容源毫无关系。
+// 所以按盘上模式恢复核心这一步单独挂在 contentReady 上，和闸门并行。
+contentReady.then(() => bootProxyCore());
 contentReady
   .then(() => (window.HGSetup ? window.HGSetup.ensure() : undefined))
   .then(() => {

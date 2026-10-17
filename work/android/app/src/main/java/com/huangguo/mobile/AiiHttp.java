@@ -95,6 +95,59 @@ public final class AiiHttp {
     private static final String PROXY_KEY = "proxy";
     private static volatile String appliedProxy = null;
 
+    /**
+     * 真正拿去建客户端的那个代理串。跟 appliedProxy 的区别：后者只记「用户手填的」，
+     * 因为 setProxy() 改的也是它 —— 两者混用的话，内置核心一启动，
+     * 「用户填的代理」这个事实就丢了，阶段 4 的设置页读回 proxyRaw() 会读出一个
+     * 用户从没填过的 127.0.0.1 端口号。
+     */
+    private static volatile String appliedEffective = null;
+
+    // ── 代理来源的优先级 ──────────────────────────────────────────────
+    //
+    // 两个来源：内置核心起的本地 SOCKS5，和用户手填的外部地址。
+    // 内置优先 —— 用户点「开启」就是明确要用它，手填的那条只是他没删掉的历史配置。
+    //
+    // **回落语义要想清楚再改：** 内置核心没跑（含启动失败）时这里回落，不是置空。
+    // 用户填了外部代理就还走那条，什么都没填才是直连。所以「核心挂了」不等于
+    // 「流量从本地 IP 出去」，除非他本来就没配过外部代理。
+    // 失败时的报文由 UI 负责（ProxyCore.lastError()），这一层只决定走哪条管道路由。
+    //
+    // 反过来说，「只要内置、不许回落」是个合理的诉求 —— 那是阶段 4 的设置项，
+    // 不是这里的判断。这里一旦硬编码成「内置挂了就直连」，用户会以为代理还生效着。
+    //
+    // 别把这段逻辑读进 proxyRaw()：它代表「用户填了什么」，是这个类对外唯一的
+    // 那个事实来源，混进来之后阶段 4 就没法把两个概念分开显示了。
+    static String effectiveProxy(String builtin, String raw) {
+        if (builtin != null && builtin.length() > 0) return builtin;
+        return raw == null ? "" : raw;
+    }
+
+    /**
+     * 当前的代理串。每次建客户端时问一次，所以核心启停之后必须
+     * invalidateClients()，否则旧客户端会一直用着上一个代理。
+     */
+    static String effectiveProxy() {
+        return effectiveProxy(builtinProxy(), proxyRaw());
+    }
+
+    /**
+     * 内置核心的地址，空串表示没跑或起不来。
+     *
+     * 取不到 context 就直接当没跑：init() 之前不会有请求，真走到了说明调用顺序
+     * 出了问题，这时候把「内置不可用」当结论比抛异常安全 —— 代理配置永远不该
+     * 成为整个 App 的启动阻塞点。
+     */
+    private static String builtinProxy() {
+        Context context = appContext;
+        if (context == null) return "";
+        try {
+            return ProxyCore.get(context).socksUrl();
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
     // ── 预热（②） ─────────────────────────────────────────────────────
     //
     // 解决的问题：冷启动第一屏要走「DoH 解析 → TLS 握手 → 首字节」这条链，
@@ -384,10 +437,7 @@ public final class AiiHttp {
         GENERATION.incrementAndGet();
         WARMING.clear();
         PREFETCH.clear();
-        client = null;
-        appliedProxy = null;
-        plainClient = null;
-        plainAppliedProxy = null;
+        invalidateClients();
         log("换源：清掉预热 " + wasPrefetch + " 条、在飞 " + wasWarming + " 条，连接池作废");
     }
 
@@ -600,12 +650,12 @@ public final class AiiHttp {
     }
 
     private static OkHttpClient client(SiteProfile profile) {
-        final String want = proxyRaw();
+        final String want = effectiveProxy();
         OkHttpClient existing = client;
         // 代理改了必须重建 —— OkHttp 的 proxy 是构造期定下来的，改不了。
-        if (existing != null && want.equals(appliedProxy)) return existing;
+        if (existing != null && want.equals(appliedEffective)) return existing;
         synchronized (AiiHttp.class) {
-            if (client == null || !want.equals(appliedProxy)) {
+            if (client == null || !want.equals(appliedEffective)) {
                 OkHttpClient.Builder builder = new OkHttpClient.Builder()
                         .dns(new SmartDns(profile))
                         .connectTimeout(CONNECT_TIMEOUT, TimeUnit.SECONDS)
@@ -619,7 +669,7 @@ public final class AiiHttp {
                     log("代理地址认不出来，按直连处理：" + want);
                 }
                 client = builder.build();
-                appliedProxy = want;
+                appliedEffective = want;
             }
             return client;
         }
@@ -627,14 +677,14 @@ public final class AiiHttp {
 
     /** 只谈 HTTP/1.1 的同一套客户端。给「h2 被中间设备重置」的场景兜底用。 */
     private static volatile OkHttpClient http1Client;
-    private static volatile String http1AppliedProxy = null;
+    private static volatile String http1AppliedEffective = null;
 
     private static OkHttpClient http1Client(SiteProfile profile) {
-        final String want = proxyRaw();
+        final String want = effectiveProxy();
         OkHttpClient existing = http1Client;
-        if (existing != null && want.equals(http1AppliedProxy)) return existing;
+        if (existing != null && want.equals(http1AppliedEffective)) return existing;
         synchronized (AiiHttp.class) {
-            if (http1Client == null || !want.equals(http1AppliedProxy)) {
+            if (http1Client == null || !want.equals(http1AppliedEffective)) {
                 OkHttpClient.Builder builder = new OkHttpClient.Builder()
                         .dns(new SmartDns(profile))
                         .protocols(java.util.Collections.singletonList(okhttp3.Protocol.HTTP_1_1))
@@ -646,7 +696,7 @@ public final class AiiHttp {
                     attachAuth(builder, route);
                 }
                 http1Client = builder.build();
-                http1AppliedProxy = want;
+                http1AppliedEffective = want;
             }
             return http1Client;
         }
@@ -661,14 +711,14 @@ public final class AiiHttp {
      * 代理改了要重建，跟主客户端一个规矩。
      */
     private static volatile OkHttpClient plainClient;
-    private static volatile String plainAppliedProxy = null;
+    private static volatile String plainAppliedEffective = null;
 
     private static OkHttpClient plainClient(int timeoutSeconds) {
-        final String want = proxyRaw();
+        final String want = effectiveProxy();
         OkHttpClient existing = plainClient;
-        if (existing != null && want.equals(plainAppliedProxy)) return existing;
+        if (existing != null && want.equals(plainAppliedEffective)) return existing;
         synchronized (AiiHttp.class) {
-            if (plainClient == null || !want.equals(plainAppliedProxy)) {
+            if (plainClient == null || !want.equals(plainAppliedEffective)) {
                 OkHttpClient.Builder builder = new OkHttpClient.Builder()
                         .connectTimeout(timeoutSeconds, TimeUnit.SECONDS)
                         .readTimeout(timeoutSeconds, TimeUnit.SECONDS);
@@ -678,7 +728,7 @@ public final class AiiHttp {
                     attachAuth(builder, route);
                 }
                 plainClient = builder.build();
-                plainAppliedProxy = want;
+                plainAppliedEffective = want;
             }
             return plainClient;
         }
@@ -686,14 +736,14 @@ public final class AiiHttp {
 
     /** plain 客户端的 HTTP/1.1 变体，用途同上：h2 被掐时的兜底。 */
     private static volatile OkHttpClient plainHttp1;
-    private static volatile String plainHttp1AppliedProxy = null;
+    private static volatile String plainHttp1AppliedEffective = null;
 
     private static OkHttpClient plainHttp1Client(int timeoutSeconds) {
-        final String want = proxyRaw();
+        final String want = effectiveProxy();
         OkHttpClient existing = plainHttp1;
-        if (existing != null && want.equals(plainHttp1AppliedProxy)) return existing;
+        if (existing != null && want.equals(plainHttp1AppliedEffective)) return existing;
         synchronized (AiiHttp.class) {
-            if (plainHttp1 == null || !want.equals(plainHttp1AppliedProxy)) {
+            if (plainHttp1 == null || !want.equals(plainHttp1AppliedEffective)) {
                 OkHttpClient.Builder builder = new OkHttpClient.Builder()
                         .protocols(java.util.Collections.singletonList(okhttp3.Protocol.HTTP_1_1))
                         .connectTimeout(timeoutSeconds, TimeUnit.SECONDS)
@@ -704,7 +754,7 @@ public final class AiiHttp {
                     attachAuth(builder, route);
                 }
                 plainHttp1 = builder.build();
-                plainHttp1AppliedProxy = want;
+                plainHttp1AppliedEffective = want;
             }
             return plainHttp1;
         }
@@ -725,6 +775,32 @@ public final class AiiHttp {
         return raw == null ? "" : raw.trim();
     }
 
+    /**
+     * 让下一次请求重建全部客户端。
+     *
+     * 为什么不是「改代理串再重建」：内置核心启停时用户的代理串一个字都没变，
+     * 变的只是生效来源。所以这里只作废缓存，让各个 client() 下次自己
+     * 重新问一遍 effectiveProxy() —— 四个构造点本来就都有这层判据。
+     *
+     * 只置缓存字段不够的地方：OkHttp 的连接池和 TLS 会话都挂在已建好的实例上，
+     * 不换实例的话旧连接会继续指向已经关掉的端口。
+     */
+    static void invalidateClients() {
+        synchronized (AiiHttp.class) {
+            client = null;
+            appliedProxy = null;
+            appliedEffective = null;
+            http1Client = null;
+            http1AppliedEffective = null;
+            plainClient = null;
+            plainAppliedEffective = null;
+            plainHttp1 = null;
+            plainHttp1AppliedEffective = null;
+        }
+        // 媒体代理是另一条链路，但它读的是同一个 effectiveProxy()。
+        MediaProxy.invalidate();
+    }
+
     /** 写入代理串并让客户端重建。返回 null 表示成功，否则是一句给人看的错。 */
     public static String setProxy(String value) {
         SharedPreferences store = netStore();
@@ -734,10 +810,7 @@ public final class AiiHttp {
             return "格式看不懂。可以填 host:port、socks5://host:port，带账号密码写成 user:pass@host:port";
         }
         store.edit().putString(PROXY_KEY, clean).apply();
-        appliedProxy = null;
-        client = null;                 // 逼下一次请求重建
-        plainAppliedProxy = null;
-        plainClient = null;
+        invalidateClients();           // 逼下一次请求重建
         return null;
     }
 
@@ -815,6 +888,21 @@ public final class AiiHttp {
             if (Character.isWhitespace(host.charAt(i))) return null;
         }
         return new Route(new Proxy(type, InetSocketAddress.createUnresolved(host, port)), user, pass);
+    }
+
+    /**
+     * 把代理串挂到 builder 上。给 MediaProxy 这类「自己建客户端但该跟随同一套
+     * 代理语义」的调用方用 —— 认格式和带认证的规则只该有一份实现。
+     *
+     * @return null 表示没代理（直连）或挂上了；非 null 是那句认不出来的原串，调用方拿去打日志
+     */
+    static String attachProxy(OkHttpClient.Builder builder, String proxyText) {
+        if (proxyText == null || proxyText.trim().length() == 0) return null;
+        Route route = parseProxy(proxyText);
+        if (route == null) return proxyText;
+        builder.proxy(route.proxy);
+        attachAuth(builder, route);
+        return null;
     }
 
     /** 把凭据挂到客户端上。HTTP 走 proxyAuthenticator，SOCKS 走全局 Authenticator。 */
