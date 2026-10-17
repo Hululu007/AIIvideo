@@ -1,5 +1,9 @@
 package com.huangguo.mobile;
 
+import android.content.Context;
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -54,6 +58,46 @@ final class Subscription {
      * （很多人订阅地址本身就要翻墙才能访问），而 AiiHttp 已经带着 effectiveProxy。
      * 走同一个客户端也省得再处理一遍 DoH / 重试 / 用户代理。
      */
+    /**
+     * 内置的免费节点，打进 APK 的 assets/free-nodes.json。
+     *
+     * 这是「没机场的人」的默认路径 —— 他们不需要知道订阅是什么，进设置页
+     * 点一下测速就行。文件由维护者人工更新，格式见文件里的 _note。
+     *
+     * 为什么不用 assets 里直接塞原始订阅文本：那样维护的人得懂 base64，
+     * 而且改一条要重算整个编码。JSON 数组是所有人都能直接改的形态。
+     */
+    static Result builtin(Context context) {
+        Result empty = new Result();
+        try {
+            String text = new String(
+                    HotUpdateManager.read(context.getAssets().open(BUILTIN_ASSET), MAX_BYTES),
+                    StandardCharsets.UTF_8);
+            JSONObject root = new JSONObject(text);
+            JSONArray links = root.optJSONArray("links");
+            if (links == null) {
+                empty.firstError = "内置节点文件里没有 links 数组";
+                return empty;
+            }
+            StringBuilder joined = new StringBuilder(links.length() * 120);
+            for (int i = 0; i < links.length(); i++) {
+                String line = links.optString(i, "").trim();
+                if (line.length() > 0) joined.append(line).append('\n');
+            }
+            // 直接复用 parse：去重、逐条校验、统计失败数都是现成的。
+            // 这样「内置」和「订阅」走的是同一套解析，不会出现两份行为不一致。
+            return parse(joined.toString());
+        } catch (Throwable e) {
+            String m = e.getMessage();
+            empty.firstError = m == null || m.isEmpty()
+                    ? "内置节点读不出来（" + e.getClass().getSimpleName() + "）" : m;
+            return empty;
+        }
+    }
+
+    /** 内置节点文件的资产名。 */
+    static final String BUILTIN_ASSET = "free-nodes.json";
+
     static Result fetch(String url, int timeoutSeconds) throws Exception {
         if (url == null || url.trim().isEmpty()) {
             throw new IllegalArgumentException("订阅地址是空的");

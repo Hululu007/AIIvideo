@@ -132,6 +132,53 @@ public class SubscriptionTest {
         assertTrue("应含节点数：" + s, s.contains("1"));
     }
 
+    // ── 内置节点文件 ───────────────────────────────────────────────────
+
+    /**
+     * assets/free-nodes.json 必须能被解析出节点。
+     *
+     * 这条测的是**真实资产文件**，不是构造的字符串 —— 维护的人改了那个 JSON
+     * （加节点、改格式、手滑删个引号），这里会直接红，而不是等到用户点测速
+     * 才发现「内置节点列表是空的」。
+     */
+    @Test
+    public void 内置节点文件可解析() throws Exception {
+        String path = "src/main/assets/free-nodes.json";
+        java.io.File file = new java.io.File(path);
+        if (!file.exists()) {
+            // Gradle 单测的工作目录是模块根目录；换个位置再找一次。
+            file = new java.io.File("app/" + path);
+        }
+        assertTrue("找不到 " + path, file.exists());
+
+        java.io.InputStream in = new java.io.FileInputStream(file);
+        String text;
+        try {
+            java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+            byte[] chunk = new byte[8192];
+            int n;
+            while ((n = in.read(chunk)) > 0) buf.write(chunk, 0, n);
+            text = new String(buf.toByteArray(), StandardCharsets.UTF_8);
+        } finally {
+            in.close();
+        }
+
+        org.json.JSONObject root = new org.json.JSONObject(text);
+        org.json.JSONArray links = root.optJSONArray("links");
+        assertNotNull("缺 links 数组", links);
+        assertTrue("links 是空的", links.length() > 0);
+
+        // 把 links 拼成行再走正常解析 —— 和 Subscription.builtin() 同一套逻辑。
+        StringBuilder joined = new StringBuilder();
+        for (int i = 0; i < links.length(); i++) {
+            joined.append(links.optString(i, "")).append('\n');
+        }
+        Subscription.Result r = Subscription.parse(joined.toString());
+        assertEquals("links 里的条目应该全部能解析（失败的会在 failed 里）",
+                links.length() - r.failed, r.size());
+        assertTrue("至少要解析出一个节点", r.size() > 0);
+    }
+
     // ── 测速结果排序 ──────────────────────────────────────────────────
 
     /** 排序：通的在前按延迟升序，不通的沉底。 */

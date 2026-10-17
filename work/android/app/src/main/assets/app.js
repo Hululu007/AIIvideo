@@ -1644,6 +1644,39 @@ function renderProxySettingsKeepScroll() {
   if (document.scrollingElement) document.scrollingElement.scrollTop = scroll;
 }
 
+/**
+ * 跑一轮测速。
+ *
+ * 单独抽出来是因为有两个入口：点「测速并挑选」，以及导入订阅之后自动跑一次。
+ * 两处各写一遍的话，进度文案和失败处理迟早分叉。
+ */
+async function runSpeedTest() {
+  const sub = subState();
+  if (sub.busy) return;
+  sub.busy = true;
+  sub.testing = true;
+  sub.speedNote = '正在测速，最多 20 秒…';
+  sub.speed = [];
+  renderProxySettingsKeepScroll();
+  try {
+    const result = await proxyCoreCommand('speed');
+    sub.busy = false;
+    sub.testing = false;
+    if (result.ok === false) throw new Error(result.error || '测速失败');
+    sub.speed = Array.isArray(result.nodes) ? result.nodes : [];
+    sub.count = result.total || sub.count;
+    // 说清测的是哪一份：内置那份是 App 自带，订阅那份是用户自己导的。
+    const from = result.source === 'subscription' ? '你的订阅' : '内置的免费节点';
+    sub.speedNote = '从' + from + '里挑了 ' + (result.total || 0)
+      + ' 个来测，通了 ' + (result.usable || 0) + ' 个。点一行直接连。';
+  } catch (problem) {
+    sub.busy = false;
+    sub.testing = false;
+    sub.speedNote = problem.message;
+  }
+  renderProxySettingsKeepScroll();
+}
+
 function renderSpeedList(sub) {
   const usable = (sub.speed || []).filter(item => item.ok);
   if (!usable.length) return '';
@@ -1702,21 +1735,26 @@ function renderProxySettings() {
       <p class="field-hint">核心会一直跑到你手动停止或重启手机。切到后台不停 —— 后台可能在放音频。</p>
     </section>
     <section class="settings-player">
-      <h2>从订阅导入</h2>
-      <p>没有机场的话，粘一个订阅地址进来，App 拉下来自己测速挑最快的。有机场的人也可以用它一次导入几十个节点。</p>
+      <h2>免费节点</h2>
+      <p>App 自带一组公开共享节点。点一下测速，挑快的直接连 —— 不用注册、不用填任何东西。</p>
+      <div class="player-options">
+        <button type="button" data-proxy-sub="speed">${sub.testing ? '测速中…' : '测速并挑选'}</button>
+      </div>
+      <p id="proxy-sub-speed" class="field-hint"${sub.speedNote ? '' : ' hidden'}>${esc(sub.speedNote || '')}</p>
+      ${renderSpeedList(sub)}
+      <p class="field-hint">公开共享节点，随时可能失效；流量会经过陌生人的服务器，别用来登录重要账号。连不上就过一会儿再试，或者往下面用自己的订阅。</p>
+    </section>
+    <section class="settings-player">
+      <h2>用自己的订阅</h2>
+      <p>有机场的话，粘它的订阅地址，App 会拉下来测速，比免费节点稳得多。</p>
       <form id="proxy-sub-form" class="password-form">
         <label for="proxy-sub-url">订阅地址</label>
         <input id="proxy-sub-url" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://…/sub" value="${esc(sub.url || '')}">
         <p class="field-hint">支持节点列表和 base64 两种格式。Clash 的 YAML 不支持，用机场后台的「V2Ray 订阅」链接。</p>
-        <button type="submit">拉取节点</button>
+        <button type="submit">拉取并测速</button>
       </form>
       <p id="proxy-sub-status" class="field-hint"${sub.summary ? '' : ' hidden'}>${esc(sub.summary || '')}</p>
-      <div class="player-options">
-        <button type="button" data-proxy-sub="speed"${sub.count ? '' : ' disabled'}>${sub.testing ? '测速中…' : '测速并排序'}</button>
-      </div>
-      <p id="proxy-sub-speed" class="field-hint"${sub.speedNote ? '' : ' hidden'}>${esc(sub.speedNote || '')}</p>
-      ${renderSpeedList(sub)}
-      <p class="field-hint">这些是公开共享节点，随时可能失效；流量经过陌生人的服务器，别用来登录重要账号。</p>
+      ${sub.url ? '<div class="player-options"><button type="button" data-proxy-sub="clear">改回用免费节点</button></div>' : ''}
     </section>` : ''}
     ${mode === 'external' ? `<section class="settings-account">
       <h2>代理地址</h2>
@@ -2974,9 +3012,11 @@ document.addEventListener('submit', async event => {
       if (result.ok === false) throw new Error(result.error || '订阅没拉到');
       // 换了订阅，上一次的测速结果整套作废 —— 下标对不上了。
       state.proxySub = { url: result.url || url, count: result.count || 0,
-                         summary: result.summary || '', speedNote: '', speed: [], testing: false, busy: false };
+                         summary: result.summary || '', speedNote: '正在测速，最多 20 秒…',
+                         speed: [], testing: true, busy: true };
       renderProxySettingsKeepScroll();
-      toast('拉到 ' + (result.count || 0) + ' 个节点');
+      // 拉完直接测，用户不用再点一次 —— 「拉取」这个动作的意图就是要连上。
+      runSpeedTest();
     } catch (problem) {
       if (statusLine) { statusLine.hidden = false; statusLine.classList.add('is-bad'); statusLine.textContent = problem.message; }
       button.disabled = false;
@@ -2986,28 +3026,17 @@ document.addEventListener('submit', async event => {
   }
   const subAction = event.target.closest('[data-proxy-sub]');
   if (subAction) {
-    const sub = subState();
-    if (sub.busy) return;
-    sub.busy = true;
-    sub.testing = true;
-    sub.speedNote = '正在测速，最多 20 秒…';
-    sub.speed = [];
-    renderProxySettingsKeepScroll();
-    try {
-      const result = await proxyCoreCommand('speed');
-      sub.busy = false;
-      sub.testing = false;
-      if (result.ok === false) throw new Error(result.error || '测速失败');
-      sub.speed = Array.isArray(result.nodes) ? result.nodes : [];
-      sub.count = result.total || sub.count;
-      sub.speedNote = `测了 ${result.total || 0} 个，通了 ${result.usable || 0} 个。点一行直接连。`;
-      renderProxySettingsKeepScroll();
-    } catch (problem) {
-      sub.busy = false;
-      sub.testing = false;
-      sub.speedNote = problem.message;
-      renderProxySettingsKeepScroll();
+    const action = subAction.dataset.proxySub;
+    if (action === 'clear') {
+      subAction.disabled = true;
+      proxyCoreCommand('subclear').then(() => {
+        state.proxySub = { url: '', count: 0, summary: '', speedNote: '', speed: [], testing: false, busy: false };
+        renderProxySettingsKeepScroll();
+        toast('已改回用内置的免费节点');
+      }).catch(problem => { toast(problem.message, true); subAction.disabled = false; });
+      return;
     }
+    runSpeedTest();
     return;
   }
   const useNode = event.target.closest('[data-proxy-use]');

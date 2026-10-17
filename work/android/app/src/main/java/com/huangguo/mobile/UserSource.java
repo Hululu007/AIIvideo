@@ -2043,6 +2043,7 @@ public final class UserSource {
             if ("mode".equals(action)) return proxyMode(context, param(query, "value"), out);
             if ("boot".equals(action)) return proxyBoot(context, out);
             if ("sub".equals(action)) return proxySubscribe(context, param(query, "url"), out);
+            if ("subclear".equals(action)) return proxySubClear(context, out);
             if ("speed".equals(action)) return proxySpeed(context, out);
             if ("use".equals(action)) return proxyUse(context, param(query, "index"), out);
             return fail(out, "不认识的代理指令：" + action);
@@ -2328,21 +2329,49 @@ public final class UserSource {
      * **不用排序后的下标** —— 排序只是给 UI 看的建议顺序，下标一旦被排序
      * 打乱，前端拿它回查就会错位。
      */
+    /**
+     * 忘掉导入过的订阅，回到「用内置免费节点」。
+     *
+     * 和 clear 分开：clear 清的是**节点分享链接**（用户手填的那条），
+     * 这条清的是**订阅地址**。两者存在不同键里，混用会让「改回用免费节点」
+     * 顺手把用户辛苦挑的那个节点也删了。
+     */
+    private static JSONObject proxySubClear(Context context, JSONObject out) throws Exception {
+        proxyStore(context).edit().remove(SUB_URL_KEY).apply();
+        lastSpeedTest = null;
+        out.put("ok", true);
+        out.put("source", "builtin");
+        return out;
+    }
+
+    /**
+     * 测速。**默认测内置的那份**，用户导入过订阅才测订阅的。
+     *
+     * 这个优先级是刻意的：没机场的人不该被要求「先去弄个订阅地址」——
+     * 他们打开设置页点一下就该看到几个能连的节点。订阅是给有机场的人
+     * 加的那条路，不是前置条件。
+     *
+     * 判断依据是 SUB_URL_KEY 有没有值，不是 mode：用户可能导入过订阅但
+     * 后来又切回直连，那时候测速仍然该测他导入的那份。
+     */
     private static JSONObject proxySpeed(Context context, JSONObject out) throws Exception {
         Subscription.Result parsed;
+        String target = proxyStore(context).getString(SUB_URL_KEY, "");
+        boolean fromSubscription = target != null && target.length() > 0;
         try {
-            String target = proxyStore(context).getString(SUB_URL_KEY, "");
-            if (target == null || target.length() == 0) {
-                return fail(out, "先导入订阅再测速");
-            }
-            parsed = Subscription.fetch(target, 20);
+            parsed = fromSubscription ? Subscription.fetch(target, 20) : Subscription.builtin(context);
         } catch (Throwable e) {
             String m = e.getMessage();
             out.put("ok", false);
-            out.put("error", m == null || m.isEmpty() ? "订阅拉取失败" : m);
+            out.put("error", m == null || m.isEmpty() ? "节点列表读不出来" : m);
+            out.put("source", fromSubscription ? "subscription" : "builtin");
             return out;
         }
-        if (parsed.size() == 0) return fail(out, "订阅里没有可用的节点");
+        if (parsed.size() == 0) {
+            String reason = parsed.firstError;
+            return fail(out, reason != null && reason.length() > 0 ? reason
+                    : (fromSubscription ? "订阅里没有可用的节点" : "内置节点列表是空的"));
+        }
 
         // 数量必须限量，因为测速是**串行**的（并发会互相踩断，见 SpeedTest 的注释）。
         // 12 个 × 3 秒封顶 = 36 秒，落在 20 秒上限内能测完的最多是 6~7 个，
@@ -2379,6 +2408,10 @@ public final class UserSource {
         out.put("total", items.size());
         out.put("usable", usable);
         out.put("nodes", arr);
+        // 让前端能说清「测的是哪一份」：内置那份是 App 自带、
+        // 订阅那份是用户自己导的，出错时这两种要分别提示。
+        out.put("source", fromSubscription ? "subscription" : "builtin");
+        out.put("pool", parsed.size());
         return out;
     }
 
