@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  AIIvideo 图标前景：居中一个黑色的 A。
+  画布 108×108 与自适应图标规范一致；A 收在中心半径 34 以内，
+  圆形 / 圆角方形 / 方形三种蒙版下都不会被裁掉。
+  底是白色的，来自 @color/orange_icon_background（原版就是 #ffffff）。
+
+  三段同色图形拼出字母，不用挖洞：
+    1) 左斜杠 —— 与 2) 在顶部共用同一段横边，自然形成平顶
+    2) 右斜杠
+    3) 横杠（梯形）—— 左右腰贴着两条斜杠的外沿，接上去不留缝
+  于是上半部的三角字腔和下半部的开裆都是"没画"画出来的。
+
+  源文件（同一套几何，可直接预览）：work/shells/brand/aiivideo-icon.svg
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#ff000000"
+        android:pathData="M48.75,29 L59.25,29 L39.5,81 L29,81 Z" />
+    <path
+        android:fillColor="#ff000000"
+        android:pathData="M48.75,29 L59.25,29 L79,81 L68.5,81 Z" />
+    <path
+        android:fillColor="#ff000000"
+        android:pathData="M36.22,62 L71.78,62 L75.58,72 L32.42,72 Z" />
+</vector>

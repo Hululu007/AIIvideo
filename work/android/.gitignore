@@ -1,0 +1,24 @@
+# Gradle / AGP
+.gradle/
+build/
+local.properties
+*.iml
+
+# 派生资源：site-default.json 是唯一来源，site-web.js 每次 preBuild 现生成
+app/src/main/assets/site-web.js
+
+# 构建脚本的临时产物
+.build-last-apk
+.build/
+
+# 签名（本地各自配一份；公开仓库不放密钥）
+keystore/
+keystore.properties
+*.keystore
+*.jks
+
+# 编辑器和系统
+.DS_Store
+Thumbs.db
+.idea/
+*.swp

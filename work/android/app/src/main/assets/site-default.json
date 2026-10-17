@@ -1,0 +1,267 @@
+{
+  "origin": "",
+  "headers": {
+    "User-Agent": "Mozilla/5.0 (Linux; Android) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36",
+    "Referer": "{origin}/"
+  },
+  "doh": {
+    "enabled": true,
+    "_why": "入口域名的系统解析可能被污染（huangguoai.com 实测解析出 108.160.165.48 / 162.125.32.12 / 69.171.228.74 等互不相同的外网地址）。DoH 能绕开运营商那一跳，但绕不开服务商自己的递归 —— 阿里和腾讯对 huangguoai.com 同样给毒答案，只是换成了加密通道递过来；墙外的 8.8.8.8 / 1.1.1.1 这台设备根本连不上（6 秒超时）。所以它的作用不是「救黑名单域名」，而是拿到某个域名的全部 IP 交给 OkHttp 轮询。服务商这里写域名 + ips：域名让 SNI 和证书校验成立，ips 让解析不依赖系统（否则解析 DoH 服务器本身又要先解析，递归）。",
+    "servers": [
+      {
+        "name": "阿里DNS",
+        "url": "https://dns.alidns.com/resolve",
+        "ips": [
+          "223.5.5.5",
+          "223.6.6.6"
+        ]
+      },
+      {
+        "name": "腾讯DNS",
+        "url": "https://doh.pub/dns-query",
+        "ips": [
+          "120.53.53.53",
+          "1.12.12.12"
+        ]
+      }
+    ]
+  },
+  "cover": {
+    "allowedHosts": [
+      "pic.fisawck.cn",
+      "pic.tkzdds.cn",
+      "pic.wirqed.cn",
+      "pic.drleao.cn"
+    ],
+    "hostRewrites": {},
+    "mode": "aes-cbc",
+    "transformation": "AES/CBC/NoPadding",
+    "key": "f5d965df75336270",
+    "iv": "97b60374abc2fbe1",
+    "keyEncoding": "text",
+    "checkExtension": true,
+    "headerRepair": "legacy-xor",
+    "bytePatches": []
+  },
+  "_note": "AIIvideo 改造版 —— 全项目唯一的配置文件。\nJava 侧 SiteProfile 直接读这个文件；前端读不了 JSON（页面 CSP 是 connect-src 'none'），\n所以构建时由 work/shells/gen-web-config.py 把 web 块（外加顶层 origin）生成成\nassets/site-web.js。那份是派生产物，不要手改，也不进补丁集。\n抓 HTML 那套已整块移除，所以 routes/selectors/patterns 三个键不需要了。",
+  "web": {
+    "coverOrigin": "https://pic.drleao.cn",
+    "categories": {
+      "ai-duanju": 24,
+      "ai-manju": 25,
+      "ai-huanlian": 26,
+      "ai-mogai": 27
+    },
+    "firstPageSize": 8,
+    "pageSize": 20,
+    "paths": {
+      "home": "/api/home",
+      "detail": "/api/videos/{id}",
+      "episode": "/api/videos/{id}/play?ep={episode}",
+      "search": "/api/search?q={keyword}&page={page}",
+      "category": "/api/videos?cate_id={cateId}&page={page}&size={size}",
+      "tags": "/api/tags",
+      "recommend": "/api/videos?page={page}&size={size}",
+      "newest": "/api/videos?sort=new&page={page}&size={size}",
+      "tag-list": "/api/search?q={keyword}&page={page}"
+    },
+    "ui": {
+      "_why": "界面常量。以前硬编码在 app.js 第 69-81 行。tabs 是底部导航中间那几格，换源时由适配器整块替换；categoryIds / categoryLabels / categoryTitles / categoryLeads 都按 tabs 的 key 索引 —— 加一个 tab 就得在这几张表里都补上，缺哪张那张就退回默认文案。categoryIds 里的 slug 还必须在上面 categories 里有对应 cate_id，只加一边的话点那个分类会算出 null，落到 Java 桥撞上已抛异常的桩。",
+      "categoryIds": {
+        "adult": [
+          "ai-duanju",
+          "ai-manju"
+        ],
+        "ai": [
+          "ai-huanlian",
+          "ai-mogai"
+        ]
+      },
+      "popularTags": [
+        [
+          "dushi",
+          "都市"
+        ],
+        [
+          "xiaoyuan",
+          "校园"
+        ],
+        [
+          "gufeng",
+          "古风"
+        ],
+        [
+          "haomen",
+          "豪门"
+        ],
+        [
+          "chuanyue",
+          "穿越"
+        ],
+        [
+          "chongsheng",
+          "重生"
+        ],
+        [
+          "qihuan",
+          "奇幻"
+        ],
+        [
+          "zhichang",
+          "职场"
+        ]
+      ],
+      "publicPopularTags": [
+        [
+          "short:romance",
+          "爱情"
+        ],
+        [
+          "short:period",
+          "年代"
+        ],
+        [
+          "short:comeback",
+          "逆袭"
+        ],
+        [
+          "short:suspense",
+          "悬疑"
+        ],
+        [
+          "comic:creative",
+          "脑洞"
+        ],
+        [
+          "comic:fantasy",
+          "玄幻"
+        ],
+        [
+          "comic:apocalypse",
+          "末世"
+        ],
+        [
+          "comic:adventure",
+          "冒险"
+        ]
+      ],
+      "tagGroups": [
+        [
+          "popular",
+          "热门类型"
+        ],
+        [
+          "story",
+          "故事题材"
+        ],
+        [
+          "setting",
+          "场景与身份"
+        ],
+        [
+          "relationship",
+          "人物与关系"
+        ],
+        [
+          "style",
+          "外形风格"
+        ],
+        [
+          "plot",
+          "情节元素"
+        ],
+        [
+          "other",
+          "更多标签"
+        ],
+        [
+          "cms",
+          "全部分类"
+        ]
+      ],
+      "tabs": [
+        {
+          "key": "adult",
+          "label": "剧场",
+          "icon": "film"
+        },
+        {
+          "key": "ai",
+          "label": "AI",
+          "icon": "sparkle"
+        }
+      ],
+      "categoryLabels": {
+        "adult": [
+          "成人短剧",
+          "成人漫剧"
+        ],
+        "ai": [
+          "AI换脸",
+          "AI魔改"
+        ]
+      },
+      "categoryTitles": {
+        "adult": "成人剧场",
+        "ai": "AI专区"
+      },
+      "categoryLeads": {
+        "adult": "短剧与漫剧，走进不同的人生。",
+        "ai": "换脸与魔改，探索影像新可能。"
+      }
+    },
+    "fields": {
+      "_why": "站点 JSON 的字段别名。左边是 App 内部角色名（adapters.js 里 pick() 用的），右边是这个角色在站点响应里可能叫什么，按顺序取第一个有值的。\n为什么要这层：desc / description 是同一个概念的两个名，原代码写的是 `item.desc || item.description`；title / page_h1 同理（adaptEpisode 里）。也就是说别名机制本来就在用，只是硬编码在代码里。搬到配置之后换站点不用改代码。\n注意这里只覆盖**标量字段**。像 featured / latest / cate_rec / pagination 那种「响应长什么形状」的假设别名救不了，仍然写在 adaptHome / nextPageOf 里。",
+      "id": [
+        "id"
+      ],
+      "title": [
+        "title",
+        "page_h1"
+      ],
+      "cover": [
+        "cover"
+      ],
+      "score": [
+        "score"
+      ],
+      "tags": [
+        "tags"
+      ],
+      "description": [
+        "desc",
+        "description"
+      ],
+      "category": [
+        "cate_id"
+      ],
+      "episodeCount": [
+        "episode_count"
+      ],
+      "badge": [
+        "badge"
+      ],
+      "playAt": [
+        "play_at"
+      ],
+      "episodeNumber": [
+        "ep_num"
+      ],
+      "source": [
+        "video_url"
+      ],
+      "duration": [
+        "duration"
+      ],
+      "slug": [
+        "slug"
+      ],
+      "tagName": [
+        "name"
+      ],
+      "code": [
+        "code"
+      ]
+    }
+  }
+}
