@@ -1,0 +1,17 @@
+{
+  "versionName": "1.0.22",
+  "tag": "v1.0.22",
+  "versionCode": 10022,
+  "apk": "AIIvideo-v1.0.22-release.apk",
+  "urls": [
+    "https://ghgo.de5.net/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.22/AIIvideo-v1.0.22-release.apk",
+    "https://gh.chjina.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.22/AIIvideo-v1.0.22-release.apk",
+    "https://gh.monlor.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.22/AIIvideo-v1.0.22-release.apk",
+    "https://gh.dpik.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.22/AIIvideo-v1.0.22-release.apk",
+    "https://gh-proxy.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.22/AIIvideo-v1.0.22-release.apk",
+    "https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.22/AIIvideo-v1.0.22-release.apk"
+  ],
+  "sha256": "a21fabfc4e02b72b027a622b7935239db649c2f0856178bfe626489a05dd8959",
+  "size": 63669463,
+  "notes": "播放全部走内置播放器（libVLC）。更新清单放自己的服务器（不走 CDN 缓存），包走 GitHub Releases + 五个镜像，客户端按真实带宽挑最快的。"
+}
