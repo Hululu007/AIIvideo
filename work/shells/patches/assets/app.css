@@ -143,9 +143,11 @@ html[data-theme=dark] .continue-card .continue-action{background:#302a1e;border-
 .feed-spinner-text{position:absolute;top:calc(50% + 30px);left:0;right:0;padding:0 24px;box-sizing:border-box;
   color:rgba(255,255,255,.72);font-size:12px;font-weight:600;text-align:center;pointer-events:none}
 .feed-spinner-text.hidden{display:none}
-.feed-error{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:12px;width:100%;padding:0 24px;box-sizing:border-box;color:#fff;font-size:14px;line-height:1.5;text-align:center}
+.feed-error{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:14px;width:100%;padding:0 24px;box-sizing:border-box;color:#fff;font-size:14px;line-height:1.5;text-align:center}
+/* 地址那种长串会顶破旋转后的舞台，两边各被切掉一截 */
+.feed-error-text{overflow-wrap:anywhere;word-break:break-word}
 .feed-error.hidden{display:none}
-.feed-error button{min-height:40px;padding:0 18px;border:1px solid rgba(255,255,255,.4);border-radius:20px;background:rgba(255,255,255,.12);color:#fff;font:inherit}
+.feed-error button{min-height:46px;min-width:150px;padding:0 20px;border:1px solid rgba(255,255,255,.4);border-radius:23px;background:rgba(255,255,255,.12);color:#fff;font:inherit}
 .feed-controls{position:absolute;right:14px;bottom:calc(76px + var(--status-bar-height,24px));display:flex;flex-direction:column;align-items:flex-end;gap:10px;color:#fff}
 .feed-control{min-width:54px;height:36px;padding:0 12px;border:1px solid rgba(255,255,255,.28);border-radius:19px;background:rgba(0,0,0,.52);color:#fff;font-size:12px;font-weight:800;box-shadow:0 2px 10px rgba(0,0,0,.38);backdrop-filter:blur(10px)}
 .feed-control[aria-pressed=true]{background:#ffd24a;color:#201a08;border-color:transparent}
@@ -321,3 +323,475 @@ html[data-theme=dark] .settings-reset button{border-color:#5b3a30}
 
 /* 只有一路清晰度时那一行是「当前」而不是「可选项」：置灰，但保持可读。 */
 .feed-quality-option:disabled{opacity:1;cursor:default}
+
+/* ── 视觉与动效（2026-10-17）────────────────────────────────────────────
+   这一层只做两件事：把颜色/圆角/阴影收成 token，把进场动效限制在
+   transform / opacity。布局尺寸一律不动，避免影响已有的滚动和手势判定。 */
+
+#app{
+  --ease-out:cubic-bezier(.22,.68,0,1);
+  --ease-soft:cubic-bezier(.32,.72,0,1);
+  --ease-spring:cubic-bezier(.2,.9,.3,1.08);
+  --radius-poster:13px;
+  --field:#fffdf8;
+  --field-edge:#e7e0d1;
+  --shadow-soft:0 18px 38px -30px rgba(64,48,22,.55);
+  --shadow-dock:0 18px 40px -20px rgba(64,48,22,.38);
+  background:
+    radial-gradient(1200px 700px at 88% -12%,rgba(214,156,4,.16),transparent 62%),
+    radial-gradient(900px 620px at -18% 108%,rgba(160,108,64,.12),transparent 62%),
+    var(--bg);
+}
+html[data-theme=dark] #app{
+  --field:#21282b;
+  --field-edge:#343c40;
+  --shadow-soft:0 20px 44px -30px rgba(0,0,0,.85);
+  --shadow-dock:0 20px 44px -18px rgba(0,0,0,.75);
+  background:
+    radial-gradient(1200px 700px at 86% -14%,rgba(255,207,92,.10),transparent 62%),
+    radial-gradient(900px 620px at -16% 110%,rgba(90,140,160,.10),transparent 62%),
+    var(--bg);
+}
+html[data-theme=dark] body{background:#171b1d}
+.app-top{background:transparent}
+
+/* 搜索框：从一块纯色改成有内阴影的“凹槽”，聚焦时只亮边不闪整块。 */
+.search-form{
+  background:var(--field);
+  border:1px solid var(--field-edge);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.65),0 1px 2px rgba(64,48,22,.04);
+  transition:border-color .22s var(--ease-out),box-shadow .22s var(--ease-out),background-color .22s var(--ease-out);
+}
+html[data-theme=dark] .search-form{box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}
+.search-form:focus-within{
+  border-color:rgba(190,137,0,.55);
+  box-shadow:0 0 0 3px rgba(214,156,4,.13),inset 0 1px 0 rgba(255,255,255,.7);
+}
+html[data-theme=dark] .search-form:focus-within{
+  border-color:rgba(255,212,91,.55);
+  box-shadow:0 0 0 3px rgba(255,212,91,.13),inset 0 1px 0 rgba(255,255,255,.04);
+}
+.account-avatar{background:var(--panel);border:1px solid var(--line);color:var(--muted)}
+
+/* 海报：统一的圆角、内高光和一层很轻的投影，让卡片从背景里浮起来一点。 */
+.poster{
+  border-radius:var(--radius-poster);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.55),0 10px 22px -20px rgba(70,52,24,.6);
+  contain:paint;
+}
+html[data-theme=dark] .poster{box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 12px 26px -20px rgba(0,0,0,.9)}
+.poster img{transition:opacity .32s var(--ease-out)}
+.film-card{transition:transform .16s var(--ease-out)}
+.film-card:active{transform:scale(.972)}
+.hero{border-radius:19px;box-shadow:0 26px 50px -38px rgba(46,32,12,.6),inset 0 0 0 1px rgba(255,255,255,.16)}
+html[data-theme=dark] .hero{box-shadow:0 28px 54px -38px rgba(0,0,0,.9),inset 0 0 0 1px rgba(255,255,255,.07)}
+.hero-copy h2{font-weight:800;letter-spacing:-.035em;text-shadow:0 2px 20px rgba(0,0,0,.18)}
+.hero-action{box-shadow:0 6px 18px -10px rgba(0,0,0,.55)}
+/* 轮播只在实际位移时提升图层，静止的 5 张图不再各占一个合成层。 */
+.hero-slide{will-change:auto}
+.hero-slide.animating{will-change:transform}
+.hero-dots i{width:6px;height:6px;transition:width .22s var(--ease-out),background-color .22s ease,opacity .22s ease}
+.hero-dots i.active{width:22px}
+
+/* 小标题前加一根琥珀色竖线：不改字号和间距，只是让层级更清楚。 */
+.section-heading h2{position:relative;padding-left:13px;font-weight:800;letter-spacing:-.03em}
+.section-heading h2:before{
+  content:"";position:absolute;left:0;top:.22em;width:3px;height:.92em;border-radius:3px;
+  background:linear-gradient(180deg,var(--accent),rgba(214,156,4,.35));
+}
+html[data-theme=dark] .section-heading h2:before{background:linear-gradient(180deg,#ffd45b,rgba(255,212,91,.3))}
+.more{padding:6px 0 6px 8px;border-radius:9px;transition:color .18s ease,background-color .18s ease}
+.more:active{color:var(--text);background:rgba(127,127,127,.12)}
+
+/* 底栏做成半透明玻璃。模糊只作用在这条 68px 的固定区域，不跟着滚动重绘。 */
+#dock{
+  /* 这里**不用** backdrop-filter：底栏一直在屏上，背后是滚动内容，
+     每帧重算一次模糊会把「省下来的合成层」又赔回去。0.94 的不透明度
+     已经够透出一点内容，视觉上一样是浮起来的。 */
+  background:rgba(255,252,244,.94);
+  border-color:rgba(127,111,76,.16);
+  box-shadow:var(--shadow-dock),inset 0 1px 0 rgba(255,255,255,.75);
+}
+html[data-theme=dark] #dock{
+  background:rgba(28,34,37,.94);
+  border-color:rgba(255,255,255,.08);
+  box-shadow:var(--shadow-dock),inset 0 1px 0 rgba(255,255,255,.06);
+}
+#dock .nav-icon{transition:transform .18s var(--ease-spring),background-color .18s ease,color .18s ease}
+#dock button.active .nav-icon{box-shadow:0 4px 12px -6px rgba(36,33,25,.8)}
+html[data-theme=dark] #dock button.active .nav-icon{box-shadow:0 6px 18px -8px rgba(255,212,91,.55)}
+
+/* ── 外观选择器（设置页）──────────────────────────────────────────────── */
+.settings-appearance>p{margin-bottom:12px!important}
+.theme-choice{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}
+.theme-choice-item{
+  position:relative;display:flex;flex-direction:column;gap:8px;min-width:0;padding:8px;
+  border:1px solid var(--line);border-radius:15px;background:var(--panel);color:var(--text);
+  text-align:left;transition:transform .16s var(--ease-out),border-color .2s ease,box-shadow .2s ease;
+}
+.theme-choice-item:active{transform:scale(.975)}
+.theme-choice-item.selected{
+  border-color:rgba(190,137,0,.7);
+  box-shadow:0 0 0 3px rgba(214,156,4,.12);
+}
+html[data-theme=dark] .theme-choice-item.selected{
+  border-color:rgba(255,212,91,.65);
+  box-shadow:0 0 0 3px rgba(255,212,91,.11);
+}
+.theme-choice-item.selected:after{
+  content:"";position:absolute;top:11px;right:11px;width:7px;height:7px;border-radius:50%;
+  background:var(--accent);box-shadow:0 0 0 3px rgba(214,156,4,.18);
+}
+.theme-swatch{
+  position:relative;display:block;height:46px;overflow:hidden;border-radius:10px;
+  border:1px solid rgba(0,0,0,.09);background:#f5f2e9;
+}
+.theme-swatch i{position:absolute;left:8px;top:8px;width:28px;height:5px;border-radius:3px;background:#d69c04}
+.theme-swatch b{position:absolute;left:8px;right:8px;bottom:8px;height:12px;border-radius:4px;background:#e6dfd0}
+.swatch-system{background:linear-gradient(135deg,#f5f2e9 0 49.8%,#171b1d 50% 100%)}
+.swatch-system i{width:calc(50% - 9px);background:linear-gradient(90deg,#d69c04 0 50%,#ffd45b 50%)}
+.swatch-system b{background:linear-gradient(90deg,#e6dfd0 0 50%,#293034 50%)}
+.swatch-dark{background:#171b1d;border-color:rgba(255,255,255,.08)}
+.swatch-dark i{background:#ffd45b}
+.swatch-dark b{background:#293034}
+.theme-choice-copy{display:flex;flex-direction:column;gap:2px;min-width:0}
+.theme-choice-copy strong{font-size:12px;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.theme-choice-copy small{font-size:10px;line-height:1.2;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ── 路由进场：只动 transform / opacity，0.4 秒，页面一落地就结束 ─────── */
+@keyframes view-enter{
+  from{opacity:0;transform:translate3d(0,14px,0) scale(.994)}
+  to{opacity:1;transform:none}
+}
+@media (prefers-reduced-motion:no-preference){
+  #app.view-enter #content>*{animation:view-enter .4s var(--ease-out) both}
+  #app.view-enter #content>.detail-page{animation:none}
+}
+/* 主题切换走 View Transition：整屏交叉淡化，比几百个元素各自变色轻。 */
+::view-transition-old(root),::view-transition-new(root){animation-duration:.3s;animation-timing-function:cubic-bezier(.22,.68,0,1)}
+::view-transition-old(root){animation-name:theme-fade-out}
+@keyframes theme-fade-out{to{opacity:0}}
+
+/* ── 深色模式下几处早期硬编码颜色的收口 ─────────────────────────────── */
+html[data-theme=dark] .source-row.is-active .source-pick{
+  background:#2c2a20;border-color:rgba(255,212,91,.4);color:#f5f1e7;
+}
+html[data-theme=dark] .source-row.is-active .source-pick small,
+html[data-theme=dark] .source-row.is-active .source-pick em{color:#d7cfbd;border-color:rgba(255,255,255,.18)}
+html[data-theme=dark] .history-status{color:#ffd45b}
+
+@media (prefers-reduced-motion:reduce){
+  .poster img,.film-card,#dock .nav-icon,.hero-dots i,.theme-choice-item,.more{transition:none}
+  .film-card:active,.theme-choice-item:active{transform:none}
+  ::view-transition-old(root),::view-transition-new(root){animation:none}
+}
+
+/* 阅读性微调：搜索框和卡片副标题各加半级，长标题仍按原规则截断。 */
+.search-input{font-size:14px}
+.film-title{font-size:12.5px;line-height:1.25}
+.film-info{font-size:10.5px}
+html[data-theme=dark] button:focus-visible,
+html[data-theme=dark] input:not(.search-input):focus-visible{outline-color:#ffd45b}
+
+/* Toast 用同色系半透明底，叠在图片上时不至于像一块硬纸板。 */
+.toast{
+  background:rgba(255,252,244,.94);
+  -webkit-backdrop-filter:blur(14px) saturate(1.2);
+  backdrop-filter:blur(14px) saturate(1.2);
+}
+html[data-theme=dark] .toast{background:rgba(29,35,38,.94)}
+
+/* 深色模式的轮播文案压在浅色封面上时，靠一层很薄的暗角把对比度兜住。
+   只作用于非活动位的普通轮播，活动页有自己的配色。 */
+html[data-theme=dark] .hero-slide:not(.hero-campaign)::before{
+  content:"";position:absolute;inset:0;z-index:1;pointer-events:none;
+  background:
+    linear-gradient(90deg,rgba(8,11,13,.46) 0%,rgba(8,11,13,.14) 54%,transparent 76%),
+    linear-gradient(0deg,rgba(8,11,13,.34),transparent 48%);
+}
+
+/* ── 前端热更新（设置页）────────────────────────────────────────────── */
+.hot-update-meta{display:flex;align-items:center;gap:8px;margin:0 0 13px;color:var(--muted);font-size:12px;line-height:1.5}
+.hot-update-meta i{width:8px;height:8px;flex:none;border-radius:50%;background:var(--line);transition:background-color .2s ease,box-shadow .2s ease}
+.hot-update-meta i.is-ready{background:#32a76e;box-shadow:0 0 0 3px rgba(50,167,110,.14)}
+.hot-update-actions{display:flex;flex-wrap:wrap;gap:9px}
+.hot-update-actions button{min-height:42px;padding:0 15px;border:1px solid var(--line);border-radius:11px;background:var(--panel);color:var(--text);font-size:12px;font-weight:700}
+.hot-update-actions button.hot-apply{background:var(--accent);color:#fff;border-color:transparent}
+.hot-update-actions button:disabled{opacity:.55}
+.hot-update-note{margin:11px 0 0!important;color:var(--muted);font-size:11px;line-height:1.5}
+
+/* ── iOS 观感层（2026-10-17）──────────────────────────────────────────
+   目标：苹果那种感觉。只换「材质和颜色」，不碰任何布局尺寸、滚动和手势：
+   - 系统字体栈（-apple-system / PingFang SC）
+   - iOS 中性灰面板 + 分组列表语义，浅底 #f2f2f7、深底纯黑
+   - 强调色收成 iOS 蓝（浅 #007aff / 深 #0a84ff），替换全部琥珀金
+   - 分隔线、玻璃底栏、按压态都按 iOS 的灰阶和透明度来 */
+
+#app,body{
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue","Noto Sans CJK SC",sans-serif;
+}
+#app{
+  --bg:#f2f2f7;
+  --panel:#ffffff;
+  --dock:rgba(249,249,249,.92);
+  --text:#1c1c1e;
+  --muted:#8e8e93;
+  --accent:#007aff;
+  --line:rgba(60,60,67,.14);
+  --field:#ffffff;
+  --field-edge:rgba(60,60,67,.16);
+  --shadow-soft:0 8px 24px -18px rgba(0,0,0,.35);
+  --shadow-dock:0 -0.5px 0 rgba(60,60,67,.2);
+  background:var(--bg);
+}
+html[data-theme=dark] #app{
+  --bg:#000;
+  --panel:#1c1c1e;
+  --dock:rgba(28,28,30,.9);
+  --text:#f5f5f7;
+  --muted:#98989f;
+  --accent:#0a84ff;
+  --line:rgba(84,84,88,.4);
+  --field:#1c1c1e;
+  --field-edge:rgba(84,84,88,.5);
+  --shadow-soft:0 8px 24px -18px rgba(0,0,0,.9);
+  --shadow-dock:0 -0.5px 0 rgba(255,255,255,.12);
+  background:var(--bg);
+}
+html[data-theme=dark] body{background:#000}
+
+/* 顶部与搜索框：iOS 大标题页的安静顶部，搜索框是灰色胶囊。 */
+.app-top{background:var(--bg)}
+.search-form{
+  background:rgba(118,118,128,.12);
+  border:0;border-radius:12px;
+  box-shadow:none;
+}
+html[data-theme=dark] .search-form{background:rgba(118,118,128,.24);box-shadow:none}
+.search-form:focus-within{border-color:transparent;box-shadow:0 0 0 3px rgba(10,132,255,.18)}
+html[data-theme=dark] .search-form:focus-within{border-color:transparent;box-shadow:0 0 0 3px rgba(10,132,255,.28)}
+
+/* 分段控件：iOS segmented —— 选中是浮起的白胶囊，不是黑块/金块。 */
+.segmented,.compact-tabs,.auth-tabs{
+  background:rgba(118,118,128,.12);border:0;border-radius:12px;
+}
+.segmented button.selected,.compact-tabs button.selected,.auth-tabs button.selected{
+  background:#fff;color:#1c1c1e;
+  box-shadow:0 3px 8px rgba(0,0,0,.12),0 1px 1px rgba(0,0,255,0);
+}
+html[data-theme=dark] .segmented button.selected,
+html[data-theme=dark] .compact-tabs button.selected,
+html[data-theme=dark] .auth-tabs button.selected{background:#636366;color:#fff;box-shadow:0 3px 8px rgba(0,0,0,.5)}
+.segmented button:active{background:transparent;color:var(--muted);opacity:.7}
+.segmented button.selected:active{background:#fff;color:#1c1c1e}
+html[data-theme=dark] .segmented button.selected:active{background:#636366;color:#fff}
+
+/* 主按钮：全部从「墨黑/琥珀金」收成 iOS 蓝。 */
+.detail-play,.auth-submit,.age-panel button,.setup-panel button,
+.password-form button[type=submit],.confirm-buttons button:last-child,
+.settings-page .episode-grid button.active,
+.episode-grid button.active{
+  background:#007aff;color:#fff;
+}
+html[data-theme=dark] :is(.detail-play,.auth-submit,.age-panel button,.setup-panel button,
+.password-form button[type=submit],.confirm-buttons button:last-child){
+  background:#0a84ff;color:#fff;
+}
+.episode-grid button.active{background:rgba(0,122,255,.16);color:#007aff}
+html[data-theme=dark] .episode-grid button.active{background:rgba(10,132,255,.22);color:#409cff}
+.source-row.is-active .source-pick{background:#007aff;border-color:#007aff;color:#fff}
+html[data-theme=dark] .source-row.is-active .source-pick{background:#0a84ff;border-color:#0a84ff;color:#fff}
+
+/* 琥珀色药丸标签 → iOS 灰填充胶囊，选区同。 */
+.home-tag,.continue-card .continue-action{
+  background:rgba(118,118,128,.12);border:0;color:#1c1c1e;
+}
+.tag-choice{background:rgba(118,118,128,.12);border:0;color:#1c1c1e}
+.tag-choice:active,.home-tag:active{background:rgba(118,118,128,.22)}
+html[data-theme=dark] :is(.home-tag,.tag-choice,.continue-card .continue-action){
+  background:rgba(118,118,128,.24);border:0;color:#f5f5f7;
+}
+html[data-theme=dark] .tag-choice:active,html[data-theme=dark] .home-tag:active{background:rgba(118,118,128,.36)}
+.all-tags-link{border:0;background:rgba(118,118,128,.12);color:#1c1c1e;font-weight:600}
+html[data-theme=dark] .all-tags-link{border-color:transparent;color:#f5f5f7}
+
+/* 小节标题：去掉琥珀竖线，iOS 用留白和字重分层。 */
+.section-heading h2{padding-left:0;font-weight:700;letter-spacing:-.02em}
+.section-heading h2:before{display:none}
+
+/* 背景光晕移除：苹果是平的。 */
+#app{background:var(--bg)}
+
+/* 底栏：iOS tab bar —— 细分割线 + 半透明材质。 */
+#dock{
+  background:var(--dock);
+  border-color:var(--line);
+  box-shadow:var(--shadow-dock);
+}
+#dock button.active .nav-icon{box-shadow:none}
+html[data-theme=dark] #dock button.active .nav-icon{box-shadow:none}
+#dock button:active{background:transparent;color:var(--accent)}
+#dock .nav-icon{color:var(--muted)}
+#dock button.active .nav-icon{color:var(--accent)}
+.segmented button:active,.compact-tabs button:active{transform:none;opacity:.7}
+
+/* 海报与 hero：投影收轻，白色描边那圈去掉。 */
+.hero,.poster{box-shadow:none}
+.hero{border-radius:16px}
+.hero-copy h2{text-shadow:0 1px 12px rgba(0,0,0,.35)}
+
+/* 播放器强调色：金色进度 → 白，激活芯片 → iOS 蓝。 */
+.feed-bar-fill,.feed-bar.dragging .feed-bar-fill{background:#fff}
+.feed-bar.dragging .feed-bar-fill{background:rgba(255,255,255,.85)}
+.feed-control[aria-pressed=true],.feed-rate-option.active,.feed-quality-option.is-current{
+  background:#0a84ff;color:#fff;border-color:transparent;
+}
+.feed-brightness-fill{background:#fff}
+.feed-speed{backdrop-filter:blur(16px) saturate(1.4);-webkit-backdrop-filter:blur(16px) saturate(1.4);background:rgba(30,30,30,.6)}
+.feed-rate-panel,.feed-quality-panel{background:rgba(30,30,30,.72)}
+
+/* 零散琥珀色收口。 */
+.account-avatar.is-signed-in{outline-color:var(--accent)}
+.history-status,.settings-reset .app-version{color:#007aff}
+html[data-theme=dark] .history-status{color:#409cff}
+.error-icon,.error-main h1:after{color:var(--accent);background:var(--accent)}
+.error-main h1{color:#1c1c1e}
+html[data-theme=dark] .error-main h1{color:#f5f5f7}
+.error-footer p{color:var(--muted);font-family:inherit}
+html[data-theme=dark] .error-footer p{color:var(--muted)}
+.error-footer button,.toast.info i{background:var(--accent)}
+html[data-theme=dark] .toast.info i{background:#409cff}
+.age-symbol{color:#007aff}
+.setup-symbol{background:#007aff;color:#fff}
+html[data-theme=dark] .setup-symbol{background:#0a84ff;color:#fff}
+.settings-account [data-logout],.settings-reset button{color:#ff3b30}
+.settings-reset button{border-color:rgba(255,59,48,.35);background:rgba(255,59,48,.08)}
+html[data-theme=dark] .settings-reset button{border-color:rgba(255,69,58,.45)}
+.category-spotlight-copy button,.hero-campaign .hero-action{background:#fff;color:#1c1c1e;border:0;font-weight:700}
+button:focus-visible,input:not(.search-input):focus-visible{outline-color:#007aff}
+html[data-theme=dark] button:focus-visible,html[data-theme=dark] input:not(.search-input):focus-visible{outline-color:#0a84ff}
+.theme-swatch i{background:#007aff}
+.swatch-system i{background:linear-gradient(90deg,#007aff 0 50%,#0a84ff 50%)}
+.swatch-dark i{background:#0a84ff}
+.theme-choice-item.selected{border-color:#007aff;box-shadow:0 0 0 3px rgba(0,122,255,.15)}
+html[data-theme=dark] .theme-choice-item.selected{border-color:#0a84ff;box-shadow:0 0 0 3px rgba(10,132,255,.2)}
+.theme-choice-item.selected:after{background:#007aff;box-shadow:0 0 0 3px rgba(0,122,255,.2)}
+html[data-theme=dark] .theme-choice-item.selected:after{background:#0a84ff}
+
+/* 字号排版：iOS 的标题节奏 —— 大标题更收紧，正文行高不变。 */
+.category-head h1,.library-page h1,.search-page h1,.listing-page h1,.tags-heading h1,.settings-page h1{
+  letter-spacing:-.022em;font-weight:800;
+}
+.hero-copy h2,.detail-copy h1{letter-spacing:-.025em}
+.toast{font-weight:500}
+
+/* ── iOS 观感层 · 二次收口：html[data-theme=dark] 前缀规则的优先级更高 ── */
+html[data-theme=dark] .hero-action,
+html[data-theme=dark] .primary{background:#0a84ff;color:#fff}
+html[data-theme=dark] #dock button.active{color:#0a84ff;font-weight:800}
+html[data-theme=dark] #dock button.active .nav-icon{background:#0a84ff;color:#fff}
+#dock button.active{color:#007aff}
+#dock button.active .nav-icon{background:#007aff;color:#fff}
+html[data-theme=dark] .hero-label{color:#409cff;background:rgba(10,132,255,.18)}
+.hero-label{color:#007aff;background:rgba(0,122,255,.14)}
+html[data-theme=dark] .poster-score{background:rgba(28,28,30,.82);color:#ffd60a}
+.poster-score{background:rgba(255,214,10,.92);color:#1c1c1e}
+.category-spotlight-copy button{background:#fff;color:#1c1c1e;border:0;font-weight:700}
+
+/* 统一错误页的小字技术信息：默认收着，只在出问题时有得看。 */
+.error-raw{margin:0 0 4px!important;color:var(--muted);opacity:.7;font:11px/1.5 ui-monospace,Menlo,monospace;overflow-wrap:anywhere}
+.error-footer .error-raw + button{margin-top:8px}
+
+/* 错误图标：上一轮把标题分割线的 background 顺手写到了图标上，蓝色方块就是这么来的。 */
+.error-icon{background:transparent;color:#007aff}
+html[data-theme=dark] .error-icon{background:transparent;color:#409cff}
+
+/* ── 应用内 APK 更新 ─────────────────────────────────────────────── */
+.update-check-area{flex:none}
+.update-check-area button{min-height:40px;padding:0 14px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text);font-size:12px;font-weight:700}
+.update-note{margin:0;color:var(--muted);font-size:12px;line-height:1.6}
+.update-available{width:100%;display:flex;flex-direction:column;gap:8px}
+.update-available-head{display:flex;align-items:baseline;gap:8px}
+.update-available-head strong{font-size:14px;color:var(--accent)}
+.update-available-head small{font-size:11px;color:var(--muted)}
+.update-available p{margin:0;color:var(--muted);font-size:12px;line-height:1.6}
+.update-available button{align-self:flex-start;border:0;background:var(--accent);color:#fff;font-weight:700}
+html[data-theme=dark] .update-available button{color:#fff}
+.update-progress{width:100%;display:flex;align-items:center;gap:10px}
+.update-progress-bar{flex:1;height:5px;border-radius:3px;background:var(--line);overflow:hidden}
+.update-progress-bar i{display:block;height:100%;border-radius:3px;background:var(--accent);transition:width .2s ease}
+.update-progress small{flex:none;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+
+/* ── 源市场 / TVBox 导入 ───────────────────────────────────────── */
+.market-list,.tvbox-list{list-style:none;margin:16px 0 0;padding:0;display:flex;flex-direction:column;gap:10px}
+.market-item,.tvbox-item{display:flex;align-items:center;gap:12px;padding:14px 15px;border-radius:15px;background:var(--panel)}
+.market-copy,.tvbox-copy{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
+.market-copy strong,.tvbox-copy strong{font-size:15px}
+.market-copy small,.tvbox-copy small{color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.market-add,.tvbox-add{flex:none;min-height:36px;padding:0 14px;border:0;border-radius:10px;background:var(--accent);color:#fff;font-size:12px;font-weight:700}
+.market-add:disabled,.tvbox-add:disabled{opacity:.55}
+.market-loading{padding:36px 0;text-align:center;color:var(--muted);font-size:13px}
+.market-loading p{margin:10px 0}
+.market-loading button{margin-top:6px;min-height:38px;padding:0 16px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text);font-size:12px}
+.market-footnote{margin:22px 0 0;color:var(--muted);font-size:12px;line-height:1.6}
+.tvbox-block{margin-top:26px;padding-top:20px;border-top:1px solid var(--line)}
+.tvbox-block h2{margin:0 0 6px;font-size:16px}
+.tvbox-block>p{margin:0 0 14px;color:var(--muted);font-size:12px;line-height:1.55}
+
+/* 首启面板里的市场：官方源按钮列表 + 手动填写分隔 */
+.setup-market{display:flex;flex-direction:column;gap:8px;margin:4px 0 12px;max-height:44vh;overflow:auto}
+/* 列表是 flex 容器 + max-height，子项默认 flex-shrink:1 会被压扁 ——
+   表现是名字下面的说明只露出半行、被下一项盖住。禁止收缩就正常了。 */
+.setup-market>*{flex:0 0 auto}
+.setup-market-loading{margin:0;padding:14px 0;color:#8d877c;font-size:12px;text-align:center}
+.setup-market-item{display:flex;flex-direction:column;gap:3px;width:100%;padding:12px 14px;border:1px solid var(--line);border-radius:13px;background:#fff;color:var(--text);text-align:left}
+.setup-market-item strong{font-size:14px}
+.setup-market-item small{font-size:11px;color:#8d877c}
+html[data-theme=dark] .setup-market-item{background:#1c1c1e;border-color:#3a4043}
+.setup-divider{display:flex;align-items:center;gap:10px;margin:6px 0 12px;color:#8d877c;font-size:11px}
+.setup-divider:before,.setup-divider:after{content:"";flex:1;height:1px;background:var(--line)}
+
+/* 首启市场按钮：要压过 .setup-panel button 的蓝底 + 47px 定高（那条是给「获取并应用」的）。 */
+#setup-overlay .setup-market-item{
+  height:auto;min-height:0;margin:0;padding:12px 14px;
+  display:flex;flex-direction:column;align-items:flex-start;gap:3px;
+  background:#fff;color:var(--text);border:1px solid var(--line);border-radius:13px;
+  font-size:14px;font-weight:400;text-align:left;line-height:1.3;
+}
+#setup-overlay .setup-market-item strong{font-size:14px;font-weight:600}
+/* 名字和说明上下两行 —— 不给 .setup-market-copy 定 flex 列的话，<small> 会跟 <strong> 挤在一行
+   被裁掉，列表看起来只有名字没有描述。 */
+#setup-overlay .setup-market-copy{display:flex;flex-direction:column;gap:3px;min-width:0}
+/* 勾选后的「添加」按钮：列表外面那个。要压过 .setup-panel button 的通栏 47px 定高。 */
+#setup-overlay .setup-market-apply{width:100%;height:47px;margin:10px 0 0;border:0;border-radius:12px;background:#0a84ff;color:#fff;font-weight:800;font-size:14px}
+#setup-overlay .setup-market-apply[disabled]{opacity:.55}
+#setup-overlay .setup-market-apply[hidden]{display:none}
+#setup-overlay .setup-market-item small{font-size:11px;font-weight:400;color:#8d877c;white-space:normal}
+html[data-theme=dark] #setup-overlay .setup-market-item{background:#1c1c1e;border-color:#3a4043;color:#f5f5f7}
+html[data-theme=dark] #setup-overlay .setup-market-item small{color:#98989f}
+
+/* 源市场：「更换地址」是行内文字按钮，不抢卡片视觉。 */
+.market-change{margin-left:6px;padding:0;border:0;background:none;color:var(--accent);font:inherit;font-size:12px;text-decoration:underline}
+
+/* 首启市场多选：勾选框在左，名字/说明在右；按钮满宽。 */
+#setup-overlay .setup-market-item{flex-direction:row;align-items:flex-start;gap:10px;cursor:pointer}
+#setup-overlay .setup-market-check{width:18px;height:18px;margin:2px 0 0;flex:none;accent-color:#007aff}
+#setup-overlay .setup-market-copy{display:flex;flex-direction:column;gap:3px;min-width:0}
+#setup-overlay .setup-market-copy strong{font-size:14px;font-weight:600}
+#setup-overlay .setup-market-copy small{font-size:11px;color:#8d877c}
+html[data-theme=dark] #setup-overlay .setup-market-copy small{color:#98989f}
+#setup-overlay .setup-market-apply{width:100%;height:47px;margin:2px 0 10px;border:0;border-radius:12px;background:#007aff;color:#fff;font-size:14px;font-weight:700}
+#setup-overlay .setup-market-apply:disabled{opacity:.5}
+
+/* 播放错误里的「外部播放器」：只在解码失败时出现，样式跟重试按钮一致。 */
+.feed-error .feed-external{min-height:40px;padding:0 18px;border:1px solid rgba(255,255,255,.4);border-radius:20px;background:rgba(255,255,255,.12);color:#fff;font:inherit;font-size:13px}
+/* 内置播放器是主流解，给的是一眼能认出来的实心按钮；外部播放器退成次要按钮。 */
+.feed-error .feed-native{min-height:40px;padding:0 20px;border:none;border-radius:20px;background:#fff;color:#111;font:inherit;font-size:13px;font-weight:600}
+.feed-error .feed-native[hidden]{display:none}
+.feed-error .feed-external[hidden]{display:none}
+.settings-player h2{margin:0 0 6px}
+.settings-player p{margin:0 0 10px;color:var(--text-dim, #8a8a91);font-size:13px;line-height:1.5}
+.player-options{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 10px}
+.player-options button{flex:1 1 auto;min-height:40px;padding:0 14px;border:1px solid rgba(127,127,127,.35);border-radius:12px;background:transparent;color:inherit;font:inherit;font-size:13px}
+.player-options button.is-on{border-color:#ff8a3d;background:rgba(255,138,61,.14);font-weight:600}
+.player-options button[disabled]{opacity:.4}

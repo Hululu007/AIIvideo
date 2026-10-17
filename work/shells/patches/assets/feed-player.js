@@ -263,6 +263,7 @@
       observer?.disconnect();
       observer = null;
       activePage = null;
+      currentFeed = null;
       const feed = document.querySelector('.feed');
       if (feed) {
         feed.querySelectorAll('.feed-page video').forEach(video => {
@@ -275,12 +276,16 @@
     }
 
     function close() {
-      if (!document.querySelector('.feed')) return false;
-      cleanup();
+      // 现在没有 feed 页了（播放全程在原生），但「正在打开播放器…」那一屏
+      // 也得让返回键能退出去 —— 之前这里一句 `if (!feed) return false` 就把
+      // 返回键吃掉了。
+      const hadFeed = !!document.querySelector('.feed');
+      if (hadFeed) cleanup();
       // 离开播放器把亮度交回系统 —— 播放器里调暗是为了看片，退出之后还黑着
       // 就成了「这个 App 把我的屏幕调暗了」。
       playerCommand?.('brightness?value=-1').catch(() => {});
       brightness = null;
+      if (state.route !== 'feed') return hadFeed;
       state.route = 'detail';
       if (state.detail) renderDetail(); else goHome();
       updateBackEnabled();
@@ -301,6 +306,97 @@
       }).catch(() => {});
     }
 
+    /**
+     * 解析某一集的播放地址。从原来 attach() 里抽出来的 —— 现在页面不再装载
+     * <video>，这一步唯一的用途就是把地址交给内置播放器。
+     */
+    async function resolveUrl(videoId, ep, onStep) {
+      const step = typeof onStep === 'function' ? onStep : () => {};
+      const cached = urlRecall(videoId, ep);
+      if (cached) return cached;
+      const info = await api('episode', { id: videoId, episode: ep });
+      let url = info.source || info.url || '';
+      if (!url) throw new Error('未取得播放地址');
+      // AGE动漫 给的是密文，解密要跑站点的 wasm —— 最长十几秒，期间把进度写出来。
+      if (url.indexOf(AGEDM_MARKER) === 0) {
+        if (!window.HG_AGEDM_PLAY) throw new Error('播放层没加载（hxm/agedm-play.js）');
+        const lines = Array.isArray(info.lines) ? info.lines : null;
+        try {
+          url = lines && lines.length
+            ? await window.HG_AGEDM_PLAY.resolveAny(lines, step)
+            : await window.HG_AGEDM_PLAY.resolve(url.slice(AGEDM_MARKER.length), step);
+        } catch (error) {
+          throw new Error('解析失败：' + (error && error.message ? error.message : String(error)));
+        }
+      }
+      if (url) urlRemember(videoId, ep, url);
+      return url;
+    }
+
+    /**
+     * 直接进内置播放器 —— 全应用只剩这一条播放路径。
+     *
+     * 不再渲染 feed 页。那套竖滑 UI 是给网页 <video> 用的，而原生那头自己就是
+     * mini-feed：上下滑切集、左右滑拖进度、单击出控件、倍速面板全在 Activity 里，
+     * 比 WebView 里再套一层顺得多。页面这边只做三件事：
+     *   拿全集数 → 解析这一集的地址 → 把 payload 递过去。
+     *
+     * 起播位置从进度记忆里读。原来靠 <video>.currentTime 记的那一套在这里没有
+     * 载体了，直接换算成毫秒塞进 payload.start。
+     */
+    async function openAt(videoId, episode) {
+      const id = String(videoId);
+      cleanup();
+      state.route = 'feed';
+      state.feedReturnId = id;
+      const boot = text => { content.innerHTML = '<div class="feed-boot">' + esc(text) + '</div>'; };
+      boot('正在打开播放器…');
+
+      let detail = (state.detail && String(state.detail.id) === id && asArray(state.detail.episodes).length)
+        ? state.detail : null;
+      if (!detail) {
+        try { detail = await api('detail', { id }); }
+        catch (error) { boot(error.message || '加载失败'); return; }
+      }
+      const episodes = asArray(detail.episodes)
+        .map(entry => Number(entry.number ?? entry.episode ?? entry.ep ?? 0))
+        .filter(Boolean);
+      if (!episodes.length) { boot('这部剧还没有可播放的选集'); return; }
+
+      const ep = Number(episode) || episodes[0];
+      const index = Math.max(0, episodes.indexOf(ep));
+      const memory = recall(id);
+      const start = (memory && Number(memory.ep) === ep && memory.time > 5)
+        ? Math.round(memory.time * 1000) : 0;
+
+      let url;
+      try { url = await resolveUrl(id, ep, boot); }
+      catch (error) { boot(error.message || '取不到播放地址'); return; }
+
+      if (!window.HG_PLAYER) { boot('这个版本没有带内置播放器'); return; }
+      const prefs = playerPrefs();
+      const payload = {
+        url,
+        eps: episodes,
+        index,
+        id,
+        episode: ep,
+        title: detail.title || '',
+        cover: detail.cover || '',
+        source: window.HG_SOURCE_KEY || '',
+        start,
+        decode: prefs.decode === 'sw' ? 'sw' : 'auto',
+        cache: Number(prefs.cache) || 1500,
+        rate: selectedRate()
+      };
+      try {
+        const reply = await window.HG_PLAYER.command('native?payload=' + encodeURIComponent(JSON.stringify(payload)));
+        if (reply && reply.fallback) boot('这个安装包没有带本机架构的解码库（需要 arm64-v8a）');
+      } catch (error) {
+        boot(error.message || '内置播放器打不开');
+      }
+    }
+
     function open(videoId, episode) {
       const id = videoId ?? state.detail?.id ?? state.sourceItem?.id;
       if (id == null) { toast('缺少剧集信息', true); return; }
@@ -308,7 +404,7 @@
       const memory = recall(String(id));
       const explicit = episode != null && Number(episode) > 0;
       const ep = explicit ? Number(episode) : (memory ? memory.ep : 1);
-      render(String(id), Math.max(1, ep)).catch(error => toast(error.message || '播放失败，请重试', true));
+      openAt(String(id), Math.max(1, ep)).catch(error => toast(error.message || '播放失败，请重试', true));
     }
 
     function bindVideo(page) {
@@ -381,6 +477,10 @@
           }
           const why = MEDIA_ERROR[code] || (code ? '未知错误' : '原因不明');
           urlForget(page.dataset.videoId, Number(page.dataset.ep));
+          // 把这一集的地址钉在页面上。<video> 上的 src 会在 release()、重挂、
+          // 以及某些 WebView 的致命错误路径里被清掉，那时错误框里的按钮就
+          // 变成「点了没反应」——有这一份就不怕了。
+          page.dataset.nativeUrl = video.currentSrc || video.getAttribute('src') || '';
           video.dataset.ready = '';
           video.dataset.bound = '';
           page.querySelector('.feed-spinner')?.classList.add('hidden');
@@ -397,6 +497,41 @@
                 + (head ? ' ｜ ' + head + '…' : '');
             }
           }
+          // 4 = SRC_NOT_SUPPORTED：解码器不认这个流（HEVC / 10bit / 冷门封装最常见）。
+          // 同一部片在别的手机上能放、这台不行，就是这么来的 —— 不是网络问题。
+          // 这种时候把地址交给系统播放器（MX / VLC），它们用自己的解码链。
+          const external = box && box.querySelector('.feed-external');
+          if (external) external.hidden = !(code === 4 || code === 3);
+          // 内置播放器是这两类错误的正解，所以它比「外部播放器」更靠前：
+          // 用户要的是能看，不是被送去装一个新 App。
+          const nativeBtn = box && box.querySelector('.feed-native');
+          if (nativeBtn) nativeBtn.hidden = !(code === 4 || code === 3);
+          if (code === 4 && label) {
+            label.textContent += '。这台设备的播放器不认这个编码，点「内置播放器」用 App 自带的软解试试';
+          }
+          // 自动切换：只认当前这一集、只做一次、只在这两类错误上做。
+          // 不加这三道限制的话，用户往回滑时每一集都会弹一次全屏播放器。
+          const prefs = playerPrefs();
+          markNeedsNative(page.dataset.videoId, page.dataset.ep);
+          // 「当前这一集」不能只认 activePage：IntersectionObserver 在某些滚动
+          // 状态下（尤其是旋转/快速滑动）没把 ratio 顶过 0.55，activePage 还停在
+          // 上一集，于是自动切换静默不触发。这里补一个几何判据：这一页真的在
+          // 屏幕中间，就算当前集。
+          let onScreen = false;
+          try {
+            const rect = page.getBoundingClientRect();
+            const height = window.innerHeight || 1;
+            onScreen = rect.height > 0 && rect.bottom > height * 0.4 && rect.top < height * 0.6;
+          } catch (error) {}
+          if (prefs.autoFallback && (page === activePage || onScreen)
+              && (code === 4 || code === 3) && page.dataset.autoNative !== '1') {
+            page.dataset.autoNative = '1';
+            openNative(page, 'auto');
+            return;
+          }
+          console.log('[native] 没自动切：fallback=' + prefs.autoFallback
+            + ' active=' + (page === activePage) + ' onScreen=' + onScreen
+            + ' flag=' + page.dataset.autoNative);
           console.log('[video] error code=' + code + ' (' + why + ') src=' + (video.currentSrc || '').slice(0, 100));
         }, 1200);
       });
@@ -412,6 +547,8 @@
      * 会被算到下一集头上。
      */
     function loadInto(video, url) {
+      const host = video.closest('.feed-page');
+      if (host) delete host.dataset.nativeUrl;      // 换地址了，错误框里那份作废
       video.dataset.loadStamp = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
       video.src = url;
       try { video.load(); } catch (error) {}
@@ -570,6 +707,165 @@
       if (cur) cur.textContent = '0:00';
     }
 
+    // ── 内置播放器（libVLC） ──────────────────────────────────────────
+    //
+    // WebView 的 <video> 用哪个解码器由系统 WebView 决定，页面上没有旋钮；
+    // 内置播放器把解码链搬到 App 里，所以「这台手机播不了」这种事有了第二条路。
+    // 设置项和桥指令都挂在 app.js 的 window.HG_PLAYER 上（那边已经有一份
+    // playerCommand，不重复实现）。
+
+    let currentFeed = null;
+
+    // ── 「这一集这台机器解不了」的短期记忆 ──────────────────────────────
+    //
+    // 只靠「收到 MediaError 的那一刻切过去」是不够的：那一刻的判断依赖
+    // activePage、依赖 <video> 还挂着 src、还依赖错误码真的是 4 —— 任何一条
+    // 不成立就静默不切，用户看到的就是「自动切换没生效」。
+    // 补一条持久事实：这集失败的当场记下来，下次播这一集直接起内置播放器。
+    const FAIL_KEY = 'hgpref:nativefail';
+    const FAIL_TTL = 7 * 24 * 3600 * 1000;
+
+    function failMap() {
+      try {
+        const raw = JSON.parse(localStorage.getItem(FAIL_KEY) || '{}');
+        const now = Date.now();
+        const out = {};
+        Object.keys(raw).forEach(key => {
+          if (now - Number(raw[key] || 0) < FAIL_TTL) out[key] = raw[key];
+        });
+        return out;
+      } catch (error) { return {}; }
+    }
+
+    function markNeedsNative(id, ep) {
+      try {
+        const map = failMap();
+        map[String(id) + ':' + Number(ep || 1)] = Date.now();
+        const keys = Object.keys(map);
+        if (keys.length > 200) keys.slice(0, keys.length - 200).forEach(k => delete map[k]);
+        localStorage.setItem(FAIL_KEY, JSON.stringify(map));
+      } catch (error) {}
+    }
+
+    function needsNative(id, ep) {
+      return Boolean(failMap()[String(id) + ':' + Number(ep || 1)]);
+    }
+
+    function playerPrefs() {
+      const read = window.HG_PLAYER && window.HG_PLAYER.prefs;
+      return (read && read()) || { core: 'web', decode: 'auto', cache: 1500, autoFallback: true };
+    }
+
+    /** 这一集现在该播的地址。和解码器无关，网页/内置两个播放器共用同一个 URL。 */
+    function playableUrl(page) {
+      if (!page) return '';
+      const video = page.querySelector('video');
+      const live = video && (video.currentSrc || video.getAttribute('src'));
+      return live || page.dataset.nativeUrl || '';
+    }
+
+    /**
+     * 交给内置播放器。reason：'user' 是用户点的，'auto' 是解码失败自动切。
+     *
+     * 起播前先把网页那个 <video> 停掉 —— 否则 Activity 一盖上来，WebView 里的
+     * 声音还在放着，用户会听到两路音频叠在一起。
+     */
+    async function openNative(page, reason) {
+      if (!page) return;
+      const url = playableUrl(page);
+      if (!url) { toast('还没有可播放的地址', true); return; }
+      if (!window.HG_PLAYER) { toast('这个版本没有带内置播放器', true); return; }
+      const prefs = playerPrefs();
+      const video = page.querySelector('video');
+      // 整部剧的集数带进去：内置播放器那头有 mini-feed（上下滑切集）。
+      // 地址不在这里解析 —— 原生会按需回来问 __hgNativeEpisode。
+      const eps = [...(page.parentElement?.querySelectorAll('.feed-page') || [])]
+        .map(p2 => Number(p2.dataset.ep) || 0);
+      const payload = {
+        url,
+        eps,
+        index: eps.indexOf(Number(page.dataset.ep) || 1),
+        id: page.dataset.videoId || '',
+        episode: Number(page.dataset.ep) || 1,
+        title: page.dataset.title || '',
+        cover: page.dataset.cover || '',
+        source: window.HG_SOURCE_KEY || '',
+        start: Math.round(((video && video.currentTime) || 0) * 1000),
+        // 自动切换的那一次一律软解：能从 <video> 掉下来，多半就是硬解不认这个流，
+        // 再让 VLC 走一遍同一条硬解只是把失败重演一次。
+        decode: reason === 'auto' ? 'sw' : (prefs.decode === 'sw' ? 'sw' : 'auto'),
+        cache: Number(prefs.cache) || 1500,
+        rate: selectedRate()
+      };
+      try { if (video) video.pause(); } catch (error) {}
+      try {
+        await window.HG_PLAYER.command('native?payload=' + encodeURIComponent(JSON.stringify(payload)));
+        if (reason === 'auto') toast('这台设备解不了这个编码，已切到内置播放器');
+      } catch (error) {
+        toast(error.message || '内置播放器打不开', true);
+      }
+    }
+
+    /**
+     * 从内置播放器回来之后，把那一场播完的现场收下：
+     * 位置写回进度（和网页播放器同一份 localStorage + 同一个进度桥），
+     * 网页播放器的播放头也挪到那儿，播完了就滑到下一集。
+     */
+    async function checkNativeReturn(feed) {
+      if (!window.HG_PLAYER) return;
+      if (!feed) feed = document.querySelector('.feed') || currentFeed;
+      // feed 可能压根不存在 —— 现在播放全程在原生，页面这边没有 feed 页。
+      // 进度照样要收：下面只有「把播放头挪回去」那一步需要 page，没有就跳过。
+      let result = null;
+      try { result = await window.HG_PLAYER.last(); } catch (error) { return; }
+      const session = result && result.session;
+      if (!session || !session.id) return;
+      const id = String(session.id);
+      if (!/^\d+$/.test(id)) return;         // 原生那边只认纯数字 id，别的存不了
+
+      const ep = Number(session.episode) || 1;
+      const pos = Math.max(0, (Number(session.position) || 0) / 1000);
+      const dur = Math.max(0, (Number(session.duration) || 0) / 1000);
+      if (dur > 0) remember(id, ep, pos, dur);
+
+      const page = feed
+        ? feed.querySelector('.feed-page[data-video-id="' + id + '"][data-ep="' + ep + '"]')
+        : null;
+      if (dur > 0) {
+        if (page) report(page, pos, dur, true);
+        else if (bridgeCall) {
+          // 记的这一集不在当前这部里（用户从观看历史进来的），照样要把进度送回去。
+          bridgeCall('detail', {
+            id: '__progress:set?payload=' + encodeURIComponent(JSON.stringify({
+              id,
+              episode: ep,
+              position: Math.round(pos * 1000),
+              duration: Math.round(dur * 1000),
+              title: session.title || '',
+              cover: session.cover || '',
+              source: session.source || ''
+            }))
+          }).catch(() => {});
+        }
+      }
+      if (!page) return;
+
+      const video = page.querySelector('video');
+      if (video && pos > 3 && (!dur || pos < dur - 8)) {
+        // duration 还没出来时这一刻的赋值会被丢掉，attach() 里那份 recall()
+        // 才是兜底 —— 它等 duration 就绪再落位置。两条都留着不冲突。
+        try { video.currentTime = pos; } catch (error) {}
+      }
+
+      if (session.finished) {
+        const next = page.nextElementSibling;
+        if (next && next.classList.contains('feed-page')) scrollToPage(feed, next, 'smooth');
+        else toast('已经是最后一集了');
+      } else if (pos > 1) {
+        toast('已记下进度 ' + fmtClock(pos));
+      }
+    }
+
     function neighbors(page) {
       const feed = page.parentElement;
       if (!feed) return;
@@ -587,6 +883,28 @@
       if (!page?.classList.contains('feed-page')) return;
       const video = page.querySelector('video');
       if (!video) return;
+
+      // 内核设成「内置」时，滑到一集就直接交给 VLC —— 但得先 attach 一次，
+      // 地址是那个接口给的（网页和内置用的是同一个 URL）。autoNative 这个
+      // 标记是防回环的：从 VLC 回来后 IntersectionObserver 会再触发一次 play()，
+      // 没有它就会立刻又跳出去，用户永远回不到页面。
+      if (playerPrefs().core === 'native' && page.dataset.autoNative !== '1') {
+        page.dataset.autoNative = '1';
+        try { await attach(page); } catch (error) {}
+        openNative(page, 'user');
+        return;
+      }
+
+      // 这一集在这台机器上出过「解不了」的错：不等错误再来一次，直接起内置。
+      // 地址还得先 attach 出来（网页和内置用的是同一个 URL）。
+      if (playerPrefs().autoFallback && page.dataset.autoNative !== '1'
+          && needsNative(page.dataset.videoId, page.dataset.ep)) {
+        page.dataset.autoNative = '1';
+        try { await attach(page); } catch (error) {}
+        openNative(page, 'auto');
+        return;
+      }
+
       try {
         await attach(page);
         page.querySelector('.feed-error')?.classList.add('hidden');
@@ -620,6 +938,7 @@
         <button type="button" class="feed-control feed-ep-next" aria-label="下一集">下一集</button>
         <button type="button" class="feed-control feed-quality-toggle" hidden aria-label="选择清晰度">清晰度</button>
         <button type="button" class="feed-control feed-rate-toggle" aria-label="选择倍速">${speedLabel(selectedRate())}</button>
+        <button type="button" class="feed-control feed-native-toggle" aria-label="用内置播放器播放">内置</button>
         <button type="button" class="feed-control feed-orientation-toggle" aria-label="切换横屏播放">横屏</button>
         <button type="button" class="feed-control feed-flip-toggle" aria-label="翻转画面方向">翻转</button>
         <div class="feed-quality-panel hidden" role="menu" aria-label="清晰度"></div>
@@ -739,7 +1058,7 @@
                 <video playsinline webkit-playsinline preload="none"></video>
                 <div class="feed-spinner"></div>
                 <b class="feed-spinner-text hidden"></b>
-                <div class="feed-error hidden"><span class="feed-error-text"></span><button type="button" class="feed-retry">重试</button></div>
+                <div class="feed-error hidden"><span class="feed-error-text"></span><button type="button" class="feed-native">内置播放器</button><button type="button" class="feed-retry">重试</button><button type="button" class="feed-external">外部播放器</button></div>
                 <div class="feed-speed">2×</div>
                 <div class="feed-seek"><b class="feed-seek-delta">快进 0 秒</b><span class="feed-seek-clock">0:00 / 0:00</span></div>
                 <div class="feed-brightness"><b class="feed-brightness-value">亮度 50%</b><i class="feed-brightness-fill"></i></div>
@@ -781,6 +1100,19 @@
       };
 
       feed.addEventListener('pointerdown', event => {
+        const externalBtn = event.target.closest('.feed-external');
+        if (externalBtn) {
+          const page = externalBtn.closest('.feed-page');
+          const src = page?.querySelector('video')?.currentSrc || page?.querySelector('video')?.getAttribute('src') || '';
+          if (!src) { toast('还没有可播放的地址', true); return; }
+          window.HG_BRIDGE?.('detail', { id: '__player:external?url=' + encodeURIComponent(src) })
+            .then(reply => {
+              const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
+              if (result && result.ok === false) toast(result.error || '没能打开外部播放器', true);
+            })
+            .catch(error => toast(error.message || '没能打开外部播放器', true));
+          return;
+        }
         if (event.target.closest('.feed-back, .feed-retry, .feed-bar, .feed-error, .feed-controls')) return;
         const page = event.target.closest('.feed-page');
         if (!page) return;
@@ -920,6 +1252,19 @@
 
       feed.addEventListener('pointerdown', event => {
         if (drag) endDrag(false);
+        const externalBtn = event.target.closest('.feed-external');
+        if (externalBtn) {
+          const page = externalBtn.closest('.feed-page');
+          const src = page?.querySelector('video')?.currentSrc || page?.querySelector('video')?.getAttribute('src') || '';
+          if (!src) { toast('还没有可播放的地址', true); return; }
+          window.HG_BRIDGE?.('detail', { id: '__player:external?url=' + encodeURIComponent(src) })
+            .then(reply => {
+              const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
+              if (result && result.ok === false) toast(result.error || '没能打开外部播放器', true);
+            })
+            .catch(error => toast(error.message || '没能打开外部播放器', true));
+          return;
+        }
         if (event.target.closest('.feed-back, .feed-retry, .feed-bar, .feed-error, .feed-controls')) return;
         const page = event.target.closest('.feed-page');
         if (!page) return;
@@ -1012,6 +1357,10 @@
             if (target && target.classList.contains('feed-page')) scrollToPage(feed, target, 'smooth');
             return;
           }
+          if (event.target.closest('.feed-native-toggle')) {
+            openNative(activePage || feed.querySelector('.feed-page'), 'user');
+            return;
+          }
           if (event.target.closest('.feed-rate-toggle')) {
             panel?.classList.toggle('hidden');
             qualityPanel?.classList.add('hidden');
@@ -1028,12 +1377,27 @@
           }
           return;
         }
+        const nativeBtn = event.target.closest('.feed-native');
+        if (nativeBtn) {
+          const page = nativeBtn.closest('.feed-page');
+          openNative(page, 'user');
+          return;
+        }
         const retry = event.target.closest('.feed-retry');
         if (retry) {
           const page = retry.closest('.feed-page');
           release(page);
           page.querySelector('.feed-error')?.classList.add('hidden');
           play(page);
+          return;
+        }
+        // 错误框里除了两个按钮之外的地方也接住点击：手机上这两个按钮在
+        // 旋转过的舞台上只有 40px 宽，手指差几个像素就落到空隙里，看起来就是
+        // 「点了没反应」——朋友实测就是这么报的。可点区域放大到整个错误框，
+        // 反正这时点空白处本来也只是暂停/继续，没有别的作用。
+        const errorBox = event.target.closest('.feed-error');
+        if (errorBox && !errorBox.classList.contains('hidden')) {
+          openNative(errorBox.closest('.feed-page'), 'user');
           return;
         }
         if (event.target.closest('.feed-bar')) return;
@@ -1053,9 +1417,25 @@
       const target = feed.querySelector(`.feed-page[data-ep="${startEpisode}"]`) || feed.querySelector('.feed-page');
       requestAnimationFrame(() => scrollToPage(feed, target));
       updateBackEnabled();
+
+      // 从内置播放器回来：Activity 盖在 WebView 上时页面只是 hidden，
+      // 所以「回来」这件事在 visibilitychange 上，而不是某一次 render。
+      currentFeed = feed;
+      if (!window.__hgNativeWatcher) {
+        window.__hgNativeWatcher = true;
+        document.addEventListener('visibilitychange', () => {
+          if (!document.hidden && currentFeed && document.body.contains(currentFeed)) {
+            checkNativeReturn(currentFeed);
+          }
+        });
+      }
+      checkNativeReturn(feed);
     }
 
-    return { open, close, cleanup };
+    // resume：原生 onResume 会调 hgResume()，那里要顺带把内置播放器的现场收回来
+    // —— visibilitychange 在 Android WebView 上并不可靠（被 Activity 盖住时
+    // document.hidden 常常一直是 false），那条路只当备份。
+    return { open, close, cleanup, resume: () => checkNativeReturn() };
   }
 
   window.HGFeedPlayer = { create: createFeedPlayer };

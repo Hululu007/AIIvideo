@@ -70,6 +70,106 @@ async function playerCommand(command) {
   return result || {};
 }
 
+// ── 播放器设置 ────────────────────────────────────────────────────────
+// 两条播放路径：WebView 里的 <video>（默认）和原生 libVLC（1.0.18 起）。
+//
+// 为什么需要第二条：<video> 用哪个解码器由系统 WebView 决定，页面上没有任何
+// 旋钮。于是同一部片在 A 机上能放、B 机上 MediaError 4（SRC_NOT_SUPPORTED）——
+// 差别只有那台设备有没有这个硬解、WebView 版本里带没带这个解码器，而软件解码
+// 这条路在 WebView 里根本不存在。走内置播放器之后解码链在 App 里，和设备硬解、
+// WebView 版本都脱钩。
+const PLAYER_PREF_KEY = 'hgpref:player';
+// 2026-10-17 起只用内置播放器（libVLC）。core 和 autoFallback 两个开关
+// 留着是为了兼容老设备上存过的偏好键，逻辑上已经不起作用 —— 播放一律走原生。
+const PLAYER_DEFAULTS = { core: 'native', decode: 'auto', cache: 1500, autoFallback: false };
+
+function playerPrefs() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(PLAYER_PREF_KEY) || '{}') || {}; } catch (error) {}
+  const prefs = { ...PLAYER_DEFAULTS, ...saved };
+  prefs.core = 'native';
+  if (prefs.decode !== 'sw') prefs.decode = 'auto';
+  prefs.cache = [800, 1500, 3000].includes(Number(prefs.cache)) ? Number(prefs.cache) : 1500;
+  prefs.autoFallback = false;
+  return prefs;
+}
+
+function savePlayerPrefs(patch) {
+  const next = { ...playerPrefs(), ...patch };
+  try { localStorage.setItem(PLAYER_PREF_KEY, JSON.stringify(next)); } catch (error) {}
+  return next;
+}
+
+// 内置播放器到底能不能用（APK 只带了 arm64-v8a）。问一次缓存一页。
+// 这个探测会真的去加载 so —— 45MB 的映射，别反复调。
+function nativePlayerInfo() {
+  if (state.nativeInfo) return Promise.resolve(state.nativeInfo);
+  return playerCommand('capability')
+    .then(info => { state.nativeInfo = info || { native: false, abi: '' }; return state.nativeInfo; })
+    .catch(() => { state.nativeInfo = { native: false, abi: '' }; return state.nativeInfo; });
+}
+
+// 内置播放器（VlcPlayerActivity）按需向页面要播放地址的口子。
+// 解密、wasm、多线路全在这边，原生只发一个问题：这一集的 URL 是什么。
+//
+// 两条硬约束：
+//   1) 必须是**同步**函数。原生用的是 evaluateJavascript，它不等 Promise ——
+//      返回 Promise 的话那边收到的是字符串 "{}"，等于永远拿不到地址。
+//   2) 结果要落在 window.__hgNativeEps 这个表里（外加 localStorage 缓存）。
+//      原生每 0.8 秒问一次，靠这张表把「正在解」和「解出来了」区分开。
+window.__hgNativeEps = window.__hgNativeEps || {};
+window.__hgNativeEpsBusy = window.__hgNativeEpsBusy || {};
+
+function hgNativeEpKey(id, ep) { return id + ':' + ep; }
+
+function hgNativeResolve(id, ep) {
+  const key = hgNativeEpKey(id, ep);
+  if (window.__hgNativeEpsBusy[key]) return;   // 已经在解了，别重复打接口
+  window.__hgNativeEpsBusy[key] = true;
+  api('episode', { id, episode: ep }).then(info => {
+    let url = info.source || info.url || '';
+    const resolveWasm = url.indexOf('agedm-wasm:') === 0 && window.HG_AGEDM_PLAY
+      ? (Array.isArray(info.lines) && info.lines.length
+          ? window.HG_AGEDM_PLAY.resolveAny(info.lines, () => {})
+          : window.HG_AGEDM_PLAY.resolve(url.slice('agedm-wasm:'.length), () => {}))
+      : Promise.resolve(url);
+    return Promise.resolve(resolveWasm).then(resolved => {
+      if (!/^https?:\/\//.test(resolved)) return;
+      window.__hgNativeEps[key] = resolved;
+      try {
+        const all = JSON.parse(localStorage.getItem('hgpref:epurl') || '{}');
+        all[key] = { url: resolved, at: Date.now() };
+        localStorage.setItem('hgpref:epurl', JSON.stringify(all));
+      } catch (error) {}
+    });
+  }).catch(() => {}).then(() => { delete window.__hgNativeEpsBusy[key]; });
+}
+
+window.__hgNativeEpisode = (id, ep) => {
+  const key = hgNativeEpKey(id, ep);
+  const live = window.__hgNativeEps[key];
+  if (live) return live;
+  try {
+    const hit = JSON.parse(localStorage.getItem('hgpref:epurl') || '{}')[key];
+    if (hit && hit.url && Date.now() - (hit.at || 0) < 8 * 60 * 1000) {
+      window.__hgNativeEps[key] = hit.url;
+      return hit.url;
+    }
+  } catch (error) {}
+  hgNativeResolve(id, ep);
+  return '';
+};
+
+// 播放器模块（feed-player.js）从这里取设置和两条桥指令。挂 window 而不是加参数，
+// 是因为那块代码已经有一份 deps 列表，再加三个字段要动整个 create() 的签名。
+window.HG_PLAYER = {
+  prefs: playerPrefs,
+  save: savePlayerPrefs,
+  command: playerCommand,
+  info: nativePlayerInfo,
+  last: () => playerCommand('last').catch(() => null)
+};
+
 function api(action, args = {}) {
   const run = async () => {
     // REST 接口统一走 Java api-json 桥，避免 WebView 自动附带 Origin 请求头。
@@ -229,7 +329,11 @@ const state = {
   libraryTab: 'history', libraryQuery: '', accountReturn: null, account: { loggedIn: false },
   sourceGroup: '', sourceQueue: [], previous: null, compactHeld: false,
   // 正在改备注的那个源的地址（内容源页面用）。空串 = 没有在编辑。
-  sourceNote: ''
+  sourceNote: '',
+  // 源市场 {loading, items, error}；TVBox 导入 {url, loading, items, error}
+  market: null, marketReturn: null, tvbox: null,
+  // 内置播放器能力 {native, abi}；null = 还没问过
+  nativeInfo: null
 };
 // 子分类下标。state.sub 只预置了内置那套的两个 key，而换源之后 state.tab 是配置
 // 里给的任意 key（苹果CMS 那边是 "1"/"2"/"3"…），取不到就得回 0 —— 不然
@@ -246,6 +350,10 @@ function bridgeDirect(action, args = {}) {
   });
 }
 contentReady = (async () => {
+  // 热更新 trial 的确认兜底：只要 JS 跑到这里，说明这一版前端能正常启动。
+  // 正常路径是 renderHome 里那一枪；但停在首启设置页的机器永远到不了 renderHome，
+  // 没有这个兜底，每个热更新都会被判失败、下次启动回滚并拉黑。
+  setTimeout(() => { try { markHotUpdateHealthy(); } catch (error) {} }, 2500);
   let status;
   try { status = await bridgeDirect('content-status'); }
   catch (error) { status = { source: 'huangguo', unlocked: true }; }
@@ -333,6 +441,7 @@ function setAccount(profile) {
   if (state.route === 'settings') renderSettings();
   if (state.route === 'account-management' && !content.querySelector('#password-form')?.contains(document.activeElement)) renderAccountManagement();
   if (state.route === 'proxy-settings' && !content.querySelector('#proxy-form')?.contains(document.activeElement)) renderProxySettings();
+  if (state.route === 'player-settings') renderPlayerSettings();
   if (state.route === 'source-settings' && !content.querySelector('#source-form')?.contains(document.activeElement)) renderSourceSettings();
   scroll.scrollTop = savedScroll;
 }
@@ -431,8 +540,159 @@ window.hgCloudSynced = () => {
 // 设置页那个版本号按钮保留，它挂着 data-secret-entry，是独立功能。
 
 
-window.hgTheme = dark => { document.documentElement.dataset.theme = dark ? 'dark' : 'light'; };
+// ── 主题 ──────────────────────────────────────────────────────────────
+// 偏好存 localStorage，三档：system / light / dark。app.html 的头部脚本在
+// CSS 之前已经按同一份偏好定过一次 data-theme（防冷启动闪白），这里负责
+// 运行时切换、跟随系统深色，以及把明暗告诉原生（状态栏/导航栏图标）。
+const THEME_KEY = 'hgpref:theme';
+const THEME_MODES = ['system', 'light', 'dark'];
+const themeMedia = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+const reducedMotionQuery = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+
+function themeMode() {
+  try {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (THEME_MODES.includes(saved)) return saved;
+  } catch (error) {}
+  return 'system';
+}
+function systemDark() { return Boolean(themeMedia && themeMedia.matches); }
+function applyTheme(mode = themeMode(), darkOverride) {
+  const dark = mode === 'dark' || (mode === 'system' && (darkOverride === undefined ? systemDark() : Boolean(darkOverride)));
+  const root = document.documentElement;
+  root.dataset.theme = dark ? 'dark' : 'light';
+  root.dataset.themePref = mode;
+  root.style.colorScheme = dark ? 'dark' : 'light';
+  const meta = document.getElementById('theme-color');
+  if (meta) meta.setAttribute('content', dark ? '#171b1d' : '#f5f2e9');
+  window.HG_THEME_DARK = dark;
+}
+function syncNativeTheme(mode = themeMode()) {
+  // 状态栏/导航栏不归 WebView 管。原生侧拿同一个 mode 决定图标明暗；
+  // 这条桥失败也只是图标颜色不跟手，页面主题不受影响。
+  bridgeCall('theme', { mode }).catch(() => {});
+}
+function setThemeMode(mode) {
+  if (!THEME_MODES.includes(mode)) return;
+  try { localStorage.setItem(THEME_KEY, mode); } catch (error) {}
+  const commit = () => { applyTheme(mode); syncNativeTheme(mode); };
+  // View Transition 可用时做一次整屏交叉淡化，比让每个元素各自变色干净。
+  if (document.startViewTransition && !(reducedMotionQuery && reducedMotionQuery.matches)) {
+    try { document.startViewTransition(commit); } catch (error) { commit(); }
+  } else commit();
+  if (state.route === 'settings') {
+    const top = scroll.scrollTop;
+    renderSettings();
+    scroll.scrollTop = top;
+    requestAnimationFrame(() => content.querySelector(`[data-theme-mode="${mode}"]`)?.focus({ preventScroll: true }));
+  }
+  toast(`外观已切换为${mode === 'system' ? '跟随系统' : mode === 'dark' ? '深色' : '浅色'}`);
+}
+// 系统深色变化时原生会调这个。用户明确选了浅/深就尊重用户的选择。
+window.hgTheme = dark => {
+  if (themeMode() === 'system') applyTheme('system', Boolean(dark));
+  else applyTheme();
+};
+if (themeMedia) {
+  const onSystemTheme = event => { if (themeMode() === 'system') applyTheme('system', event.matches); };
+  if (themeMedia.addEventListener) themeMedia.addEventListener('change', onSystemTheme);
+  else if (themeMedia.addListener) themeMedia.addListener(onSystemTheme);
+}
+applyTheme();
+syncNativeTheme();
 api('theme').then(window.hgTheme).catch(() => {});
+
+// ── 前端热更新 ────────────────────────────────────────────────────────
+// 原生 HotUpdateManager 负责验签、下载、暂存和回滚；这里只做三件事：
+// 显示状态、触发检查、告诉原生现在能不能 recreate。
+let hotStatus = null;
+let hotCheckPending = false;
+// 原生 HotUpdateManager 在 minVersionCode 高于已装版本时抛「资源包需要更新应用版本」。
+// 这条不是「没有更新」，是「先装新版 APK」，得和普通错误分开说。
+let hotNeedsNewApp = '';
+let hotNoticeRevision = 0;
+let hotHealthyMarked = false;
+
+function hotUpdateLabel(status = hotStatus) {
+  if (!status) return '读取中…';
+  const revision = Number(status.revision) || 0;
+  if (!revision) return '内置界面';
+  return `热更新 r${revision}${status.version ? ` · ${status.version}` : ''}`;
+}
+function syncHotStatus(status) {
+  if (!status || typeof status !== 'object') return;
+  hotStatus = status;
+  if (state.route === 'settings') renderSettings();
+  const pending = Number(status.pending) || 0;
+  if (pending && pending !== hotNoticeRevision) {
+    hotNoticeRevision = pending;
+    toast(`前端更新 r${pending} 已下载，下次启动生效`);
+  }
+}
+window.hgHotUpdateStatus = syncHotStatus;
+// 原生 applyPendingResources() 会在 onResume 里问这一句。只在设置页返回 true，
+// 避免用户在首页滚到一半被 recreate 打断；其他页面等下次冷启动自动切换。
+window.hgCanApplyHotUpdate = () => Boolean(hotStatus && Number(hotStatus.pending) > 0)
+  && state.route === 'settings' && !document.hidden;
+
+function hotUpdateSection() {
+  const status = hotStatus;
+  const pending = Number(status?.pending) || 0;
+  const blocked = Number(status?.blocked) || 0;
+  const showBlocked = blocked > (Number(status?.revision) || 0);
+  const checking = hotCheckPending || Boolean(status?.checking);
+  return `<section class="settings-hot"><h2>前端热更新</h2>
+    <p>界面文件（HTML / CSS / JS）走签名包更新，改版不用重装 APK。当前运行：${esc(hotUpdateLabel(status))}。</p>
+    <div class="hot-update-meta"><i class="${pending ? 'is-ready' : ''}"></i><span>${pending ? `已下载 r${pending}，下次启动自动生效` : checking ? '正在检查更新…' : (hotNeedsNewApp || '没有待应用的更新')}</span></div>
+    <div class="hot-update-actions">
+      <button type="button" data-hot-check="1" ${checking ? 'disabled' : ''}>${checking ? '正在检查…' : '检查更新'}</button>
+      ${pending ? '<button type="button" class="hot-apply" data-hot-apply="1">立即应用并重启</button>' : ''}
+    </div>
+    ${hotNeedsNewApp ? '<div class="hot-update-actions"><button type="button" class="hot-apply" data-goto-app-update="1">去更新应用</button></div>' : ''}
+    ${showBlocked ? `<p class="hot-update-note">r${blocked} 没能正常启动，已回退到上一版；发一个更高的 revision 即可覆盖。</p>` : ''}
+  </section>`;
+}
+async function checkHotUpdate() {
+  if (hotCheckPending) return;
+  hotCheckPending = true;
+  if (state.route === 'settings') renderSettings();
+  try {
+    const status = await api('check-hot-update');
+    hotStatus = status;
+    hotNeedsNewApp = '';
+    if (Number(status?.pending) > 0) toast(`发现前端更新 r${status.pending}，下次启动生效`);
+    else toast('已经是最新界面');
+  } catch (error) {
+    const message = String(error.message || '');
+    if (message.indexOf('需要更新应用版本') >= 0) {
+      hotNeedsNewApp = '新的界面需要更新的应用版本，先装新版 APK';
+      toast('这个界面需要新版应用，先去「应用更新」', true);
+    } else {
+      toast(message || '检查更新失败', true);
+    }
+  } finally {
+    hotCheckPending = false;
+    if (state.route === 'settings') renderSettings();
+  }
+}
+function applyHotUpdate() {
+  if (!hotStatus || !Number(hotStatus.pending)) return;
+  api('apply-hot-update').catch(error => toast(error.message || '应用更新失败', true));
+}
+function markHotUpdateHealthy() {
+  if (hotHealthyMarked) return;
+  const runtime = window.HotRuntime || {};
+  if (!runtime.revision || !runtime.bootId) return;
+  // 「启动成功」的判据不能只有首页：还没配源的机器会一直停在设置页，
+  // 首页永远不出现 —— 那样每个热更新都会被当成启动失败，下次启动回滚并拉黑。
+  // 设置页能显示出来，就说明 HTML/CSS/JS 都跑通了，算健康。
+  const setupOpen = !document.getElementById('setup-overlay')?.hidden;
+  const homeReady = Boolean(document.querySelector('#content .home-page'));
+  if (!setupOpen && !homeReady) return;
+  hotHealthyMarked = true;
+  bridgeCall('hot-ready', { revision: runtime.revision, bootId: runtime.bootId }).catch(() => { hotHealthyMarked = false; });
+}
+api('hot-update-status').then(syncHotStatus).catch(() => {});
 
 function itemCard(item) {
   const id = esc(item.id);
@@ -643,6 +903,9 @@ function renderHome() {
   cover.hydrate();
   slides.forEach(item => { if (item.cover) cover.get(item.cover).catch(() => {}); });
   scheduleBannerAuto();
+  // 热更新 session 的 trial 只有在首页真的画出来之后才算健康；否则下次启动
+  // beginSession 会把它回滚到上一版。延迟一拍，等首屏图片和新 DOM 稳定。
+  setTimeout(markHotUpdateHealthy, 400);
 }
 
 function renderTags() {
@@ -806,16 +1069,197 @@ function renderLibrary() {
   cover.hydrate();
 }
 
+function appearanceSection() {
+  const mode = themeMode();
+  const choices = [
+    ['system', '跟随系统', '随手机切换'],
+    ['light', '浅色', '暖纸白'],
+    ['dark', '深色', '夜间低亮']
+  ];
+  return `<section class="settings-appearance"><h2>外观</h2><p>给眼睛挑一个舒服的亮度。跟随系统会随手机的深色模式自动切换。</p>
+    <div class="theme-choice" role="radiogroup" aria-label="界面主题">${choices.map(([value, label, hint]) => `<button type="button" role="radio" aria-checked="${mode === value}" class="theme-choice-item ${mode === value ? 'selected' : ''}" data-theme-mode="${value}">
+      <span class="theme-swatch swatch-${value}" aria-hidden="true"><i></i><b></b></span>
+      <span class="theme-choice-copy"><strong>${label}</strong><small>${hint}</small></span>
+    </button>`).join('')}</div></section>`;
+}
+
+// ── 应用内 APK 更新 ─────────────────────────────────────────────────
+// 原生 UpdateManager 一直是活的：清单校验、SHA-256、下载进度回调、拉起系统
+// 安装器全都在（check-update / download-update 两个桥指令）。死掉的只有两样 ——
+// 老仓库的 URL（已换到自己 VPS 的 /updates/）和这一层 UI（2026-10-16 整块删了，
+// 理由写着「通道已死」；通道活回来之后 UI 就得跟着回来）。
+const updateCheck = { phase: 'idle', info: null, progress: 0, message: '' };
+
+// 下载中的状态要活过页面重建。
+//
+// 之前这里是纯内存的：用户点「下载并安装」，切到首页再切回设置，`updateCheck`
+// 已经被重新渲染成「检查更新…」，进度条没了，看着像下载被取消了（其实原生
+// 线程还在下）。所以把 phase 钉进 localStorage，重建后接着显示进度。
+const UPDATE_STATE_KEY = 'hgupd:phase';
+
+function rememberUpdatePhase() {
+  try {
+    localStorage.setItem(UPDATE_STATE_KEY, JSON.stringify({
+      phase: updateCheck.phase, progress: updateCheck.progress, at: Date.now()
+    }));
+  } catch (error) {}
+}
+
+function restoreUpdatePhase() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(UPDATE_STATE_KEY) || 'null');
+    if (!saved || saved.phase !== 'downloading') return;
+    // 下载中最多认 10 分钟。过了就当它断了，别让界面永远卡在 37% 那种数字上。
+    if (Date.now() - (Number(saved.at) || 0) > 600000) {
+      localStorage.removeItem(UPDATE_STATE_KEY);
+      return;
+    }
+    updateCheck.phase = 'downloading';
+    updateCheck.progress = Number(saved.progress) || 0;
+  } catch (error) {}
+}
+restoreUpdatePhase();
+
+function renderUpdateCheck() {
+  const area = document.getElementById('update-check-area');
+  if (!area) return;
+  const u = updateCheck;
+  if (u.phase === 'checking') { area.innerHTML = '<p class="update-note">正在检查更新…</p>'; return; }
+  if (u.phase === 'none') { area.innerHTML = '<p class="update-note">已是最新版本</p>'; return; }
+  if (u.phase === 'error') {
+    area.innerHTML = `<p class="update-note">${esc(u.message || '检查失败')}</p><button type="button" data-check-update="1">重试</button>`;
+    return;
+  }
+  if (u.phase === 'available') {
+    const size = u.info?.size ? ` · ${(u.info.size / 1048576).toFixed(1)} MB` : '';
+    area.innerHTML = `<div class="update-available"><div class="update-available-head"><strong>新版本 v${esc(u.info?.version || '')}</strong><small>${esc(size)}</small></div>${u.info?.notes ? `<p>${esc(u.info.notes)}</p>` : ''}<button type="button" data-download-update="1">下载并安装</button></div>`;
+    return;
+  }
+  if (u.phase === 'downloading') {
+    const pct = Math.min(100, Math.floor(u.progress));
+    let detail = `下载中 ${pct}%`;
+    if (u.progress < 100) {
+      // 速度和剩余时间是「等下值不值」的唯一线索。60MB 的包在 400KB/s 下要
+      // 两分半，只给百分比的话用户分不清是在下还是卡死了。
+      const speed = fmtSpeed(updateSpeed.bps);
+      if (speed) detail += ` · ${speed}`;
+      const left = remainingSeconds(pct);
+      if (left > 0) detail += ` · 约 ${fmtLeft(left)}`;
+    }
+    area.innerHTML = `<div class="update-progress"><div class="update-progress-bar"><i style="width:${pct}%"></i></div><small>${u.progress >= 100 ? '下载完成，正在拉起安装…' : detail}</small></div>`;
+    return;
+  }
+  area.innerHTML = '<button type="button" data-check-update="1">检查更新</button>';
+}
+
+async function checkAppUpdate() {
+  // 下载中就别重新检查了：那会把进度条换成「正在检查更新…」，看起来像点了没反应。
+  if (updateCheck.phase === 'downloading') return;
+  updateCheck.phase = 'checking'; renderUpdateCheck();
+  try {
+    // manual:true 让原生跳过 30 分钟自动检查节流 —— 用户点了按钮就是要立即查。
+    const result = await api('check-update', { manual: true });
+    const status = String(result?.status || 'none');
+    if (status === 'available') {
+      updateCheck.phase = 'available';
+      updateCheck.info = result.available_manifest || result;
+    } else if (status === 'throttled') {
+      // 原生那边一小时只放行 5 次手动检查。以前这里一律落到 none，
+      // 于是「点太多被限流」和「真的没有新版本」显示同一句话「已是最新版本」——
+      // 用户越急越点，越点越看到「已是最新」，最后只能来问人。
+      updateCheck.phase = 'error';
+      updateCheck.message = '检查太频繁了，过几分钟再试。';
+    } else if (status === 'unpublished') {
+      updateCheck.phase = 'error';
+      updateCheck.message = '服务器上没有发布信息。';
+    } else {
+      updateCheck.phase = 'none';
+    }
+  } catch (error) {
+    updateCheck.phase = 'error'; updateCheck.message = error.message;
+  }
+  renderUpdateCheck();
+}
+
+async function downloadAppUpdate() {
+  updateSpeed.pct = null; updateSpeed.at = 0; updateSpeed.bps = 0;
+  updateCheck.phase = 'downloading'; updateCheck.progress = 0; renderUpdateCheck();
+  rememberUpdatePhase();
+  try {
+    await api('download-update');
+    updateCheck.progress = 100;
+    rememberUpdatePhase();
+  } catch (error) {
+    updateCheck.phase = 'error'; updateCheck.message = error.message;
+    try { localStorage.removeItem(UPDATE_STATE_KEY); } catch (ignore) {}
+  }
+  renderUpdateCheck();
+}
+// 原生下载线程每收到一块数据就推一次百分比；装包环节的两种失败各有一个钩子。
+// 下载速度。原生只推百分比，速度得自己按两次回调的差算。
+// 平滑一下：直接除会抖成 0.1 / 9.8 / 2.3 这种，看着像坏了。
+const updateSpeed = { pct: null, at: 0, bps: 0 };
+
+function fmtSpeed(bps) {
+  if (!bps || bps <= 0) return '';
+  if (bps >= 1048576) return (bps / 1048576).toFixed(1) + ' MB/s';
+  if (bps >= 1024) return Math.round(bps / 1024) + ' KB/s';
+  return Math.round(bps) + ' B/s';
+}
+
+function remainingSeconds(pct) {
+  const size = Number(updateCheck.info?.size) || 0;
+  if (!size || !updateSpeed.bps || pct >= 100) return 0;
+  return Math.max(0, Math.round((size * (100 - pct) / 100) / updateSpeed.bps));
+}
+
+function fmtLeft(sec) {
+  if (sec >= 60) return Math.floor(sec / 60) + ' 分 ' + (sec % 60) + ' 秒';
+  return sec + ' 秒';
+}
+
+window.hgUpdateProgress = percent => {
+  if (updateCheck.phase !== 'downloading') updateCheck.phase = 'downloading';
+  const now = Date.now();
+  const size = Number(updateCheck.info?.size) || 0;
+  if (updateSpeed.pct != null && size > 0) {
+    const dp = percent - updateSpeed.pct;
+    const dt = (now - updateSpeed.at) / 1000;
+    if (dp > 0 && dt > 0.2) {
+      const bps = (dp / 100) * size / dt;
+      updateSpeed.bps = updateSpeed.bps ? updateSpeed.bps * 0.65 + bps * 0.35 : bps;
+    }
+  }
+  updateSpeed.pct = percent;
+  updateSpeed.at = now;
+  updateCheck.progress = percent;
+  rememberUpdatePhase();
+  renderUpdateCheck();
+};
+window.hgUpdateInstallError = () => toast('无法拉起系统安装程序', true);
+// 原生那边下载失败会把 null 传回来，现在它走这个钩子而不是直接去装（那条路会 NPE）。
+window.hgUpdateFailed = () => {
+  updateCheck.phase = 'error';
+  updateCheck.message = '下载失败，检查一下网络再试。';
+  try { localStorage.removeItem(UPDATE_STATE_KEY); } catch (ignore) {}
+  renderUpdateCheck();
+};
+window.hgUpdateInstallPermissionDenied = () => toast('没有「安装未知应用」权限，请在系统设置里允许本应用', true);
+
 function renderSettings() {
   content.innerHTML = `<div class="settings-page"><button type="button" class="listing-back" data-back="1">${icon('back')} 返回我的</button><h1>设置</h1>
     <section><button type="button" class="settings-link" data-account-management="1"><span><strong>账号管理</strong><small>${state.account.loggedIn ? esc(state.account.username) : '登录或注册账号'}</small></span>${icon('arrow')}</button></section>
+    ${appearanceSection()}
+    ${hotUpdateSection()}
     <section class="settings-library"><h2>片单管理</h2><p>${state.account.loggedIn ? '清空后会同步到当前账号的其他设备。' : '清空当前设备保存的片单。'}</p>
       <button type="button" data-clear="history" ${asArray(state.library?.progress).length ? '' : 'disabled'}>清空观看历史</button>
       <button type="button" data-clear="bookmarks" ${asArray(state.library?.bookmarks).length ? '' : 'disabled'}>清空我的收藏</button></section>
-    <section class="update-settings"><div><h2>应用更新</h2><button type="button" class="app-version" data-secret-entry aria-label="当前版本 ${esc(appVersion)}"><span class="app-version-text">版本 ${appVersion ? `v${esc(appVersion)}` : '读取中…'}</span></button><p>当前安装包版本。</p></div></section>
+    <section class="update-settings"><div><h2>应用更新</h2><button type="button" class="app-version" data-secret-entry aria-label="当前版本 ${esc(appVersion)}"><span class="app-version-text">版本 ${appVersion ? `v${esc(appVersion)}` : '读取中…'}</span></button><p>当前安装包版本。</p></div><div class="update-check-area" id="update-check-area"><button type="button" data-check-update="1">检查更新</button></div></section>
     <section class="settings-storage"><h2>本地存储</h2><button type="button" data-clear="cache">清理内容缓存</button></section>
+      <section><button type="button" class="settings-link" data-market="1"><span><strong>源市场</strong><small>粘一个源清单地址，点卡片就能用</small></span>${icon('arrow')}</button></section>
       <section><button type="button" class="settings-link" data-source-settings="1"><span><strong>内容源</strong><small>${state.sourceName ? esc(state.sourceName + '（' + state.sourceCount + ' 个已保存）') : '未配置'}</small></span>${icon('arrow')}</button></section>
       <section><button type="button" class="settings-link" data-proxy-settings="1"><span><strong>网络代理</strong><small>${state.proxy ? esc(state.proxy) : '直连。有机场的话填这里可以绕开慢链路'}</small></span>${icon('arrow')}</button></section>
+      <section><button type="button" class="settings-link" data-player-settings="1"><span><strong>播放器</strong><small>${playerSummary()}</small></span>${icon('arrow')}</button></section>
     <section class="settings-reset"><h2>恢复出厂设置</h2>
       <p>退出登录，并清掉这台设备上的收藏、观看历史、内容缓存、内容源和代理，回到刚装好、还没填源的样子。账号本身和云端的片单不受影响，重新登录还能拿回来。</p>
       <button type="button" data-factory-reset="1">恢复出厂设置</button></section></div>`;
@@ -830,6 +1274,168 @@ function renderSettings() {
 // 切换 = 拿那个地址的本地缓存 + 覆盖当前配置，跟着第一次填走完全一样的校验 ——
 // 校验和干跑一个都不少（那才是「别把应用锁死」的那道闸），少的只是**网络那一段**。
 // 缓存不在时（第一次切到某个源）照旧现场拉一次，拉回来的那份会存成缓存。
+// ── 源市场与 TVBox 订阅导入 ────────────────────────────────────────────
+// 市场是一份静态清单（服务器上的 market.json），点一下等于走一遍和手动粘贴
+// 完全相同的 set 流程 —— 校验链一条不少，市场只是把「从哪找地址」这件事
+// 替你办了。TVBox 单仓配置同理：拉回来解析出 type 0/1 的源，逐个可加。
+// 市场地址不内置 —— App 出厂不带任何地址，谁来维护清单由用户自己决定。
+// 用户粘一份清单地址，存在本地；换地址随时改。清单格式见 market.json 约定。
+const MARKET_KEY = 'hgmarket:v1';
+const MARKET_SRC_KEY = 'hgmarket:src';
+const MARKET_TTL = 6 * 3600 * 1000;
+
+function marketSource() {
+  try { return String(localStorage.getItem(MARKET_SRC_KEY) || ''); } catch (error) { return ''; }
+}
+function setMarketSource(url) {
+  try { localStorage.setItem(MARKET_SRC_KEY, url); localStorage.removeItem(MARKET_KEY); } catch (error) {}
+}
+
+// 经原生 HTTP 抓任意 https 文本（__source:fetch）。WebView 直接 fetch 会被 CORS
+// 拦，第三方源清单不会给我们带 ACAO 头。
+async function fetchTextViaBridge(url) {
+  const result = await sourceCommand('fetch?url=' + encodeURIComponent(url));
+  return String(result.body || '');
+}
+
+async function loadMarket(force = false) {
+  const source = marketSource();
+  if (!source) throw new Error('还没有填写源市场地址');
+  if (!force) {
+    try {
+      const cached = JSON.parse(localStorage.getItem(MARKET_KEY) || 'null');
+      if (cached && cached.at && Date.now() - cached.at < MARKET_TTL) return cached;
+    } catch (error) {}
+  }
+  const text = await fetchTextViaBridge(source);
+  const parsed = JSON.parse(text);
+  const items = asArray(parsed.sources).filter(item => item && /^https:\/\//.test(String(item.url || '')));
+  if (!items.length) throw new Error('市场清单是空的');
+  const cache = { at: Date.now(), updated: parsed.updated || '', items };
+  try { localStorage.setItem(MARKET_KEY, JSON.stringify(cache)); } catch (error) {}
+  return cache;
+}
+
+// 加源并在成功后重启（换源必须重建 Activity，理由见 restartAfterSource）。
+async function addSourceFromMarket(url) {
+  const result = await sourceCommand('set?url=' + encodeURIComponent(url));
+  if (!result || !result.ok) throw new Error((result && result.error) || '设置失败');
+  toast('已切换到这个源，正在重启…');
+  restartAfterSource(() => { try { location.reload(); } catch (error) {} });
+}
+
+function renderMarket() {
+  const source = marketSource();
+  const m = state.market || { loading: true };
+  const saved = new Set(asArray(state.sources).map(item => item.url));
+  const active = asArray(state.sources).find(item => item.active);
+  if (!source) {
+    content.innerHTML = `<div class="listing-page"><button type="button" class="listing-back" data-back="1">${icon('back')} 返回设置</button>
+      <h1>源市场</h1>
+      <p>粘一个源清单地址。清单由提供者维护，App 不内置任何地址。</p>
+      <form id="market-form" class="password-form">
+        <label for="market-value">源市场地址</label>
+        <input id="market-value" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://example.com/market.json">
+        <p class="field-hint">地址必须以 https:// 开头，返回 JSON：{"sources":[{"name":"…","desc":"…","url":"…"}]}</p>
+        <p id="market-error" class="auth-error" role="alert" hidden></p>
+        <button type="submit">使用这个市场</button>
+      </form>
+      <p class="market-footnote">没有清单地址？可以在「内容源」里手动添加单个源，或导入 TVBox 配置。</p>
+    </div>`;
+    return;
+  }
+  const cards = m.loading
+    ? '<div class="market-loading"><span class="search-spinner" aria-hidden="true"></span><p>正在获取源清单…</p></div>'
+    : m.error
+      ? `<div class="market-loading"><p>${esc(m.error)}</p><button type="button" data-market-reload="1">重试</button></div>`
+      : asArray(m.items).map(item => {
+          const url = String(item.url || '');
+          const isActive = active && active.url === url;
+          const isSaved = saved.has(url);
+          return `<li class="market-item">
+            <div class="market-copy"><strong>${esc(item.name || url)}</strong><small>${esc(item.desc || '')}</small></div>
+            <button type="button" class="market-add" data-market-use="${esc(url)}" ${isActive ? 'disabled' : ''}>${isActive ? '使用中' : isSaved ? '切换' : '添加并使用'}</button>
+          </li>`;
+        }).join('');
+  content.innerHTML = `<div class="listing-page"><button type="button" class="listing-back" data-back="1">${icon('back')} 返回设置</button>
+    <h1>源市场</h1>
+    <p>清单里的源，点一下就会添加并切换过去，需要重启应用。</p>
+    <ul class="market-list">${cards}</ul>
+    <p class="market-footnote">清单来自 ${esc(source)}。<button type="button" class="market-change" data-market-change="1">更换地址</button></p>
+  </div>`;
+}
+
+function goMarket() {
+  state.marketReturn = captureScreen();
+  state.market = { loading: Boolean(marketSource()) };
+  setRoute('market');
+  renderMarket();
+  if (!marketSource()) return;
+  loadMarket(true).then(cache => {
+    state.market = { loading: false, items: cache.items };
+    if (state.route === 'market') renderMarket();
+  }).catch(error => {
+    state.market = { loading: false, error: error.message || '获取失败' };
+    if (state.route === 'market') renderMarket();
+  });
+}
+
+// 拉一份 TVBox 单仓配置并解析。结果留在 state.tvbox 里，页面重渲染不会丢。
+async function importTvBox(url) {
+  state.tvbox = { url, loading: true, items: [], error: '' };
+  if (state.route === 'source-settings') renderSourceSettings();
+  try {
+    const text = await fetchTextViaBridge(url);
+    const items = parseTvBox(text);
+    state.tvbox = { url, loading: false, items, error: '' };
+    try { localStorage.setItem(TVBOX_KEY, JSON.stringify({ url, at: Date.now() })); } catch (error) {}
+  } catch (error) {
+    state.tvbox = { url, loading: false, items: [], error: '解析失败：' + (error.message || error) };
+  }
+  if (state.route === 'source-settings') renderSourceSettings();
+}
+
+// TVBox 单仓配置：{sites:[{type,key,name,api}]}。只认 type 0/1（苹果CMS 采集），
+// spider JAR 那类需要下载执行代码的，明确标不支持、不显示。
+const TVBOX_KEY = 'tvbox:v1';
+function parseTvBox(text) {
+  const parsed = JSON.parse(text);
+  const sites = asArray(parsed.sites);
+  if (!sites.length) throw new Error('这份配置里没有 sites 列表');
+  return sites
+    .filter(site => site && [0, 1, '0', '1'].includes(site.type))
+    .map(site => ({
+      name: String(site.name || site.key || '未命名'),
+      api: String(site.api || '').trim(),
+      group: String(site.group || ''),
+    }))
+    .filter(site => /^https?:\/\//.test(site.api));
+}
+
+
+// TVBox 订阅区：粘一个单仓地址，解析出里面能用的 type 0/1 源。
+// 解析结果存在 state.tvbox 里，重新进设置页也还在（同一会话内），不用反复粘贴。
+function tvboxSection() {
+  const box = state.tvbox;
+  const rows = box && box.items && box.items.length
+    ? `<ul class="tvbox-list">${box.items.map(site => `
+        <li class="tvbox-item"><div class="tvbox-copy"><strong>${esc(site.name)}</strong><small>${esc(site.api)}</small></div>
+        <button type="button" class="tvbox-add" data-tvbox-use="${esc(site.api)}">添加并使用</button></li>`).join('')}</ul>`
+    : box && box.items
+      ? '<p class="field-hint">这份配置里没有能直接用的苹果CMS源（spider 类不支持）。</p>'
+      : '';
+  return `<div class="tvbox-block">
+    <h2>导入 TVBox 配置</h2>
+    <p>粘贴一个 TVBox 单仓地址。只导入其中的苹果CMS源（type 0/1），需要下载执行的 spider 会跳过。</p>
+    ${box && box.error ? `<p class="auth-error" role="alert">${esc(box.error)}</p>` : ''}
+    <form id="tvbox-form" class="password-form${box && box.loading ? ' is-loading' : ''}">
+      <input id="tvbox-value" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://example.com/tvbox.json" value="${esc(box?.url || '')}">
+      <button type="submit" ${box && box.loading ? 'disabled' : ''}>${box && box.loading ? '正在解析…' : '解析配置'}</button>
+    </form>
+    ${rows}
+  </div>`;
+}
+
 function renderSourceSettings() {
   const items = asArray(state.sources);
   const active = items.find(item => item.active);
@@ -861,6 +1467,7 @@ function renderSourceSettings() {
   }).join('');
   content.innerHTML = `<div class="settings-page"><button type="button" class="listing-back" data-back="1">${icon('back')} 返回设置</button><h1>内容源</h1>
     <section class="settings-account">
+      <button type="button" class="source-refetch" data-market="1">打开源市场<small>粘一份清单地址，点一下就能加</small></button>
       <p>切换源会重启应用。第二次之后走本地缓存，不用再等网络。</p>
       <ul class="source-list">${rows || '<li class="source-empty">还没有保存过任何源</li>'}</ul>
       ${active ? `<button type="button" class="source-refetch" data-source-refetch="${esc(String(active.url || ''))}">
@@ -876,6 +1483,7 @@ function renderSourceSettings() {
         <p id="source-error" class="auth-error" role="alert" hidden></p>
         <button type="submit">添加并切换</button>
       </form>
+      ${tvboxSection()}
     </section></div>`;
 }
 
@@ -946,6 +1554,71 @@ function renderProxySettings() {
         <button type="submit">保存</button>
       </form>
     </section></div>`;
+}
+
+function playerSummary() {
+  const prefs = playerPrefs();
+  const core = prefs.core === 'native' ? '内置（VLC）' : '网页';
+  const decode = prefs.core === 'native' && prefs.decode === 'sw' ? ' · 软解' : '';
+  return core + decode + (prefs.autoFallback ? ' · 失败自动切内置' : '');
+}
+
+/**
+ * 播放器设置。
+ *
+ * 这一页存在的理由就是「不要在设置里没得选」：编码解不了这件事，用户能做的
+ * 只有换播放器，而换播放器不该等于去外面装一个 App。
+ */
+function renderPlayerSettings() {
+  const prefs = playerPrefs();
+  const info = state.nativeInfo;
+  const nativeState = info == null
+    ? '正在检测…'
+    : info.native
+      ? '可用（' + esc(info.abi || 'arm64-v8a') + '）'
+      : '这个安装包没带本机架构的解码库，只会用网页播放器';
+  const option = (key, value, label, on, disabled) =>
+    `<button type="button" data-player-set="${key}:${value}" aria-checked="${on ? 'true' : 'false'}"${disabled ? ' disabled' : ''} class="${on ? 'is-on' : ''}">${label}</button>`;
+  content.innerHTML = `<div class="settings-page"><button type="button" class="listing-back" data-back="1">${icon('back')} 返回设置</button><h1>播放器</h1>
+    <section class="settings-player">
+      <h2>播放内核</h2>
+      <p>只用内置播放器（libVLC，自带完整软解）。网页播放器那条路已经移除 —— 它靠系统解码器，同一个片在有的手机上就是放不出来。</p>
+      <p class="field-hint">解码库：${nativeState}</p>
+    </section>
+    <section class="settings-player">
+      <h2>解码方式</h2>
+      <p>自动会优先用设备的硬件解码，失败时再退回软解。画面花屏、绿屏、或者能出声没画面时改成软解试试。</p>
+      <div class="player-options">
+        ${option('decode', 'auto', '自动（推荐）', prefs.decode === 'auto')}
+        ${option('decode', 'sw', '一律软解', prefs.decode === 'sw')}
+      </div>
+      <p class="field-hint">只对内置播放器生效。网页播放器的解码器是系统给的，改不了。</p>
+    </section>
+    <section class="settings-player">
+      <h2>网络缓存</h2>
+      <p>缓存越大越抗抖动，但拖动进度条时反应会慢一点。</p>
+      <div class="player-options">
+        ${option('cache', '800', '起播优先', prefs.cache === 800)}
+        ${option('cache', '1500', '标准（推荐）', prefs.cache === 1500)}
+        ${option('cache', '3000', '抗抖优先', prefs.cache === 3000)}
+      </div>
+      <p class="field-hint">只对内置播放器生效。</p>
+    </section>
+    <section class="settings-player">
+      <h2>操作</h2>
+      <p>点任意一集直接进播放器。上下滑切下一集 / 上一集，左右滑拖进度，单击出控件，倍速在最右边那个胶囊里选。</p>
+      <p class="field-hint">进度会写回观看历史，下次进来接着看。</p>
+    </section></div>`;
+}
+
+function goPlayerSettings() {
+  if (state.route === 'player-settings') return;
+  if (state.route !== 'settings') goSettings();
+  state.playerReturn = captureScreen();
+  setRoute('player-settings');
+  renderPlayerSettings();
+  // 页面先用「正在检测…」渲染出来，探测结果回来再补一次 —— 不让这一页等 so 加载。
+  nativePlayerInfo().then(() => { if (state.route === 'player-settings') renderPlayerSettings(); });
 }
 
 function goProxySettings() {
@@ -1157,6 +1830,48 @@ function renderSearchLoading() {
 function renderSkeleton() {
   content.innerHTML = '<div class="skeleton-home" role="status" aria-label="正在加载内容"><div class="skeleton skeleton-hero"></div><div class="skeleton skeleton-title"></div><div class="skeleton-row"><div class="skeleton skeleton-poster"></div><div class="skeleton skeleton-poster"></div><div class="skeleton skeleton-poster"></div></div><div class="skeleton skeleton-line"></div></div>';
 }
+// 重试的统一入口：错误页按钮和自动重试都走这里，保证语义一致。
+function performRetry(retry) {
+  if (retry === 'home') goHome();
+  else if (retry === 'category') goCategory(state.tab);
+  else if (retry === 'library') goLibrary();
+  else if (retry === 'search') goSearch(state.query);
+  else if (retry === 'listing') openListing(state.listing.kind);
+  else if (retry === 'tags') goTags();
+  else if (retry === 'tag-list') goTag(state.listing.slug, state.listing.label);
+  else if (retry === 'detail') goDetail(state.sourceItem.id);
+}
+
+// 网络类错误的判定和展示是两件事，分开。
+const NETWORK_ERROR_RE = /站点连接失败|站点请求失败|failed to connect|unable to resolve host|unknownhost|connectexception|sockettimeoutexception|timed? out|network is unreachable|connection reset|connection refused|网络|连接失败|无法连接/i;
+
+// 把桥上抛上来的原始错误翻译成人话。原文太技术（「接口响应缺少 data」「HTTP 404」），
+// 直接糊用户一脸没有信息量；原文收进小字里，排查时还有得看。
+function friendlyError(error) {
+  const raw = (error?.message || '').trim();
+  const m = raw.toLowerCase();
+  if (/404|not found|不存在|查不到/.test(m)) {
+    return { icon: 'gone', title: '内容不见了', detail: '这条内容可能已下架，或当前源没有收录它。', raw };
+  }
+  if (/超时|timeout|timed out/.test(m)) {
+    return { icon: 'slow', title: '源站响应太慢', detail: '等的时间有点长，可以稍后再试，或者到设置里换一个源。', raw };
+  }
+  if (/为空|缺少|no data|invalid|格式|parse|json/.test(m)) {
+    return { icon: 'gone', title: '源站返回了看不懂的数据', detail: '多半是源站接口变了或这条内容是空的，可以重试或换个源。', raw };
+  }
+  return { icon: 'alert', title: '加载失败', detail: '出了点小问题，重试一次；总不行就到设置里换个源。', raw };
+}
+
+const ERROR_ICONS = {
+  network: '<svg class="error-icon" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="24" cy="24" r="21"/><path d="m12 24 6-5 6 5 6-5 6 5"/></svg>',
+  gone: '<svg class="error-icon" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="24" cy="24" r="21"/><circle cx="18" cy="21" r="1.2" fill="currentColor" stroke="none"/><circle cx="30" cy="21" r="1.2" fill="currentColor" stroke="none"/><path d="M17 31c2-2.4 4.4-3.6 7-3.6s5 1.2 7 3.6"/></svg>',
+  slow: '<svg class="error-icon" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="24" cy="24" r="21"/><path d="M24 13v11l7 5"/></svg>',
+  alert: '<svg class="error-icon" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="24" cy="24" r="21"/><path d="M24 14v13"/><circle cx="24" cy="33" r="1.2" fill="currentColor" stroke="none"/></svg>'
+};
+
+// 真的会跳的自动重试。原错误页写着「正在自动重试…」其实什么都没重试 —— 用户干等。
+// 只对安全页面（首页/分类/标签这类）补刀；详情和搜索有自己的重试节奏，不掺和。
+const errorAutoRetry = { timer: 0 };
 function renderError(error, retry) {
   if (state.route === 'detail') window.AndroidHost?.setDetailMode?.(false);
   // 详情页出错时**必须**留条退路。正常详情页顶部有个「返回」按钮，可出错时整屏
@@ -1164,17 +1879,39 @@ function renderError(error, retry) {
   // 的界面上。最典型的触发：换了内容源之后点观看历史里上一个源的条目，那个 id
   // 在新源里查不到，详情必失败。
   const escape = retry === 'detail' ? '<button type="button" data-back="1">返回</button>' : '';
-  if (/站点连接失败|站点请求失败|failed to connect|unable to resolve host|unknownhost|connectexception|sockettimeoutexception|timed? out|network is unreachable|connection reset|connection refused|网络|连接失败|无法连接/i.test(error?.message || '')) {
+  clearTimeout(errorAutoRetry.timer);
+  const isNetwork = NETWORK_ERROR_RE.test(error?.message || '');
+  const routeAtRender = state.route;
+  if (isNetwork) {
     content.innerHTML = `<div class="error-state error-state--network" role="alert">
       <div class="error-main">
-        <svg class="error-icon" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="24" cy="24" r="21"/><path d="m12 24 6-5 6 5 6-5 6 5"/></svg>
+        ${ERROR_ICONS.network}
         <h1>网络走丢了</h1>
       </div>
-      <div class="error-footer"><p>正在自动重试…也可以点下面的按钮立即重试。</p>${escape}<button type="button" data-retry="${esc(retry)}">重新尝试</button></div>
+      <div class="error-footer"><p>几秒后会自动重试，也可以现在手动来。</p>${escape}<button type="button" data-retry="${esc(retry)}">重新尝试</button></div>
     </div>`;
+    if (['home', 'category', 'listing', 'tags', 'tag-list', 'library'].includes(retry)) {
+      errorAutoRetry.timer = setTimeout(() => {
+        // 用户已经离开这一页、或错误页已被别的内容换掉，就不再补刀。
+        if (state.route !== routeAtRender || !content.querySelector(`[data-retry="${retry}"]`)) return;
+        performRetry(retry);
+      }, 5000);
+    }
     return;
   }
-  content.innerHTML = `<div class="error-state">${esc(error.message || '加载失败，请稍后重试')}${escape}<button type="button" data-retry="${esc(retry)}">重试</button></div>`;
+  const info = friendlyError(error);
+  const hint = retry === 'detail' ? '<p>这条内容可能已下架，或当前源没有收录。</p>' : '';
+  content.innerHTML = `<div class="error-state error-state--network" role="alert">
+    <div class="error-main">
+      ${ERROR_ICONS[info.icon]}
+      <h1>${esc(info.title)}</h1>
+    </div>
+    <div class="error-footer">
+      ${hint}<p>${esc(info.detail)}</p>
+      ${info.raw ? `<p class="error-raw">${esc(info.raw)}</p>` : ''}
+      ${escape}<button type="button" data-retry="${esc(retry)}">重试</button>
+    </div>
+  </div>`;
 }
 
 function rememberScreen() {
@@ -1236,20 +1973,42 @@ function updateBackEnabled() {
   window.AndroidHost?.setBackEnabled(modalOpen || !isRootColumn());
 }
 
+let viewEnterTimer;
+function playViewEnter(route) {
+  const app = document.getElementById('app');
+  // 详情页的进场由 card-transition 自己接管，这里再叠一层会两个动画抢同一个元素。
+  // 从详情返回时 state.previous 还在，卡片刚合上再淡入一次首页会像抖了两下。
+  if (route === 'detail' || state.previous || (reducedMotionQuery && reducedMotionQuery.matches)) {
+    app.classList.remove('view-enter');
+    return;
+  }
+  // 只有上一段动画还在（快速连按）时才需要强制一次布局让移除生效；
+  // 平常这条路径不读 offsetWidth，省掉导航时的一次额外布局。
+  const restarting = app.classList.contains('view-enter');
+  app.classList.remove('view-enter');
+  if (restarting) void app.offsetWidth;
+  app.classList.add('view-enter');
+  clearTimeout(viewEnterTimer);
+  viewEnterTimer = setTimeout(() => app.classList.remove('view-enter'), 560);
+}
+
 function setRoute(route) {
   stopBannerAuto();
+  const changed = state.route !== route;
   if (state.route === 'detail' && route !== 'detail') { detailCard?.dispose(); detailCard = null; }
   const libraryArea = ['library', 'settings', 'account-management'].includes(route);
   if (state.route === 'library' && route !== 'library') searchInput.value = '';
   state.route = route;
-  document.getElementById('app').dataset.route = route;
-  document.getElementById('app').classList.toggle('route-detail', route === 'detail');
+  const app = document.getElementById('app');
+  app.dataset.route = route;
+  app.classList.toggle('route-detail', route === 'detail');
   window.AndroidHost?.setDetailMode?.(route === 'detail');
   headerSettings.hidden = route !== 'library';
   searchInput.placeholder = libraryArea ? '搜索观看历史和收藏' : privateMode() ? '搜索剧名或 #标签' : '搜索剧名';
   searchInput.setAttribute('aria-label', libraryArea ? '搜索观看历史和收藏' : '搜索剧名或标签');
   if (route === 'library') searchInput.value = state.libraryQuery;
   updateBackEnabled();
+  if (changed) playViewEnter(route);
 }
 
 function isRootColumn() { return ['home', 'category', 'library'].includes(state.route); }
@@ -1261,6 +2020,7 @@ function backDestination() {
   if (state.route === 'account-management') return state.accountReturn?.route || 'settings';
   if (state.route === 'proxy-settings') return state.proxyReturn?.route || 'settings';
   if (state.route === 'source-settings') return state.sourceReturn?.route || 'settings';
+  if (state.route === 'market') return state.marketReturn?.route || 'settings';
   if (state.route === 'settings') return state.settingsReturn?.route || 'library';
   if (state.route === 'tags') return state.tagsReturn?.route || 'home';
   if (state.route === 'listing' && state.listing?.kind === 'tag-list') return state.listingReturn?.route || 'home';
@@ -1686,12 +2446,29 @@ function sourceItem(id) {
   const candidates = [state.listing?.items, state.home?.featured, state.home?.homepageRecommend, state.home?.homepageNewest, state.home?.recommend?.items, state.home?.newest?.items, state.category?.items, state.search?.items, state.library?.bookmarks, state.library?.progress].flatMap(asArray);
   return candidates.find(item => item.id === id) || { id, title: `剧集 ${id}` };
 }
+// 详情请求的统一入口：同 id 在飞请求直接复用，成功后**无条件**落缓存 ——
+// 原来写缓存在「用户还停在详情页」的判断里，等不及退出来，这次抓取就白跑了，
+// 再进去还是从零等。预取（pointerdown）和 goDetail 都走这里。
+const detailInflight = new Map();
+function fetchDetail(id) {
+  const key = String(id);
+  if (!detailInflight.has(key)) {
+    const promise = api('detail', { id }).then(fresh => {
+      writeCache(`detail:${key}`, fresh);
+      detailInflight.delete(key);
+      return fresh;
+    }).catch(error => { detailInflight.delete(key); throw error; });
+    detailInflight.set(key, promise);
+  }
+  return detailInflight.get(key);
+}
+
 async function goDetail(id, trigger) {
   if (state.route === 'detail' && state.sourceItem?.id === id) {
     // Retry in place; preserve the original source card and return destination.
     state.detailLoading = true; renderDetail();
     const token = ++routeToken;
-    try { const fresh = await api('detail', { id }); if (token === routeToken) { state.detail = fresh; state.detailLoading = false; renderDetail(); } }
+    try { const fresh = await fetchDetail(id); if (token === routeToken) { state.detail = fresh; state.detailLoading = false; renderDetail(); } }
     catch (error) { if (token === routeToken) { state.detailLoading = false; renderError(error, 'detail'); } }
     return;
   }
@@ -1725,7 +2502,7 @@ async function goDetail(id, trigger) {
     });
     detailCard.open();
   }
-  const refreshing = api('detail', { id });
+  const refreshing = fetchDetail(id);
   const cached = readCache(`detail:${id}`);
   if (token !== routeToken) return;
   let hasDetailData = Boolean(cached?.data);
@@ -1733,7 +2510,7 @@ async function goDetail(id, trigger) {
   api('bookmark-state', { id }).then(saved => { if (token === routeToken) { state.bookmarked = saved; if (state.detail) renderDetail(); } }).catch(() => {});
   try {
     const fresh = await refreshing;
-    if (token === routeToken) { state.detail = fresh; state.detailLoading = false; writeCache(`detail:${id}`, fresh); renderDetail(); }
+    if (token === routeToken) { state.detail = fresh; state.detailLoading = false; renderDetail(); }
   } catch (error) {
     if (!hasDetailData && token === routeToken) { state.detailLoading = false; renderError(error, 'detail'); }
   }
@@ -1793,6 +2570,16 @@ window.hgBack = () => {
 };
 window.hgResume = () => {
   cover.retry(true);
+  // 从内置播放器（VlcPlayerActivity）回来：把那一场的位置收下、写回进度。
+  // 放在这儿而不是只听 visibilitychange：WebView 被 Activity 盖住时
+  // document.hidden 经常一直是 false，那条事件根本不发。
+  feedPlayer.resume?.();
+  // 播放全程在原生里，页面这边没有 feed 页可回 —— 退出播放器后落回详情页。
+  if (state.route === 'feed' && !document.querySelector('.feed')) {
+    const back = state.feedReturnId || state.detail?.id;
+    if (back) goDetail(back); else goHome();
+    return;
+  }
   if (state.route === 'library') goLibrary(state.libraryTab);
   if (state.route === 'home') refreshHomeHistory();
   if (state.route === 'detail' && state.detail) api('bookmark-state', { id: state.detail.id }).then(value => { state.bookmarked = value; renderDetail(); });
@@ -1927,6 +2714,36 @@ document.addEventListener('submit', async event => {
     }
     return;
   }
+  if (event.target.id === 'market-form') {
+    event.preventDefault();
+    const input = document.getElementById('market-value');
+    const error = document.getElementById('market-error');
+    const button = event.target.querySelector('button[type="submit"]');
+    const url = String(input?.value || '').trim();
+    if (!/^https:\/\//.test(url)) {
+      if (error) { error.textContent = '地址必须以 https:// 开头'; error.hidden = false; }
+      return;
+    }
+    button.disabled = true; button.textContent = '正在获取…';
+    setMarketSource(url);
+    state.market = { loading: true };
+    renderMarket();
+    loadMarket(true).then(cache => {
+      state.market = { loading: false, items: cache.items };
+      if (state.route === 'market') renderMarket();
+    }).catch(failure => {
+      state.market = { loading: false, error: failure.message || '获取失败' };
+      if (state.route === 'market') renderMarket();
+    });
+    return;
+  }
+  if (event.target.id === 'tvbox-form') {
+    event.preventDefault();
+    const url = String(document.getElementById('tvbox-value')?.value || '').trim();
+    if (!/^https:\/\//.test(url)) { state.tvbox = { url, loading: false, items: [], error: '地址必须以 https:// 开头' }; renderSourceSettings(); return; }
+    importTvBox(url);
+    return;
+  }
   const noteForm = event.target.closest('[data-source-note-form]');
   if (noteForm) {
     event.preventDefault();
@@ -1985,10 +2802,54 @@ document.addEventListener('click', async event => {
     if (item) goCampaign(item);
     return;
   }
+  // 必须限定 button：主题偏好在 <html> 上另有一个 data-theme-pref，
+  // 但曾经它叫 data-theme-mode，结果 closest() 把每一次点击都匹配到 <html>，
+  // 整个应用的点击全被主题切换吞掉。这里再挡一道。
+  const themeChoice = event.target.closest('button[data-theme-mode]');
+  if (themeChoice) {
+    if (themeChoice.getAttribute('aria-checked') !== 'true') setThemeMode(themeChoice.dataset.themeMode);
+    return;
+  }
+  if (event.target.closest('[data-hot-check]')) { checkHotUpdate(); return; }
+  if (event.target.closest('[data-goto-app-update]')) {
+    const area = document.getElementById('update-check-area');
+    area?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    checkAppUpdate();
+    return;
+  }
+  if (event.target.closest('[data-hot-apply]')) { applyHotUpdate(); return; }
   if (event.target.closest('[data-secret-entry]')) { handleVersionTap(); return; }
   if (event.target.closest('[data-account-management]')) { goAccountManagement(); return; }
   if (event.target.closest('[data-proxy-settings]')) { goProxySettings(); return; }
+  if (event.target.closest('[data-player-settings]')) { goPlayerSettings(); return; }
+  const playerSet = event.target.closest('[data-player-set]');
+  if (playerSet) {
+    const [key, value] = String(playerSet.dataset.playerSet || '').split(':');
+    if (key === 'core') savePlayerPrefs({ core: value });
+    else if (key === 'decode') savePlayerPrefs({ decode: value });
+    else if (key === 'cache') savePlayerPrefs({ cache: Number(value) });
+    else if (key === 'autoFallback') savePlayerPrefs({ autoFallback: value === 'on' });
+    renderPlayerSettings();
+    return;
+  }
   if (event.target.closest('[data-source-settings]')) { goSourceSettings(); return; }
+  if (event.target.closest('[data-market]')) { goMarket(); return; }
+  if (event.target.closest('[data-market-reload]')) { goMarket(); return; }
+  if (event.target.closest('[data-market-change]')) { setMarketSource(''); state.market = null; renderMarket(); return; }
+  const marketUse = event.target.closest('[data-market-use]');
+  if (marketUse) {
+    const url = marketUse.dataset.marketUse;
+    marketUse.disabled = true; marketUse.textContent = '正在切换…';
+    addSourceFromMarket(url).catch(error => { toast(error.message, true); marketUse.disabled = false; marketUse.textContent = '添加并使用'; });
+    return;
+  }
+  const tvboxUse = event.target.closest('[data-tvbox-use]');
+  if (tvboxUse) {
+    const url = tvboxUse.dataset.tvboxUse;
+    tvboxUse.disabled = true; tvboxUse.textContent = '正在切换…';
+    addSourceFromMarket(url).catch(error => { toast(error.message, true); tvboxUse.disabled = false; tvboxUse.textContent = '添加并使用'; });
+    return;
+  }
   if (event.target.closest('[data-source-forget]')) {
     const dropButton = event.target.closest('[data-source-forget]');
     const dropUrl = dropButton.dataset.sourceForget;
@@ -2172,17 +3033,9 @@ document.addEventListener('click', async event => {
   if (more) { openListing(more.dataset.more); return; }
   if (event.target.closest('[data-retry-listing]')) { state.listing.error = false; loadMoreListing(); return; }
   const retry = event.target.closest('[data-retry]');
-  if (retry) {
-    if (retry.dataset.retry === 'home') goHome();
-    else if (retry.dataset.retry === 'category') goCategory(state.tab);
-    else if (retry.dataset.retry === 'library') goLibrary();
-    else if (retry.dataset.retry === 'search') goSearch(state.query);
-    else if (retry.dataset.retry === 'listing') openListing(state.listing.kind);
-    else if (retry.dataset.retry === 'tags') goTags();
-    else if (retry.dataset.retry === 'tag-list') goTag(state.listing.slug, state.listing.label);
-    else if (retry.dataset.retry === 'detail') goDetail(state.sourceItem.id);
-    return;
-  }
+  if (retry) { clearTimeout(errorAutoRetry.timer); performRetry(retry.dataset.retry); return; }
+  if (event.target.closest('[data-check-update]')) { checkAppUpdate(); return; }
+  if (event.target.closest('[data-download-update]')) { downloadAppUpdate(); return; }
   const reset = event.target.closest('[data-factory-reset]');
   if (reset) {
     if (!reset.disabled) runFactoryReset(reset);
@@ -2208,6 +3061,15 @@ document.addEventListener('click', async event => {
 
 let heroTouch;
 let heroSuppressClickUntil = 0;
+// 预取：手指按下的瞬间就发详情请求。click 要等抬起、等合成，这一个提前量
+// 通常有一两百毫秒；滑列表时顺手按到的卡片，详情页点进去就是秒开。
+// 已有缓存或在飞的请求直接跳过，不浪费流量。
+content.addEventListener('pointerdown', event => {
+  const id = event.target.closest('[data-open-id]')?.dataset.openId
+    ?? event.target.closest('[data-history-id]')?.dataset.historyId;
+  if (!id || readCache(`detail:${id}`) || detailInflight.has(String(id))) return;
+  fetchDetail(id).catch(() => {});
+}, { capture: true, passive: true });
 content.addEventListener('touchstart', event => {
   if (!event.target.closest('.hero') || event.touches.length !== 1) return;
   stopBannerAuto();
@@ -2270,18 +3132,9 @@ contentReady
     .then(() => startHome())
   .catch(error => renderError(error, 'home'));
 
-// ── 热更新已切断（2026-10-16）──────────────────────────────────────────
-// 原来这里是一整套「等首页空闲再切换到已下载资源」的调度器：pendingResourceRevision
-// / resourceApplyTimer / tryApplyResources / scheduleResourceApply，外加一组
-// 交互监听来算用户是否空闲。它服务的是远端下发的站点规则与主题，而那两样
-// 对现在这个走 /api/ REST 数据层的版本已经没有意义了（见 HotUpdateManager.check
-// 的注释）。全部删掉。
-//
-// 只保留 window.hgCanApplyHotUpdate 这一个全局：Java 侧
-// MainActivity.applyPendingResources() 会 evaluateJavascript 调它，拿返回的
-// 字符串跟 "true" 比。恒返回 false，等于明确告诉原生层「没有可切换的资源」，
-// 顺带保证 recreate() 永远不会因为资源切换被触发。
-window.hgCanApplyHotUpdate = () => false;
+// 热更新的状态、检查和切换入口统一放在文件上方的「前端热更新」块里
+// （window.hgCanApplyHotUpdate 也是在那里定义的）。这里不再挂恒 false 的
+// 旧实现，否则会把真正可用的更新入口覆盖掉。
 
 
 let versionTapCount = 0, versionTapAt = 0;

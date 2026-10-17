@@ -5,9 +5,16 @@
 #   ./build.sh fast          从现有 cz_repack/ 工作树打包（日常迭代：改完 assets/ 或 smali/ 直接跑）
 #   ./build.sh clean         从原始样本解包 + 套用 patches/ 后打包（可复现路径，不碰工作树）
 #   ./build.sh sync-patches  以「基准解包 vs 工作树」的文件级差异刷新 patches/（改完工作树跑这个）
-#   ./build.sh verify        重建 clean 树，与工作树逐文件比对（证明补丁集完整且无多余改动）
-#   ./build.sh release       打包 → 证明补丁集 → 发补丁 → 再打包 → 出发布包（发版用这个，别手动 cp）
-  ./build.sh doctor        只检查工具链
+#   ./build.sh verify        重建两次 clean 树互相比对（证明 patches 可确定性还原；cz_repack 已删）
+#   ./build.sh release       打包 → 证明补丁集 → 发补丁 → 再打包 → 核对线上热更 → 出发布包
+#   ./build.sh hot-check     只核对「线上热更包 == 当前 assets」（改完前端先跑这个）
+#   ./build.sh doctor        只检查工具链
+#
+# ⚠ 2026-10-17 起，构建的正路是 ../android/（Gradle 工程）。
+#    这套 apktool 链路保留作为退路与历史记录：
+#      - chengzi-v0.3.15.apk + patches/ 仍能确定性重建整个树（verify 自证可复现）
+#      - 但日常迭代 / 发版请走 ../android/scripts/build.sh
+#      - cz_repack/ 删除后，clean 路径已从头到尾验证通过
 #
 # 环境变量：
 #   INSTALL=1     打包成功后 adb install -r（SERIAL=xxx 指定设备）
@@ -42,7 +49,7 @@ OUT_ALIGNED="cz-aligned.apk"
 OUT_SIGNED="cz-final.apk"
 
 IGNORE=(--exclude=build --exclude=classes5.dex --exclude=site-web.js --exclude=.DS_Store \
-        --exclude=hxm.wasm.js)   # apktool 产物 + 由 java-src 现编的 dex + 别人的 wasm 转出的 base64
+        --exclude=hxm.wasm.js --exclude=lib)   # lib/ 是从 AAR 里拆出来的 so，构建产物   # apktool 产物 + 由 java-src 现编的 dex + 别人的 wasm 转出的 base64
 
 # ---- Java 侧代码 -----------------------------------------------------------
 # SiteRepository.fetch 原来那 289 行 HttpURLConnection 逻辑搬到了 Java（要自定义
@@ -50,10 +57,18 @@ IGNORE=(--exclude=build --exclude=classes5.dex --exclude=site-web.js --exclude=.
 # 所以走「Java 源码 → d8 → classes5.dex」这条路。
 #
 # classes5.dex 是**构建产物**，不进补丁集：补丁集里放的是 java-src/ 的源码。
-JAVA_SRC="$WORK_TREE/../java-src"
-JAVA_STUBS="$WORK_TREE/../java-stubs"
+# 用 $HERE 而不是 $WORK_TREE/.. —— 后者把源码路径绑在 cz_repack 上，
+# 于是 clean 模式（cz_repack 不存在）永远找不到 java-src，一直报
+# 「找不到 Java 源码目录」。2026-10-17 删除 cz_repack 时撞出来。
+JAVA_SRC="$HERE/java-src"
+JAVA_STUBS="$HERE/java-stubs"
 ANDROID_JAR="${ANDROID_JAR:-$HOME/Library/Android/sdk/platforms/android-34/android.jar}"
 D8="$SDK_BT/d8"
+LIBVLC_VER="3.7.7"               # libvlc-all（VLC 3.x 的 Android 打包），自带 FFmpeg 软解
+# 只打 arm64-v8a。四个 ABI 全带是 200MB 起步，而 2019 年之后的机器清一色 arm64；
+# 32 位机器上 libvlc.so 不会出现在 nativeLibraryDir，VlcPlayerActivity.available()
+# 会返回 false，页面自动退回网页播放器 —— 不会闪退，只是没这份能力。
+LIBVLC_ABIS=(arm64-v8a)
 OKHTTP_VER="4.10.0"              # 必须和 APK 里打包的版本一致（apktool 树里能看到 okhttp/4.10.0）
 JAVA_DEX_REL="unknown/classes5.dex"  # apktool 的 unknown/ 原样拷进 APK 根目录，所以这里是 classes5.dex
 
@@ -261,9 +276,70 @@ fetch_jars() {
     name=$(basename "$gav")
     [ -s "$dir/$name" ] && continue
     code=$(curl -sL -o "$dir/$name" -w '%{http_code}' --max-time 60 "https://repo1.maven.org/maven2/$gav" 2>/dev/null)
-    [ "$code" = "200" ] || die "拉不到 $name（HTTP $code）"
+    [ "$code" = "200" ] || die "拉不到 ${name}（HTTP ${code}）"
   done
   JAVA_CP="$dir/okhttp-$OKHTTP_VER.jar:$dir/okio-jvm-3.0.0.jar:$dir/kotlin-stdlib-1.6.20.jar"
+}
+
+# androidx 那两个编译 jar：从 Google Maven 的 AAR 里拆 classes.jar。
+#
+# 原来这两个 jar 是手工放进去的，于是 clean 路径在干净机器上必然卡住
+# （这次删 .build 就撞上了）。改成自动拉，clean 才真的可复现。
+fetch_androidx_jars() {
+  local dir="$BUILD_DIR/jars" name gav url code
+  mkdir -p "$dir"
+  for spec in \
+    "recyclerview-classes.jar|androidx/recyclerview/recyclerview/1.3.2/recyclerview-1.3.2.aar" \
+    "core-classes.jar|androidx/core/core/1.13.1/core-1.13.1.aar" ; do
+    name="${spec%%|*}"
+    gav="${spec#*|}"
+    [ -s "$dir/$name" ] && continue
+    url="https://dl.google.com/dl/android/maven2/$gav"
+    code=$(curl -sL -o "$dir/$name.aar" -w '%{http_code}' --max-time 120 "$url" 2>/dev/null)
+    [ "$code" = "200" ] || die "拉不到 $(basename "$gav")（HTTP $code）"
+    ( cd "$dir" && unzip -o -q "$name.aar" classes.jar && mv classes.jar "$name" && rm -f "$name.aar" ) \
+      || die "拆 $name 失败"
+    ok "androidx jar → $name"
+  done
+}
+
+# libVLC 的 so 和 Java 绑定。
+#
+# 为什么要自己拆 AAR：这个工程没有 Gradle，APK 是 apktool 拼出来的 —— 没有
+# 依赖解析那一层，so 和 jar 都得手动落位。落位分两半：
+#   · jni/*.so  → $tree/lib/<abi>/，apktool 原样拷进 APK（apktool.yml 的
+#                 doNotCompress 里本来就有 so，配合 zipalign -p 4，符合
+#                 android:extractNativeLibs="false" 的页对齐要求）
+#   · classes.jar → 进 javac 的 classpath，同时作为 d8 的 program input 合进
+#                 classes5.dex（libvlc 的绑定一共一千多个方法，装得下）
+fetch_libvlc() {
+  local dir="$BUILD_DIR/vlc" jar="$BUILD_DIR/vlc/libvlc-all-$LIBVLC_VER.aar"
+  mkdir -p "$dir"
+  if [ ! -s "$jar" ]; then
+    say "拉取 libvlc-all ${LIBVLC_VER}（$(printf '%s' "${LIBVLC_ABIS[*]}")）"
+    local code
+    code=$(curl -sL -o "$jar" -w '%{http_code}' --max-time 300 \
+      "https://repo1.maven.org/maven2/org/videolan/android/libvlc-all/${LIBVLC_VER}/libvlc-all-${LIBVLC_VER}.aar")
+    [ "$code" = "200" ] || die "拉不到 libvlc-all（HTTP ${code}）"
+  fi
+  if [ ! -s "$dir/classes.jar" ]; then
+    # 用基名：$jar 是相对路径，cd 进去之后那个相对路径就不成立了。
+    ( cd "$dir" && unzip -o -q "$(basename "$jar")" classes.jar 'jni/*' ) || die "libvlc AAR 解包失败"
+  fi
+  LIBVLC_JAR="$dir/classes.jar"
+}
+
+# so 落到目标树的 lib/<abi>/ 下。apktool 会把 lib/ 当普通目录拷进 APK。
+install_vlc_libs() {
+  local tree="$1" abi
+  [ -f "$LIBVLC_JAR" ] || die "没有 libvlc 的 classes.jar（先跑 fetch_libvlc）"
+  rm -rf "$tree/lib"
+  for abi in "${LIBVLC_ABIS[@]}"; do
+    [ -d "$BUILD_DIR/vlc/jni/$abi" ] || die "AAR 里没有 $abi"
+    mkdir -p "$tree/lib/$abi"
+    cp "$BUILD_DIR/vlc/jni/$abi"/*.so "$tree/lib/$abi/"
+  done
+  ok "libVLC so → $tree/lib  $(du -sh "$tree/lib" | awk '{print $1}')"
 }
 
 # Java 源码 → classes5.dex。目标树由参数给出（fast 用工作树，clean 用 clean-tree）。
@@ -275,6 +351,7 @@ build_java() {
 
   say "编译 Java 层"
   fetch_jars
+  fetch_libvlc
   local work="$BUILD_DIR/java"
   rm -rf "$work"; mkdir -p "$work/stubs" "$work/classes" "$work/dex"
 
@@ -284,12 +361,20 @@ build_java() {
         -d "$work/stubs" $(find "$JAVA_STUBS" -name '*.java') 2>/dev/null \
     || die "桩编译失败"
 
-  javac -nowarn -source 8 -target 8 -classpath "$ANDROID_JAR:$JAVA_CP:$work/stubs" \
+  # androidx.recyclerview / androidx.core 只进 classpath 不进 dex：运行时 APK 里
+  # 本来就有（原版带进来的），再打一份就是重复类，dex 会直接拒。
+  fetch_androidx_jars
+  RV_JAR="$BUILD_DIR/jars/recyclerview-classes.jar"
+  CORE_JAR="$BUILD_DIR/jars/core-classes.jar"
+
+  javac -nowarn -source 8 -target 8 -classpath "$ANDROID_JAR:$JAVA_CP:$work/stubs:$LIBVLC_JAR:$RV_JAR:$CORE_JAR" \
         -d "$work/classes" $(find "$JAVA_SRC" -name '*.java') 2>/dev/null \
     || die "Java 编译失败"
 
-  "$D8" --min-api 26 --output "$work/dex" \
-        $(find "$work/classes" -name '*.class') >/dev/null 2>&1 \
+  # libvlc 的绑定作为 program input 一起进 dex：APK 里没有第二个可写的 dex 位
+  # （classes5.dex 是 apktool 从 unknown/ 拷进去的那一份），所以只能合。
+  "$D8" --min-api 26 --lib "$ANDROID_JAR" --output "$work/dex" \
+        $(find "$work/classes" -name '*.class') "$LIBVLC_JAR" >/dev/null 2>&1 \
     || die "d8 转换失败"
 
   # 方法数闸门：单个 dex 上限 65536。这份是独立 dex，不和现有的抢额度，
@@ -402,17 +487,32 @@ sync_patches() {
   return 0
 }
 
+# 自证补丁集完整：clean 树与工作树必须逐文件相同。
+#
+# cz_repack/ 不在了（2026-10-17 删除，构建已迁到 work/android 的 Gradle 工程），
+# 所以比对基准退化成「两次独立构建」：
+#   ① 用 baseline + patches 重建一次
+#   ② 再重建一次到另一个目录
+#   两次结果不同，说明重建过程有非确定性（比如依赖磁盘上残留的中间物）。
+# 第 ③ 步额外验 apktool b 能出包 —— 那才是「补丁集能产出可用的 APK」的实证。
 verify() {
   build_clean_tree
-  say "逐文件比对 $CLEAN_TREE 与 $WORK_TREE"
+  local first="$CLEAN_TREE"
+
+  say "重建第二次，与第一次逐文件比对（验证可复现）"
+  mv "$first" "${first}.1"
+  build_clean_tree
+  local second="$CLEAN_TREE"
+
   local out
-  out=$(diff -rq "${IGNORE[@]}" "$CLEAN_TREE" "$WORK_TREE" 2>&1 || true)
+  out=$(diff -rq "${IGNORE[@]}" "${first}.1" "$second" 2>&1 || true)
   if [ -z "$out" ]; then
-    ok "完全一致：patches/ 就是工作树的全部改动"
+    ok "两次重建完全一致：patches/ + 样本 可确定性地还原整个树"
   else
     printf '%s\n' "$out"
-    die "不一致，上面列出的就是遗漏或多余的改动"
+    die "两次重建不一致，说明构建有非确定性"
   fi
+  rm -rf "${first}.1"
 }
 
 pack() {
@@ -421,11 +521,12 @@ pack() {
   check_config "$tree"
   check_js
   build_java "$tree"
+  install_vlc_libs "$tree"
   say "apktool b $tree"
   apktool b "$tree" -o "$OUT_UNSIGNED"
 
   if [ "${NO_SIGN:-0}" = "1" ]; then
-    ok "已产出 $OUT_UNSIGNED（跳过签名）"
+    ok "已产出 ${OUT_UNSIGNED}（跳过签名）"
     return
   fi
 
@@ -459,6 +560,54 @@ pack() {
 # 而 verify 照样说「完全一致」。2026-10-16 真踩了一次：验证 shapes 自检时往
 # site-default.json 塞的测试形状，被发进了 APK，表现是所有源的 envelope 都变成空串、
 # 首页全空。顺序钉死在这里，比记住这件事可靠。
+# 一份 assets 的指纹（排除热更包本来就发不出去的几样）。
+assets_sum() {
+  ( cd "$1" && find . -type f \
+      ! -name 'hot-update-public.pem' ! -name 'site-default.json' \
+      ! -name 'hot-runtime.js' ! -name '.DS_Store' ! -path './dexopt/*' \
+      -print | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256 | awk '{print $1}' )
+}
+
+# 线上那版热更和当前 assets 是不是同一份前端。
+#
+# 为什么拦在发版这一步：前端和 APK 是两条独立的时间线，忘了发热更不会当场报错。
+# 装上新 APK 的机器里，WebView 加载的还是上一版 JS —— 新加的桥指令调不到、
+# 改动看着像没生效，而日志里什么都没有。2026-10-17 就撞了一次：内置播放器要
+# 地址的那个 hook 在设备上是旧的 async 版（evaluateJavascript 收不到 Promise），
+# 第 2 集永远取不到地址，本地源码怎么改都不对。
+hot_sync_check() {
+  local index="${HOT_INDEX_URL:-https://149.104.21.177.sslip.io/hot/hot-update.json}"
+  local dir="$BUILD_DIR/hot-online" zip="$BUILD_DIR/hot-online.zip"
+  say "核对线上热更包"
+  rm -rf "$dir"; mkdir -p "$dir"
+  if ! curl -fsS --max-time 20 -o "$dir/hot-update.json" "$index" 2>/dev/null; then
+    say "拉不到清单（${index}），跳过核对 —— 自己确认这一版前端已经发过"
+    return 0
+  fi
+  local url rev
+  rev=$(python3 -c "import json,base64;d=json.load(open('$dir/hot-update.json'));print(json.loads(base64.b64decode(d['payload']))['revision'])")
+  url=$(python3 -c "import json,base64;d=json.load(open('$dir/hot-update.json'));print(json.loads(base64.b64decode(d['payload']))['url'])")
+  if ! curl -fsS --max-time 90 -o "$zip" "$url" 2>/dev/null; then
+    say "热更包下载失败（${url}），跳过核对"
+    return 0
+  fi
+  # zip 是相对路径，进子 shell 换过目录就找不到了 —— 先取绝对路径。
+  local zip_abs
+  zip_abs="$(cd "$(dirname "$zip")" && pwd)/$(basename "$zip")"
+  ( cd "$dir" && unzip -q -o "$zip_abs" 'ui/*' ) || { say "热更包解不开，跳过核对"; return 0; }
+  local local_sum online_sum
+  local_sum=$(assets_sum "$WORK_TREE/assets")
+  online_sum=$(assets_sum "$dir/ui")
+  if [ "$local_sum" = "$online_sum" ]; then
+    ok "线上热更 r${rev} 与工作树一致"
+    return 0
+  fi
+  die "线上热更（r${rev}）和当前 assets 不是同一份前端 —— 这一版不能发。
+  先发前端，再重跑 release：
+    cd work/shells
+    HOT_UPLOAD=1 HOT_MIN_VERSION_CODE=<本次 versionCode> VERSION=<x.y.z> ./publish-hot.sh"
+}
+
 release() {
   doctor
   [ -d "$WORK_TREE" ] || die "$WORK_TREE/ 不存在"
@@ -468,6 +617,7 @@ release() {
   sync_patches                            # 把工作树差异刷进 patches/
   verify                                  # 证明 patches/ 就是工作树的全部改动
   pack "$WORK_TREE"                       # 从工作树出包；site-web.js 在这里重新生成
+  hot_sync_check                          # 前端没发就不许发 APK
   shasum -a 256 "$OUT_SIGNED"
   ls -l "$OUT_SIGNED"
   say "发布包：$OUT_SIGNED"
@@ -479,6 +629,7 @@ case "${1:-fast}" in
   clean)        doctor; build_clean_tree; pack "$CLEAN_TREE" ;;
   sync-patches) doctor; sync_patches ;;
   verify)       doctor; verify ;;
+  hot-check)    doctor; hot_sync_check ;;
   release)      release ;;
   *)            sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

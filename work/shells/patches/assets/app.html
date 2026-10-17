@@ -4,7 +4,23 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
   <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f5f2e9" id="theme-color">
   <title>AIIvideo</title>
+  <script>
+    /* 主题要在 CSS 之前定下来。放到 app.js 里会先画一帧浅色再翻成深色，
+       冷启动的闪白在 OLED 上特别明显。这里只读偏好、算一次，不碰任何 DOM。 */
+    (function () {
+      var mode = 'system';
+      try { mode = localStorage.getItem('hgpref:theme') || 'system'; } catch (error) {}
+      if (mode !== 'light' && mode !== 'dark') mode = 'system';
+      var dark = mode === 'dark' || (mode === 'system' && window.matchMedia
+        && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      var root = document.documentElement;
+      root.dataset.theme = dark ? 'dark' : 'light';
+      root.dataset.themePref = mode;
+      root.style.colorScheme = dark ? 'dark' : 'light';
+    })();
+  </script>
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -70,6 +86,8 @@
       <div class="setup-symbol">A</div>
       <h1 id="setup-title">设置源</h1>
       <p class="setup-lead">这个应用不自带任何内容源。填一个配置地址才能开始使用。</p>
+      <div id="setup-market" class="setup-market" hidden></div>
+      <button id="setup-market-apply" type="button" class="setup-market-apply" hidden disabled>先勾选至少一个源</button>
       <input id="setup-input" type="url" inputmode="url" autocomplete="off" spellcheck="false"
              placeholder="https://example.com/source.json">
       <p id="setup-hint" class="setup-hint">地址必须以 https:// 开头</p>

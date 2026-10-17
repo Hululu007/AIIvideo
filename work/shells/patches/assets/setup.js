@@ -50,6 +50,8 @@
     // 通知 Java 重算返回键归属。设置页显示时必须保持「JS 接管」，
     // 否则 Java 会把返回回调注销掉，按返回直接退到后台，连 hgBack() 都不会被调。
     if (showIt) window.AndroidHost?.setBackEnabled?.(true);
+    // 设置页出现 = 这一版前端跑通了，热更新 trial 可以确认（与 app.js 的兜底同一目的）。
+    if (showIt && typeof window.markHotUpdateHealthy === 'function') setTimeout(window.markHotUpdateHealthy, 800);
     if (showIt) {
       // 自动聚焦会让安卓把软键盘顶起来，短暂挡住半屏。延迟一点等过渡结束。
       setTimeout(() => { try { input.focus(); } catch (error) {} }, 320);
@@ -68,6 +70,81 @@
     }
   }
 
+  // 把「市场清单」当输入接受：拉回 JSON，若形如 {sources:[{name,url}]} 就
+  // 在面板里列出可选源。返回 true 表示已经接手渲染（调用方不再报原来的错）。
+  // 把「市场清单」当输入接受：拉回 JSON，若形如 {sources:[{name,url}]} 就在面板里
+  // 列出可勾选的源。可以多选 —— 一次把要用的都加进源列表，最后选中的那个生效。
+  // 返回 true 表示已接手渲染（调用方不再报原来的错）。
+  async function offerMarket(url) {
+    let parsed = null;
+    try {
+      const reply = await bridgeCall('detail', { id: '__source:fetch?url=' + encodeURIComponent(url) });
+      const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
+      if (!result || !result.ok) return false;
+      parsed = JSON.parse(result.body || '{}');
+    } catch (error) {
+      return false;
+    }
+    const items = Array.isArray(parsed && parsed.sources) ? parsed.sources : [];
+    if (!items.length) return false;
+    const box = document.getElementById('setup-market');
+    box.hidden = false;
+    box.innerHTML = '<p class="setup-market-loading">这是一份源清单，勾选要用的（可多选，最后一个为当前源）：</p>'
+      + items.map(item => `<label class="setup-market-item">
+          <input type="checkbox" class="setup-market-check" value="${String(item.url || '').replace(/"/g, '&quot;')}">
+          <span class="setup-market-copy"><strong>${String(item.name || '').replace(/</g, '&lt;')}</strong>
+          <small>${String(item.desc || '').replace(/</g, '&lt;')}</small></span>
+        </label>`).join('');
+    const checks = [...box.querySelectorAll('.setup-market-check')];
+    // 按钮在列表**外面**（app.html 里那个）。放进 innerHTML 的话它就成了 flex 列表的
+    // 最后一项，跟着列表一起滚，还会被 .setup-panel button 的通栏样式压住末项。
+    const apply = document.getElementById('setup-market-apply');
+    apply.hidden = false;
+    apply.disabled = true;
+    apply.textContent = '先勾选至少一个源';
+    const sync = () => {
+      const picked = checks.filter(node => node.checked);
+      apply.disabled = picked.length === 0;
+      apply.textContent = picked.length ? `添加 ${picked.length} 个源并进入` : '先勾选至少一个源';
+    };
+    checks.forEach(node => node.addEventListener('change', sync));
+    apply.addEventListener('click', () => addSelected(checks.filter(node => node.checked).map(node => node.value)));
+    showError('');
+    return true;
+  }
+
+  // 逐个 __source:set — 每一条都会加进源列表并切换为当前，最后一条留下生效。
+  // 只在全部处理完后重启一次，避免每个源各重启一轮。
+  async function addSelected(urls) {
+    if (!urls.length) return;
+    const apply = document.getElementById('setup-market-apply');
+    const original = apply.textContent;
+    apply.disabled = true;
+    const failed = [];
+    for (let index = 0; index < urls.length; index += 1) {
+      apply.textContent = `正在添加 ${index + 1}/${urls.length}…`;
+      try {
+        const reply = await bridgeCall('detail', { id: '__source:set?url=' + encodeURIComponent(urls[index]) });
+        const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
+        if (!result || !result.ok) failed.push((result && result.error) || '设置失败');
+      } catch (error) {
+        failed.push(error.message || '设置失败');
+      }
+    }
+    if (failed.length === urls.length) {
+      showError('都没能加上：' + failed[0]);
+      apply.disabled = false;
+      apply.textContent = original;
+      return;
+    }
+    apply.textContent = failed.length ? `已添加 ${urls.length - failed.length} 个，正在重启…` : '已添加，正在重启…';
+    if (typeof window.restartAfterSource === 'function') {
+      window.restartAfterSource(() => { try { location.reload(); } catch (error) {} });
+    } else {
+      setTimeout(() => { try { location.reload(); } catch (error) {} }, 200);
+    }
+  }
+
   async function submit() {
     const url = (input.value || '').trim();
     if (!url) { showError('请填写源地址'); return; }
@@ -81,6 +158,10 @@
       const reply = await bridgeCall('detail', { id: '__source:set?url=' + encodeURIComponent(url) });
       const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
       if (!result || !result.ok) {
+        // 粘进来的可能不是「一个源」，而是「一份源清单」（市场）。这种情况别直接
+        // 报错 —— 拉回来看看是不是 {sources:[…]}，是就把里面的源列出来让用户挑。
+        const picked = await offerMarket(url);
+        if (picked) return;
         showError((result && result.error) || '设置失败');
         return;
       }

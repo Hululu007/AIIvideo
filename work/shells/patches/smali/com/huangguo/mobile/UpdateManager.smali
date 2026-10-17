@@ -15,13 +15,13 @@
 # static fields
 .field private static final AUTO_INTERVAL_MS:J = 0x2932e00L
 
-.field private static final MANIFEST_URL:Ljava/lang/String; = "https://github.com/MrSsg/HuangguoAPP-for-Andriod/releases/latest/download/android-update.json"
+.field private static final MANIFEST_URL:Ljava/lang/String; = "[\"https://149.104.21.177.sslip.io/updates/android-update.json\",\"https://ghgo.de5.net/https://raw.githubusercontent.com/zhaoruizhe81/AIIvideo/main/android-update.json\",\"https://raw.githubusercontent.com/zhaoruizhe81/AIIvideo/main/android-update.json\"]"
 
 .field private static final MANUAL_LIMIT:I = 0x5
 
 .field private static final MANUAL_WINDOW_MS:J = 0x36ee80L
 
-.field private static final RELEASE_BASE:Ljava/lang/String; = "https://github.com/MrSsg/HuangguoAPP-for-Andriod/releases/"
+.field private static final RELEASE_BASE:Ljava/lang/String; = "https://149.104.21.177.sslip.io/updates/"
 
 .field private static final VERSION:Ljava/util/regex/Pattern;
 
@@ -245,17 +245,22 @@
     iput-object v0, v5, Lcom/huangguo/mobile/UpdateManager$Candidate;->version:Ljava/lang/String;
 
     .line 85
+    # 清单里带一组 url（GitHub Releases + 几个镜像 + 自家 VPS 兜底）。
+    # 有这个字段就交给 UpdateMirror.pick 并发探一遍挑最快的；老清单没有就
+    # 退回「RELEASE_BASE + 文件名」的拼法。
+    const-string v6, "urls"
+
+    invoke-virtual {p0, v6}, Lorg/json/JSONObject;->optJSONArray(Ljava/lang/String;)Lorg/json/JSONArray;
+
+    move-result-object v6
+
+    if-nez v6, :cond_have_urls
+
     new-instance v0, Ljava/lang/StringBuilder;
 
-    const-string v6, "https://github.com/MrSsg/HuangguoAPP-for-Andriod/releases/download/"
+    const-string v6, "https://149.104.21.177.sslip.io/updates/"
 
     invoke-direct {v0, v6}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
-
-    invoke-virtual {v0, v1}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
-
-    const-string v1, "/"
-
-    invoke-virtual {v0, v1}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
 
     invoke-virtual {v0, v2}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
 
@@ -263,6 +268,18 @@
 
     move-result-object v0
 
+    goto :cond_url_ready
+
+    :cond_have_urls
+    invoke-virtual {v6}, Lorg/json/JSONArray;->toString()Ljava/lang/String;
+
+    move-result-object v6
+
+    invoke-static {v6}, Lcom/huangguo/mobile/UpdateMirror;->pick(Ljava/lang/String;)Ljava/lang/String;
+
+    move-result-object v0
+
+    :cond_url_ready
     iput-object v0, v5, Lcom/huangguo/mobile/UpdateManager$Candidate;->url:Ljava/lang/String;
 
     .line 86
@@ -336,203 +353,39 @@
 .end method
 
 .method private static fetchManifest()Lorg/json/JSONObject;
-    .locals 8
+    .locals 3
     .annotation system Ldalvik/annotation/Throws;
         value = {
             Ljava/lang/Exception;
         }
     .end annotation
 
-    .line 203
-    new-instance v0, Ljava/net/URL;
+    # 2026-10-17：清单改从 GitHub Releases 拿，并带一组镜像。
+    # 原来这里是一段手写的 HttpURLConnection —— 只认一个地址，那台机器一挂
+    # 所有人就都更新不了。现在整段逻辑收进 UpdateMirror.fetch：依次试每个
+    # 地址，第一个拉下来且看着像 JSON 的就用（VPS 留作最后一个兜底）。
+    sget-object v0, Lcom/huangguo/mobile/UpdateManager;->MANIFEST_URL:Ljava/lang/String;
 
-    const-string v1, "https://github.com/MrSsg/HuangguoAPP-for-Andriod/releases/latest/download/android-update.json"
+    const/16 v1, 0xf
 
-    invoke-direct {v0, v1}, Ljava/net/URL;-><init>(Ljava/lang/String;)V
-
-    invoke-virtual {v0}, Ljava/net/URL;->openConnection()Ljava/net/URLConnection;
+    invoke-static {v0, v1}, Lcom/huangguo/mobile/UpdateMirror;->fetch(Ljava/lang/String;I)Ljava/lang/String;
 
     move-result-object v0
 
-    check-cast v0, Ljava/net/HttpURLConnection;
+    if-eqz v0, :cond_none
 
-    const/16 v1, 0x3a98
+    new-instance v1, Lorg/json/JSONObject;
 
-    .line 204
-    invoke-virtual {v0, v1}, Ljava/net/HttpURLConnection;->setConnectTimeout(I)V
+    invoke-direct {v1, v0}, Lorg/json/JSONObject;-><init>(Ljava/lang/String;)V
 
-    const/16 v1, 0x7530
+    return-object v1
 
-    .line 205
-    invoke-virtual {v0, v1}, Ljava/net/HttpURLConnection;->setReadTimeout(I)V
-
-    .line 206
-    const-string v1, "User-Agent"
-
-    const-string v2, "AIIvideo-Updater"
-
-    invoke-virtual {v0, v1, v2}, Ljava/net/HttpURLConnection;->setRequestProperty(Ljava/lang/String;Ljava/lang/String;)V
-
-    .line 207
-    invoke-virtual {v0}, Ljava/net/HttpURLConnection;->getResponseCode()I
-
-    move-result v1
-
-    const/16 v2, 0x194
-
-    if-ne v1, v2, :cond_0
-
-    .line 208
-    invoke-virtual {v0}, Ljava/net/HttpURLConnection;->disconnect()V
-
+    # 全都不通时返回 null —— 调用方把它当「服务器上没有发布信息」处理，
+    # 这条语义和改之前一致（原来 404 也走这里）。
+    :cond_none
     const/4 v0, 0x0
 
     return-object v0
-
-    :cond_0
-    const/16 v2, 0xc8
-
-    if-lt v1, v2, :cond_5
-
-    const/16 v2, 0x12c
-
-    if-ge v1, v2, :cond_5
-
-    .line 213
-    :try_start_0
-    invoke-virtual {v0}, Ljava/net/HttpURLConnection;->getInputStream()Ljava/io/InputStream;
-
-    move-result-object v1
-    :try_end_0
-    .catchall {:try_start_0 .. :try_end_0} :catchall_2
-
-    const/high16 v2, 0x10000
-
-    .line 214
-    :try_start_1
-    new-array v3, v2, [B
-
-    const/4 v4, 0x0
-
-    move v5, v4
-
-    :goto_0
-    sub-int v6, v2, v5
-
-    .line 217
-    invoke-virtual {v1, v3, v5, v6}, Ljava/io/InputStream;->read([BII)I
-
-    move-result v6
-
-    if-gez v6, :cond_2
-
-    .line 222
-    new-instance v2, Lorg/json/JSONObject;
-
-    new-instance v6, Ljava/lang/String;
-
-    sget-object v7, Ljava/nio/charset/StandardCharsets;->UTF_8:Ljava/nio/charset/Charset;
-
-    invoke-direct {v6, v3, v4, v5, v7}, Ljava/lang/String;-><init>([BIILjava/nio/charset/Charset;)V
-
-    invoke-direct {v2, v6}, Lorg/json/JSONObject;-><init>(Ljava/lang/String;)V
-    :try_end_1
-    .catchall {:try_start_1 .. :try_end_1} :catchall_0
-
-    if-eqz v1, :cond_1
-
-    .line 223
-    :try_start_2
-    invoke-virtual {v1}, Ljava/io/InputStream;->close()V
-    :try_end_2
-    .catchall {:try_start_2 .. :try_end_2} :catchall_2
-
-    .line 224
-    :cond_1
-    invoke-virtual {v0}, Ljava/net/HttpURLConnection;->disconnect()V
-
-    return-object v2
-
-    :cond_2
-    add-int/2addr v5, v6
-
-    if-eq v5, v2, :cond_3
-
-    goto :goto_0
-
-    .line 220
-    :cond_3
-    :try_start_3
-    new-instance v2, Ljava/lang/IllegalStateException;
-
-    const-string v3, "\u53d1\u5e03\u5217\u8868\u8fc7\u5927"
-
-    invoke-direct {v2, v3}, Ljava/lang/IllegalStateException;-><init>(Ljava/lang/String;)V
-
-    throw v2
-    :try_end_3
-    .catchall {:try_start_3 .. :try_end_3} :catchall_0
-
-    :catchall_0
-    move-exception v2
-
-    if-eqz v1, :cond_4
-
-    .line 213
-    :try_start_4
-    invoke-virtual {v1}, Ljava/io/InputStream;->close()V
-    :try_end_4
-    .catchall {:try_start_4 .. :try_end_4} :catchall_1
-
-    goto :goto_1
-
-    :catchall_1
-    move-exception v1
-
-    :try_start_5
-    invoke-virtual {v2, v1}, Ljava/lang/Throwable;->addSuppressed(Ljava/lang/Throwable;)V
-
-    :cond_4
-    :goto_1
-    throw v2
-    :try_end_5
-    .catchall {:try_start_5 .. :try_end_5} :catchall_2
-
-    :catchall_2
-    move-exception v1
-
-    .line 224
-    invoke-virtual {v0}, Ljava/net/HttpURLConnection;->disconnect()V
-
-    .line 225
-    throw v1
-
-    .line 210
-    :cond_5
-    invoke-virtual {v0}, Ljava/net/HttpURLConnection;->disconnect()V
-
-    .line 211
-    new-instance v0, Ljava/lang/IllegalStateException;
-
-    new-instance v2, Ljava/lang/StringBuilder;
-
-    const-string v3, "GitHub \u8bf7\u6c42\u5931\u8d25\uff08"
-
-    invoke-direct {v2, v3}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
-
-    invoke-virtual {v2, v1}, Ljava/lang/StringBuilder;->append(I)Ljava/lang/StringBuilder;
-
-    const-string v1, "\uff09"
-
-    invoke-virtual {v2, v1}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
-
-    invoke-virtual {v2}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
-
-    move-result-object v1
-
-    invoke-direct {v0, v1}, Ljava/lang/IllegalStateException;-><init>(Ljava/lang/String;)V
-
-    throw v0
 .end method
 
 .method private static matchesDigest(Ljava/io/File;Ljava/lang/String;)Z
@@ -660,88 +513,21 @@
 
 .method private static open(Ljava/lang/String;)Ljava/net/HttpURLConnection;
     .locals 3
-    .annotation system Ldalvik/annotation/Throws;
-        value = {
-            Ljava/lang/Exception;
-        }
-    .end annotation
 
-    .line 189
-    new-instance v0, Ljava/net/URL;
+    # 壳：真正的实现搬到 UpdateMirror.open，因为那边手动跟 Location。
+    # HttpURLConnection 的 setInstanceFollowRedirects 只跟**同主机**跳转，
+    # 而 GitHub 的 release 附件 302 到 objects.githubusercontent.com、
+    # gh 镜像 302 到自己的 CDN —— 拿到的是个空 302，下载卡在 0%，检查更新
+    # 还会误报「服务器上没有发布信息」。
+    const/16 v0, 0x1e
 
-    invoke-direct {v0, p0}, Ljava/net/URL;-><init>(Ljava/lang/String;)V
+    const/4 v1, 0x0
 
-    invoke-virtual {v0}, Ljava/net/URL;->openConnection()Ljava/net/URLConnection;
-
-    move-result-object p0
-
-    check-cast p0, Ljava/net/HttpURLConnection;
-
-    const/16 v0, 0x3a98
-
-    .line 190
-    invoke-virtual {p0, v0}, Ljava/net/HttpURLConnection;->setConnectTimeout(I)V
-
-    const/16 v0, 0x7530
-
-    .line 191
-    invoke-virtual {p0, v0}, Ljava/net/HttpURLConnection;->setReadTimeout(I)V
-
-    .line 192
-    const-string v0, "User-Agent"
-
-    const-string v1, "AIIvideo-Updater"
-
-    invoke-virtual {p0, v0, v1}, Ljava/net/HttpURLConnection;->setRequestProperty(Ljava/lang/String;Ljava/lang/String;)V
-
-    .line 193
-    const-string v0, "Accept"
-
-    const-string v1, "application/json"
-
-    invoke-virtual {p0, v0, v1}, Ljava/net/HttpURLConnection;->setRequestProperty(Ljava/lang/String;Ljava/lang/String;)V
-
-    .line 194
-    invoke-virtual {p0}, Ljava/net/HttpURLConnection;->getResponseCode()I
-
-    move-result v0
-
-    const/16 v1, 0xc8
-
-    if-lt v0, v1, :cond_0
-
-    const/16 v1, 0x12c
-
-    if-ge v0, v1, :cond_0
-
-    return-object p0
-
-    .line 196
-    :cond_0
-    invoke-virtual {p0}, Ljava/net/HttpURLConnection;->disconnect()V
-
-    .line 197
-    new-instance p0, Ljava/lang/IllegalStateException;
-
-    new-instance v1, Ljava/lang/StringBuilder;
-
-    const-string v2, "GitHub \u8bf7\u6c42\u5931\u8d25\uff08"
-
-    invoke-direct {v1, v2}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
-
-    invoke-virtual {v1, v0}, Ljava/lang/StringBuilder;->append(I)Ljava/lang/StringBuilder;
-
-    const-string v0, "\uff09"
-
-    invoke-virtual {v1, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
-
-    invoke-virtual {v1}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+    invoke-static {p0, v0, v1}, Lcom/huangguo/mobile/UpdateMirror;->open(Ljava/lang/String;ILjava/lang/String;)Ljava/net/HttpURLConnection;
 
     move-result-object v0
 
-    invoke-direct {p0, v0}, Ljava/lang/IllegalStateException;-><init>(Ljava/lang/String;)V
-
-    throw p0
+    return-object v0
 .end method
 
 .method private static status(Ljava/lang/String;)Lorg/json/JSONObject;
@@ -938,19 +724,7 @@
         }
     .end annotation
 
-    # ── 改造版：APK 自更新通道已切断（2026-10-16）────────────────────────
-    # MANIFEST_URL 指向
-    #   https://github.com/MrSsg/HuangguoAPP-for-Andriod/releases/latest/download/android-update.json
-    # 而上游主仓库已经 404（2026-10-16 核实）。继续请求只会每次冷启动白打一次
-    # 外网，拿不回任何东西。这里直接返回本地缓存状态，一个网络请求都不发。
-    #
-    # 插在 monitor-enter 之前：本方法是 synchronized，提前 return 时不能持锁。
-    invoke-virtual {p0}, Lcom/huangguo/mobile/UpdateManager;->cached()Lorg/json/JSONObject;
-
-    move-result-object p0
-
-    return-object p0
-
+    # 2026-10-17：自更新通道恢复（URL 已指到自建 VPS 的 /updates/，前端 UI 重建）。
     monitor-enter p0
 
     .line 98
@@ -1353,668 +1127,93 @@
 .end method
 
 .method declared-synchronized download(Lcom/huangguo/mobile/UpdateManager$Progress;)Ljava/io/File;
-    .locals 22
-    .annotation system Ldalvik/annotation/Throws;
-        value = {
-            Ljava/lang/Exception;
-        }
-    .end annotation
+    .locals 6
 
-    # ── 改造版：下载入口已封（2026-10-16）────────────────────────────────
-    # check() 早就返回本地缓存不发网络，前端那套「发现新版本 → 下载并安装」
-    # 的面板也已经整块删掉，所以 download() 现在没有任何调用点，
-    # 只有 download-update 这个桥动作还留着口子。这里直接返回 null 封死。
-    #
-    # 插在 monitor-enter 之前：本方法是 synchronized，提前 return 时不能持锁。
+    # 真正的下载搬进 UpdateMirror：那边手动跟 Location（GitHub 和 gh 镜像都
+    # 会 302 到别的域名，HttpURLConnection 的自动重定向只认同主机）、64KB buffer、
+    # 边下边算 sha256。原来这一大段在自己的实现里，304/302 一出现就卡在 0%。
+    # 这里只剩三件事：判重、准备目标文件、管 downloading 标志。
+    iget-boolean v0, p0, Lcom/huangguo/mobile/UpdateManager;->downloading:Z
+
+    if-eqz v0, :cond_free
+
     const/4 v0, 0x0
 
     return-object v0
 
-    move-object/from16 v1, p0
+    :cond_free
+    iget-object v0, p0, Lcom/huangguo/mobile/UpdateManager;->candidate:Lcom/huangguo/mobile/UpdateManager$Candidate;
 
-    move-object/from16 v0, p1
+    if-eqz v0, :cond_none
 
-    const-string v2, "AIIvideo-v"
+    new-instance v1, Ljava/io/File;
 
-    monitor-enter p0
+    iget-object v2, p0, Lcom/huangguo/mobile/UpdateManager;->context:Landroid/content/Context;
 
-    .line 140
+    invoke-virtual {v2}, Landroid/content/Context;->getCacheDir()Ljava/io/File;
+
+    move-result-object v2
+
+    const-string v3, "updates"
+
+    invoke-direct {v1, v2, v3}, Ljava/io/File;-><init>(Ljava/io/File;Ljava/lang/String;)V
+
+    invoke-virtual {v1}, Ljava/io/File;->mkdirs()Z
+
+    new-instance v2, Ljava/lang/StringBuilder;
+
+    const-string v3, "AIIvideo-v"
+
+    invoke-direct {v2, v3}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
+
+    iget-object v3, v0, Lcom/huangguo/mobile/UpdateManager$Candidate;->version:Ljava/lang/String;
+
+    invoke-virtual {v2, v3}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    const-string v3, "-release.apk"
+
+    invoke-virtual {v2, v3}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    invoke-virtual {v2}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object v2
+
+    new-instance v3, Ljava/io/File;
+
+    invoke-direct {v3, v1, v2}, Ljava/io/File;-><init>(Ljava/io/File;Ljava/lang/String;)V
+
+    const/4 v4, 0x1
+
+    iput-boolean v4, p0, Lcom/huangguo/mobile/UpdateManager;->downloading:Z
+
     :try_start_0
-    iget-boolean v3, v1, Lcom/huangguo/mobile/UpdateManager;->downloading:Z
+    iget-object v4, v0, Lcom/huangguo/mobile/UpdateManager$Candidate;->url:Ljava/lang/String;
 
-    if-nez v3, :cond_14
+    iget-object v5, v0, Lcom/huangguo/mobile/UpdateManager$Candidate;->digest:Ljava/lang/String;
 
-    .line 141
-    iget-object v3, v1, Lcom/huangguo/mobile/UpdateManager;->candidate:Lcom/huangguo/mobile/UpdateManager$Candidate;
+    invoke-static {v4, v3, p1, v5}, Lcom/huangguo/mobile/UpdateMirror;->download(Ljava/lang/String;Ljava/io/File;Ljava/lang/Object;Ljava/lang/String;)Ljava/io/File;
 
-    if-eqz v3, :cond_13
-
-    .line 142
-    iget-object v3, v3, Lcom/huangguo/mobile/UpdateManager$Candidate;->digest:Ljava/lang/String;
-
-    const-string v4, "sha256:[0-9a-fA-F]{64}"
-
-    invoke-virtual {v3, v4}, Ljava/lang/String;->matches(Ljava/lang/String;)Z
-
-    move-result v3
-
-    if-eqz v3, :cond_12
-
-    .line 143
-    iget-object v3, v1, Lcom/huangguo/mobile/UpdateManager;->candidate:Lcom/huangguo/mobile/UpdateManager$Candidate;
-
-    iget-object v3, v3, Lcom/huangguo/mobile/UpdateManager$Candidate;->url:Ljava/lang/String;
-
-    const-string v4, "https://github.com/MrSsg/HuangguoAPP-for-Andriod/releases/download/"
-
-    invoke-virtual {v3, v4}, Ljava/lang/String;->startsWith(Ljava/lang/String;)Z
-
-    move-result v3
-
-    if-eqz v3, :cond_11
-
-    const/4 v3, 0x1
-
-    .line 146
-    iput-boolean v3, v1, Lcom/huangguo/mobile/UpdateManager;->downloading:Z
+    move-result-object v0
     :try_end_0
-    .catchall {:try_start_0 .. :try_end_0} :catchall_b
+    .catchall {:try_start_0 .. :try_end_0} :catchall_0
 
-    const/4 v3, 0x0
+    const/4 v4, 0x0
 
-    .line 148
-    :try_start_1
-    new-instance v4, Ljava/io/File;
+    iput-boolean v4, p0, Lcom/huangguo/mobile/UpdateManager;->downloading:Z
 
-    iget-object v5, v1, Lcom/huangguo/mobile/UpdateManager;->context:Landroid/content/Context;
-
-    invoke-virtual {v5}, Landroid/content/Context;->getCacheDir()Ljava/io/File;
-
-    move-result-object v5
-
-    const-string v6, "updates"
-
-    invoke-direct {v4, v5, v6}, Ljava/io/File;-><init>(Ljava/io/File;Ljava/lang/String;)V
-
-    .line 149
-    invoke-virtual {v4}, Ljava/io/File;->exists()Z
-
-    move-result v5
-    :try_end_1
-    .catchall {:try_start_1 .. :try_end_1} :catchall_a
-
-    if-nez v5, :cond_1
-
-    :try_start_2
-    invoke-virtual {v4}, Ljava/io/File;->mkdirs()Z
-
-    move-result v5
-
-    if-eqz v5, :cond_0
-
-    goto :goto_0
-
-    :cond_0
-    new-instance v0, Ljava/lang/IllegalStateException;
-
-    const-string v2, "\u65e0\u6cd5\u521b\u5efa\u4e0b\u8f7d\u76ee\u5f55"
-
-    invoke-direct {v0, v2}, Ljava/lang/IllegalStateException;-><init>(Ljava/lang/String;)V
-
-    throw v0
-    :try_end_2
-    .catchall {:try_start_2 .. :try_end_2} :catchall_0
+    return-object v0
 
     :catchall_0
     move-exception v0
 
-    move v10, v3
+    const/4 v4, 0x0
 
-    goto/16 :goto_c
-
-    .line 150
-    :cond_1
-    :goto_0
-    :try_start_3
-    new-instance v5, Ljava/io/File;
-
-    new-instance v6, Ljava/lang/StringBuilder;
-
-    invoke-direct {v6, v2}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
-
-    iget-object v2, v1, Lcom/huangguo/mobile/UpdateManager;->candidate:Lcom/huangguo/mobile/UpdateManager$Candidate;
-
-    iget-object v2, v2, Lcom/huangguo/mobile/UpdateManager$Candidate;->version:Ljava/lang/String;
-
-    invoke-virtual {v6, v2}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
-
-    const-string v2, "-release.apk"
-
-    invoke-virtual {v6, v2}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
-
-    invoke-virtual {v6}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
-
-    move-result-object v2
-
-    invoke-direct {v5, v4, v2}, Ljava/io/File;-><init>(Ljava/io/File;Ljava/lang/String;)V
-
-    .line 151
-    invoke-virtual {v5}, Ljava/io/File;->isFile()Z
-
-    move-result v2
-    :try_end_3
-    .catchall {:try_start_3 .. :try_end_3} :catchall_a
-
-    const/16 v6, 0x64
-
-    if-eqz v2, :cond_2
-
-    :try_start_4
-    iget-object v2, v1, Lcom/huangguo/mobile/UpdateManager;->candidate:Lcom/huangguo/mobile/UpdateManager$Candidate;
-
-    iget-object v2, v2, Lcom/huangguo/mobile/UpdateManager$Candidate;->digest:Ljava/lang/String;
-
-    invoke-static {v5, v2}, Lcom/huangguo/mobile/UpdateManager;->matchesDigest(Ljava/io/File;Ljava/lang/String;)Z
-
-    move-result v2
-
-    if-eqz v2, :cond_2
-
-    .line 152
-    invoke-interface {v0, v6}, Lcom/huangguo/mobile/UpdateManager$Progress;->onPercent(I)V
-    :try_end_4
-    .catchall {:try_start_4 .. :try_end_4} :catchall_0
-
-    .line 182
-    :try_start_5
-    iput-boolean v3, v1, Lcom/huangguo/mobile/UpdateManager;->downloading:Z
-    :try_end_5
-    .catchall {:try_start_5 .. :try_end_5} :catchall_b
-
-    .line 153
-    monitor-exit p0
-
-    return-object v5
-
-    .line 155
-    :cond_2
-    :try_start_6
-    new-instance v2, Ljava/io/File;
-
-    new-instance v7, Ljava/lang/StringBuilder;
-
-    invoke-direct {v7}, Ljava/lang/StringBuilder;-><init>()V
-
-    invoke-virtual {v5}, Ljava/io/File;->getName()Ljava/lang/String;
-
-    move-result-object v8
-
-    invoke-virtual {v7, v8}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
-
-    const-string v8, ".part"
-
-    invoke-virtual {v7, v8}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
-
-    invoke-virtual {v7}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
-
-    move-result-object v7
-
-    invoke-direct {v2, v4, v7}, Ljava/io/File;-><init>(Ljava/io/File;Ljava/lang/String;)V
-
-    .line 156
-    iget-object v4, v1, Lcom/huangguo/mobile/UpdateManager;->candidate:Lcom/huangguo/mobile/UpdateManager$Candidate;
-
-    iget-object v4, v4, Lcom/huangguo/mobile/UpdateManager$Candidate;->url:Ljava/lang/String;
-
-    invoke-static {v4}, Lcom/huangguo/mobile/UpdateManager;->open(Ljava/lang/String;)Ljava/net/HttpURLConnection;
-
-    move-result-object v4
-    :try_end_6
-    .catchall {:try_start_6 .. :try_end_6} :catchall_a
-
-    .line 159
-    :try_start_7
-    iget-object v7, v1, Lcom/huangguo/mobile/UpdateManager;->candidate:Lcom/huangguo/mobile/UpdateManager$Candidate;
-
-    iget-wide v7, v7, Lcom/huangguo/mobile/UpdateManager$Candidate;->size:J
-
-    const-wide/16 v9, 0x0
-
-    cmp-long v7, v7, v9
-
-    if-lez v7, :cond_3
-
-    iget-object v7, v1, Lcom/huangguo/mobile/UpdateManager;->candidate:Lcom/huangguo/mobile/UpdateManager$Candidate;
-
-    iget-wide v7, v7, Lcom/huangguo/mobile/UpdateManager$Candidate;->size:J
-
-    goto :goto_1
-
-    :cond_3
-    invoke-virtual {v4}, Ljava/net/HttpURLConnection;->getContentLengthLong()J
-
-    move-result-wide v7
-
-    .line 160
-    :goto_1
-    invoke-virtual {v4}, Ljava/net/HttpURLConnection;->getInputStream()Ljava/io/InputStream;
-
-    move-result-object v11
-    :try_end_7
-    .catchall {:try_start_7 .. :try_end_7} :catchall_9
-
-    :try_start_8
-    new-instance v12, Ljava/io/FileOutputStream;
-
-    invoke-direct {v12, v2}, Ljava/io/FileOutputStream;-><init>(Ljava/io/File;)V
-    :try_end_8
-    .catchall {:try_start_8 .. :try_end_8} :catchall_6
-
-    const/high16 v13, 0x10000
-
-    .line 161
-    :try_start_9
-    new-array v13, v13, [B
-
-    const/4 v14, -0x1
-
-    move-wide v15, v9
-
-    move-wide/from16 v17, v15
-
-    move v9, v14
-
-    .line 164
-    :goto_2
-    invoke-virtual {v11, v13}, Ljava/io/InputStream;->read([B)I
-
-    move-result v10
-
-    if-eq v10, v14, :cond_6
-
-    .line 165
-    invoke-virtual {v12, v13, v3, v10}, Ljava/io/FileOutputStream;->write([BII)V
-    :try_end_9
-    .catchall {:try_start_9 .. :try_end_9} :catchall_4
-
-    move-wide/from16 v19, v15
-
-    int-to-long v14, v10
-
-    add-long v15, v19, v14
-
-    cmp-long v10, v7, v17
-
-    if-lez v10, :cond_4
-
-    const-wide/16 v19, 0x64
-
-    mul-long v19, v19, v15
-
-    move-object v14, v4
-
-    .line 167
-    :try_start_a
-    div-long v3, v19, v7
-    :try_end_a
-    .catchall {:try_start_a .. :try_end_a} :catchall_2
-
-    move-object/from16 v21, v11
-
-    const-wide/16 v10, 0x63
-
-    :try_start_b
-    invoke-static {v10, v11, v3, v4}, Ljava/lang/Math;->min(JJ)J
-
-    move-result-wide v3
-
-    long-to-int v10, v3
-
-    goto :goto_3
-
-    :catchall_1
-    move-exception v0
-
-    goto/16 :goto_7
-
-    :catchall_2
-    move-exception v0
-
-    goto/16 :goto_6
-
-    :cond_4
-    move-object v14, v4
-
-    move-object/from16 v21, v11
-
-    const/4 v10, 0x0
-
-    :goto_3
-    if-eq v10, v9, :cond_5
-
-    .line 168
-    invoke-interface {v0, v10}, Lcom/huangguo/mobile/UpdateManager$Progress;->onPercent(I)V
-    :try_end_b
-    .catchall {:try_start_b .. :try_end_b} :catchall_1
-
-    move v9, v10
-
-    :cond_5
-    move-object v4, v14
-
-    move-object/from16 v11, v21
-
-    const/4 v3, 0x0
-
-    const/4 v14, -0x1
-
-    goto :goto_2
-
-    :cond_6
-    move-object v14, v4
-
-    move-object/from16 v21, v11
-
-    move-wide/from16 v19, v15
-
-    .line 170
-    :try_start_c
-    invoke-virtual {v12}, Ljava/io/FileOutputStream;->close()V
-    :try_end_c
-    .catchall {:try_start_c .. :try_end_c} :catchall_3
-
-    if-eqz v21, :cond_7
-
-    :try_start_d
-    invoke-virtual/range {v21 .. v21}, Ljava/io/InputStream;->close()V
-
-    .line 171
-    :cond_7
-    iget-object v3, v1, Lcom/huangguo/mobile/UpdateManager;->candidate:Lcom/huangguo/mobile/UpdateManager$Candidate;
-
-    iget-wide v3, v3, Lcom/huangguo/mobile/UpdateManager$Candidate;->size:J
-
-    cmp-long v3, v3, v17
-
-    if-lez v3, :cond_9
-
-    iget-object v3, v1, Lcom/huangguo/mobile/UpdateManager;->candidate:Lcom/huangguo/mobile/UpdateManager$Candidate;
-
-    iget-wide v3, v3, Lcom/huangguo/mobile/UpdateManager$Candidate;->size:J
-
-    cmp-long v3, v19, v3
-
-    if-nez v3, :cond_8
-
-    goto :goto_4
-
-    :cond_8
-    new-instance v0, Ljava/lang/IllegalStateException;
-
-    const-string v3, "\u66f4\u65b0\u5305\u4e0b\u8f7d\u4e0d\u5b8c\u6574\uff0c\u8bf7\u91cd\u8bd5"
-
-    invoke-direct {v0, v3}, Ljava/lang/IllegalStateException;-><init>(Ljava/lang/String;)V
+    iput-boolean v4, p0, Lcom/huangguo/mobile/UpdateManager;->downloading:Z
 
     throw v0
 
-    .line 172
-    :cond_9
-    :goto_4
-    iget-object v3, v1, Lcom/huangguo/mobile/UpdateManager;->candidate:Lcom/huangguo/mobile/UpdateManager$Candidate;
+    :cond_none
+    const/4 v0, 0x0
 
-    iget-object v3, v3, Lcom/huangguo/mobile/UpdateManager$Candidate;->digest:Ljava/lang/String;
-
-    invoke-static {v2, v3}, Lcom/huangguo/mobile/UpdateManager;->matchesDigest(Ljava/io/File;Ljava/lang/String;)Z
-
-    move-result v3
-
-    if-eqz v3, :cond_e
-
-    .line 173
-    invoke-virtual {v5}, Ljava/io/File;->exists()Z
-
-    move-result v3
-
-    if-eqz v3, :cond_b
-
-    invoke-virtual {v5}, Ljava/io/File;->delete()Z
-
-    move-result v3
-
-    if-eqz v3, :cond_a
-
-    goto :goto_5
-
-    :cond_a
-    new-instance v0, Ljava/lang/IllegalStateException;
-
-    const-string v3, "\u65e0\u6cd5\u66ff\u6362\u65e7\u4e0b\u8f7d\u5305"
-
-    invoke-direct {v0, v3}, Ljava/lang/IllegalStateException;-><init>(Ljava/lang/String;)V
-
-    throw v0
-
-    .line 174
-    :cond_b
-    :goto_5
-    invoke-virtual {v2, v5}, Ljava/io/File;->renameTo(Ljava/io/File;)Z
-
-    move-result v3
-
-    if-eqz v3, :cond_d
-
-    .line 175
-    invoke-interface {v0, v6}, Lcom/huangguo/mobile/UpdateManager$Progress;->onPercent(I)V
-    :try_end_d
-    .catchall {:try_start_d .. :try_end_d} :catchall_8
-
-    .line 178
-    :try_start_e
-    invoke-virtual {v14}, Ljava/net/HttpURLConnection;->disconnect()V
-
-    .line 179
-    invoke-virtual {v2}, Ljava/io/File;->exists()Z
-
-    move-result v0
-
-    if-eqz v0, :cond_c
-
-    invoke-virtual {v2}, Ljava/io/File;->delete()Z
-    :try_end_e
-    .catchall {:try_start_e .. :try_end_e} :catchall_a
-
-    :cond_c
-    const/4 v10, 0x0
-
-    .line 182
-    :try_start_f
-    iput-boolean v10, v1, Lcom/huangguo/mobile/UpdateManager;->downloading:Z
-    :try_end_f
-    .catchall {:try_start_f .. :try_end_f} :catchall_b
-
-    .line 176
-    monitor-exit p0
-
-    return-object v5
-
-    .line 174
-    :cond_d
-    :try_start_10
-    new-instance v0, Ljava/lang/IllegalStateException;
-
-    const-string v3, "\u65e0\u6cd5\u4fdd\u5b58\u66f4\u65b0\u5305"
-
-    invoke-direct {v0, v3}, Ljava/lang/IllegalStateException;-><init>(Ljava/lang/String;)V
-
-    throw v0
-
-    .line 172
-    :cond_e
-    new-instance v0, Ljava/lang/IllegalStateException;
-
-    const-string v3, "\u66f4\u65b0\u5305\u6821\u9a8c\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5"
-
-    invoke-direct {v0, v3}, Ljava/lang/IllegalStateException;-><init>(Ljava/lang/String;)V
-
-    throw v0
-    :try_end_10
-    .catchall {:try_start_10 .. :try_end_10} :catchall_8
-
-    :catchall_3
-    move-exception v0
-
-    goto :goto_9
-
-    :catchall_4
-    move-exception v0
-
-    move-object v14, v4
-
-    :goto_6
-    move-object/from16 v21, v11
-
-    :goto_7
-    move-object v3, v0
-
-    .line 160
-    :try_start_11
-    invoke-virtual {v12}, Ljava/io/FileOutputStream;->close()V
-    :try_end_11
-    .catchall {:try_start_11 .. :try_end_11} :catchall_5
-
-    goto :goto_8
-
-    :catchall_5
-    move-exception v0
-
-    :try_start_12
-    invoke-virtual {v3, v0}, Ljava/lang/Throwable;->addSuppressed(Ljava/lang/Throwable;)V
-
-    :goto_8
-    throw v3
-    :try_end_12
-    .catchall {:try_start_12 .. :try_end_12} :catchall_3
-
-    :catchall_6
-    move-exception v0
-
-    move-object v14, v4
-
-    move-object/from16 v21, v11
-
-    :goto_9
-    move-object v3, v0
-
-    if-eqz v21, :cond_f
-
-    :try_start_13
-    invoke-virtual/range {v21 .. v21}, Ljava/io/InputStream;->close()V
-    :try_end_13
-    .catchall {:try_start_13 .. :try_end_13} :catchall_7
-
-    goto :goto_a
-
-    :catchall_7
-    move-exception v0
-
-    :try_start_14
-    invoke-virtual {v3, v0}, Ljava/lang/Throwable;->addSuppressed(Ljava/lang/Throwable;)V
-
-    :cond_f
-    :goto_a
-    throw v3
-    :try_end_14
-    .catchall {:try_start_14 .. :try_end_14} :catchall_8
-
-    :catchall_8
-    move-exception v0
-
-    goto :goto_b
-
-    :catchall_9
-    move-exception v0
-
-    move-object v14, v4
-
-    .line 178
-    :goto_b
-    :try_start_15
-    invoke-virtual {v14}, Ljava/net/HttpURLConnection;->disconnect()V
-
-    .line 179
-    invoke-virtual {v2}, Ljava/io/File;->exists()Z
-
-    move-result v3
-
-    if-eqz v3, :cond_10
-
-    invoke-virtual {v2}, Ljava/io/File;->delete()Z
-
-    .line 180
-    :cond_10
-    throw v0
-    :try_end_15
-    .catchall {:try_start_15 .. :try_end_15} :catchall_a
-
-    :catchall_a
-    move-exception v0
-
-    const/4 v10, 0x0
-
-    .line 182
-    :goto_c
-    :try_start_16
-    iput-boolean v10, v1, Lcom/huangguo/mobile/UpdateManager;->downloading:Z
-
-    .line 183
-    throw v0
-
-    .line 144
-    :cond_11
-    new-instance v0, Ljava/lang/IllegalStateException;
-
-    const-string v2, "\u66f4\u65b0\u5305\u5730\u5740\u65e0\u6548"
-
-    invoke-direct {v0, v2}, Ljava/lang/IllegalStateException;-><init>(Ljava/lang/String;)V
-
-    throw v0
-
-    .line 142
-    :cond_12
-    new-instance v0, Ljava/lang/IllegalStateException;
-
-    const-string v2, "\u53d1\u5e03\u5305\u7f3a\u5c11 SHA-256 \u6821\u9a8c\u503c"
-
-    invoke-direct {v0, v2}, Ljava/lang/IllegalStateException;-><init>(Ljava/lang/String;)V
-
-    throw v0
-
-    .line 141
-    :cond_13
-    new-instance v0, Ljava/lang/IllegalStateException;
-
-    const-string v2, "\u8bf7\u5148\u68c0\u67e5\u66f4\u65b0"
-
-    invoke-direct {v0, v2}, Ljava/lang/IllegalStateException;-><init>(Ljava/lang/String;)V
-
-    throw v0
-
-    .line 140
-    :cond_14
-    new-instance v0, Ljava/lang/IllegalStateException;
-
-    const-string v2, "\u66f4\u65b0\u5305\u6b63\u5728\u4e0b\u8f7d"
-
-    invoke-direct {v0, v2}, Ljava/lang/IllegalStateException;-><init>(Ljava/lang/String;)V
-
-    throw v0
-
-    :catchall_b
-    move-exception v0
-
-    monitor-exit p0
-    :try_end_16
-    .catchall {:try_start_16 .. :try_end_16} :catchall_b
-
-    throw v0
+    return-object v0
 .end method

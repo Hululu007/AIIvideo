@@ -16,7 +16,7 @@
 
 .field private static final BUNDLED_UI_REVISION:J = 0xfL
 
-.field static final INDEX:Ljava/lang/String; = "https://github.com/MrSsg/HuangguoAPP-HotUpdates/releases/latest/download/hot-update.json"
+.field static final INDEX:Ljava/lang/String; = "https://149.104.21.177.sslip.io/hot/hot-update.json"
 
 .field static final UI_URL:Ljava/lang/String; = "https://appassets.androidplatform.net/assets/app.html"
 
@@ -2198,34 +2198,21 @@
         }
     .end annotation
 
-    # ── 改造版：订阅已切断（2026-10-16）────────────────────────────────────
-    # 直接返回当前状态，一个网络请求都不发。下面那一整条链路
+    # ── 自建签名通道（2026-10-17 重启）──────────────────────────────────
+    # 原来的 GitHub 订阅已切断，但下面这条链路本身是完整的：
     #   download(INDEX) → verifyEnvelope → requireCompatible → download(zip)
-    #   → 校验 sha256 → 解包 → validateTheme → stage → prune
-    # 由此全部变成不可达，连同对 github.com 的依赖一起消失。
+    #   → 校验 sha256 → 解包 → validateTheme → stage
+    # 现在 INDEX 指向自建服务器 /hot/hot-update.json，签名的私钥只在
+    # work/shells/.build/brandkey/ 里，APK 里只放公钥。
     #
-    # 为什么切：这个 App 的数据层已经换成一整套 /api/ REST（见 SiteRepository
-    # 的 /api/ 短路分支），站点规则里真正还活着的只剩 headers 那两行；
-    # selectors / patterns / routes / attributes 只在抓 HTML 的分支里被调用，
-    # 而那条路已经没有入口了。origin 又在 SiteProfile 里钉死。
-    # 也就是说这条通道最值钱的能力（域名漂移自愈）我们自己关掉了，
-    # 剩下的收益不值得再维持一条对外信任链。
-    #
-    # 保留方法签名和返回类型：调用方 MainActivity.checkHotUpdates / dispatch
-    # 都不用改，拿到的仍是一个合法的 status JSON。
+    # 允许放进包里的前端文件走 stage 的白名单：ui/**（app.html/app.js/
+    # app.css/vendor/hxm 等）以及根部的 site.json / theme.json。
+    # resource() 会把 appassets 的请求优先映射到 session/ui/ 下，所以
+    # 前端整包替换不需要改 WebView 的加载路径。
     #
     # 注意：resource() 不要动。名字叫「热更新资源」，但它其实是整个
-    # shouldInterceptRequest 的处理体 —— appassets.androidplatform.net 底下
-    # 所有东西都从它走，包括从 APK 内置 assets 取 app.html / app.js。
-    # 把它 stub 成 return null，WebView 就会真去 DNS 解析那个虚拟域名，
-    # 直接 ERR_NAME_NOT_RESOLVED 白屏。（2026-10-16 踩过一次。）
-    # 切断订阅只需要 check() 不再 stage 新 session，resource() 自然就只会
-    # 服务内置的那一份。
-    invoke-virtual {p0}, Lcom/huangguo/mobile/HotUpdateManager;->status()Lorg/json/JSONObject;
-
-    move-result-object p0
-
-    return-object p0
+    # shouldInterceptRequest 的处理体 —— 包括从 APK 内置 assets 取
+    # app.html；stub 掉会让 WebView 去 DNS 解析虚拟域名，直接白屏。
 
     .line 155
     iget-object v0, p0, Lcom/huangguo/mobile/HotUpdateManager;->checking:Ljava/util/concurrent/atomic/AtomicBoolean;
@@ -2306,7 +2293,8 @@
 
     sub-long v5, v3, v5
 
-    const-wide/32 v7, 0x493e0
+    # 自动检查间隔：30 分钟。手动「检查更新」走 check(true)，不受这里限制。
+    const-wide/32 v7, 0x1b7740
 
     cmp-long p1, v5, v7
 
@@ -2356,7 +2344,7 @@
     invoke-interface {p1}, Landroid/content/SharedPreferences$Editor;->apply()V
 
     .line 162
-    const-string p1, "https://github.com/MrSsg/HuangguoAPP-HotUpdates/releases/latest/download/hot-update.json"
+    const-string p1, "https://149.104.21.177.sslip.io/hot/hot-update.json"
 
     const/high16 v0, 0x40000
 

@@ -929,9 +929,30 @@
 .end method
 
 .method private dark()Z
-    .locals 1
+    .locals 2
+
+    # 用户在设置里选了浅色/深色时以选择为准；-1 才回去读系统 uiMode。
+    invoke-static {}, Lcom/huangguo/mobile/ThemeBridge;->override()I
+
+    move-result v0
+
+    const/4 v1, -0x1
+
+    if-ne v0, v1, :cond_system
+
+    if-eqz v0, :cond_light
+
+    const/4 p0, 0x1
+
+    return p0
+
+    :cond_light
+    const/4 p0, 0x0
+
+    return p0
 
     .line 229
+    :cond_system
     invoke-virtual {p0}, Lcom/huangguo/mobile/MainActivity;->getResources()Landroid/content/res/Resources;
 
     move-result-object p0
@@ -2006,6 +2027,31 @@
 
     .line 494
     :pswitch_e
+    # 带 mode 是「写」：system / light / dark，交给 ThemeBridge 改原生栏。
+    # 不带 mode 是原有的「读」：返回当前生效的明暗，给前端首帧对齐用。
+    const-string v0, "mode"
+
+    invoke-virtual {p2, v0}, Lorg/json/JSONObject;->optString(Ljava/lang/String;)Ljava/lang/String;
+
+    move-result-object v0
+
+    invoke-virtual {v0}, Ljava/lang/String;->isEmpty()Z
+
+    move-result v1
+
+    if-nez v1, :cond_theme_read
+
+    invoke-static {p0, v0}, Lcom/huangguo/mobile/ThemeBridge;->applyMode(Landroid/app/Activity;Ljava/lang/String;)V
+
+    const/4 p0, 0x1
+
+    invoke-static {p0}, Ljava/lang/Boolean;->valueOf(Z)Ljava/lang/Boolean;
+
+    move-result-object p0
+
+    return-object p0
+
+    :cond_theme_read
     invoke-direct {p0}, Lcom/huangguo/mobile/MainActivity;->dark()Z
 
     move-result p0
@@ -2948,8 +2994,24 @@
 .end method
 
 .method private synthetic lambda$dispatch$4(Ljava/io/File;)V
-    .locals 0
+    .locals 2
 
+    # 下载失败时 download() 回 null。原来这里不看就直接 installUpdate(null)，
+    # 一路走到 FileProvider.getUriForFile(context, authority, null) —— 那里
+    # 拿 null 调 getCanonicalPath()，当场 NPE，用户看到的是「点下载就闪退」。
+    if-nez p1, :cond_ok
+
+    iget-object v0, p0, Lcom/huangguo/mobile/MainActivity;->webView:Landroid/webkit/WebView;
+
+    const-string v1, "window.hgUpdateFailed && window.hgUpdateFailed()"
+
+    const/4 p1, 0x0
+
+    invoke-virtual {v0, v1, p1}, Landroid/webkit/WebView;->evaluateJavascript(Ljava/lang/String;Landroid/webkit/ValueCallback;)V
+
+    return-void
+
+    :cond_ok
     .line 519
     invoke-direct {p0, p1}, Lcom/huangguo/mobile/MainActivity;->installUpdate(Ljava/io/File;)V
 
