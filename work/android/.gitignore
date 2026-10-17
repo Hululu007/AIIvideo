@@ -22,3 +22,8 @@ keystore.properties
 Thumbs.db
 .idea/
 *.swp
+
+# 测试 fixture 是成人内容站点的真实页面，不进仓库（避开内容污染，不是怕版权）。
+# 缺了它们 Hanime1AdapterTest 的 16 个用例会被 Assume 跳过，不会红。
+# 需要跑的话：cd work/shells/java-test/fixtures && python3 refresh.py
+app/src/test/resources/*.html

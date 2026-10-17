@@ -11,6 +11,17 @@ cd work/android
 ./gradlew :app:assembleRelease      # 出 app-arm64-v8a-release.apk（约 56 MB）
 ./gradlew :app:assembleDebug        # debug 包
 ./gradlew :app:compileDebugJavaWithJavac   # 只验编译，秒级
+./gradlew :app:testDebugUnitTest           # 单元测试，42 个用例
+```
+
+或者用脚本（推荐，日志更清楚）：
+
+```bash
+./scripts/build.sh check      # 编译 + 资源 + assets
+./scripts/build.sh test       # 42 个单元测试
+./scripts/build.sh build      # 出 release APK
+./scripts/build.sh install    # 构建 → 装真机 → 冷启动 → 截图
+./scripts/build.sh verify     # 清空重建 + 测试 + 断言 APK 内容
 ```
 
 首次需要 `local.properties` 里的 `sdk.dir`，以及 `keystore.properties`（不进 git）。
@@ -139,6 +150,34 @@ curl -s http://127.0.0.1:9222/json   # 取 webSocketDebuggerUrl
 
 判定标准：logcat 里 `未知请求` 出现 **0 次** = 40 条全部被注册表接住。
 出现 `xxx failed` 是业务失败（没配源、没登录、参数不全），不是路由错误。
+
+## 测试
+
+42 个 JUnit 用例，全部在 JVM 上跑，不需要设备，秒级。
+
+| 测试类 | 用例 | 测什么 |
+|---|---|---|
+| `UserSourceTest` | 15 | 用户填的源配置能否通过校验，以及拒绝理由是否可读 |
+| `Hanime1AdapterTest` | 17 | HTML 解析（首页/分类/搜索/详情/标签面板/播放直链） |
+| `ProxyParseTest` | 10 | 代理串解析：哪些能认、哪些返回 null |
+
+`./scripts/build.sh verify` 会连测试一起跑，42 个不过就不出包。
+
+### 两个必须知道的坑
+
+**一、单测的 `org.json` 必须是真实现。** classpath 里 `android.jar` 排在前面，
+它的 `org.json` 是空壳 —— `put()` 不存值、`size()` 恒 0。表现是所有断言都"通过"
+（因为读出来永远是 null/0），看着全绿其实什么都没测。所以 `build.gradle.kts` 里
+显式加了 `testImplementation("org.json:json:20231013")`。
+
+**二、`Hanime1AdapterTest` 的 fixture 不在仓库里。** 那些 HTML 是成人内容站的
+真实页面，`.gitignore` 挡掉了。缺 fixture 时 16 个用例会被 `Assume` 跳过并标成
+skipped，不会红 —— 但也就等于没测。要跑完整版：
+
+```bash
+cd ../shells/java-test/fixtures && python3 refresh.py
+cp *.html ../../../android/app/src/test/resources/
+```
 
 ## 后端地址
 

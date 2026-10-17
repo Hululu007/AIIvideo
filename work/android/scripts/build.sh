@@ -5,6 +5,7 @@
 #   ./scripts/build.sh            出 release APK（默认）
 #   ./scripts/build.sh debug      出 debug APK
 #   ./scripts/build.sh check      只验编译 + 资源 + assets，秒级
+#   ./scripts/build.sh test       跑单元测试（42 个用例，秒级）
 #   ./scripts/build.sh install    构建 → 装真机 → 冷启动 → 截图
 #   ./scripts/build.sh verify     清空后从零构建，并断言 APK 内容
 #
@@ -57,6 +58,24 @@ cmd_check() {
   ok "编译 / 资源 / assets 全过"
 }
 
+cmd_test() {
+  say "单元测试"
+  "$PW" :app:testDebugUnitTest --rerun-tasks
+  python3 - <<'PYEOF'
+import glob, xml.etree.ElementTree as ET
+total = failed = skipped = 0
+for path in sorted(glob.glob("app/build/test-results/testDebugUnitTest/*.xml")):
+    root = ET.parse(path).getroot()
+    total += int(root.get("tests"))
+    failed += int(root.get("failures")) + int(root.get("errors"))
+    skipped += int(root.get("skipped"))
+    print(f"  {root.get('name').split('.')[-1]:26} {root.get('tests'):>3} 用例")
+print(f"  合计 {total} 用例，失败 {failed}，跳过 {skipped}")
+raise SystemExit(1 if failed else 0)
+PYEOF
+  ok "测试通过"
+}
+
 cmd_install() {
   cmd_build release
   local apk; apk=$(cat "$LAST_APK")
@@ -89,6 +108,7 @@ cmd_verify() {
   doctor
   say "清理（证明不是增量缓存的假象）"
   rm -rf app/build .gradle
+  cmd_test
   cmd_build release
   local apk; apk=$(cat "$LAST_APK")
   say "断言产物"
@@ -98,6 +118,7 @@ cmd_verify() {
 
 case "${1:-build}" in
   check)   doctor; cmd_check ;;
+  test)    doctor; cmd_test ;;
   build)   doctor; cmd_build release ;;
   debug)   doctor; cmd_build debug ;;
   install) doctor; cmd_install ;;

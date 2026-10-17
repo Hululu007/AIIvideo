@@ -32,6 +32,12 @@ android {
         assets.srcDirs("src/main/assets")
     }
 
+    // 单测要读 assets/site-default.json —— 那是内置模板，UserSourceTest 里有一条
+    // 用例专门断言「模板不该能当用户配置用」。把它并进 test 的 resources。
+    sourceSets["test"].apply {
+        resources.srcDirs("src/main/assets", "src/test/resources")
+    }
+
     // libvlc-all 的 AAR 带四个 ABI，全打进去 200MB 起步。
     // 2019 年之后的机器清一色 arm64；32 位机器上 libvlc.so 不出现，
     // VlcPlayerActivity.available() 返回 false，页面自动退回网页播放器。
@@ -76,6 +82,16 @@ android {
         abortOnError = false
         checkReleaseBuilds = false
     }
+
+    testOptions {
+        unitTests {
+            // android.jar 里没实现的方法是抛 Stub! 的占位。UserSource.validate()
+            // 这类纯逻辑测试用不到它们，设成 true 后没实现的方法返回默认值（null/0/false）
+            // 而不是抛异常。注意这不会让「真的依赖 Android 的代码」跑通 —— 那种要
+            // Robolectric 或仪器测试，见 test/java 下各文件的注释。
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {
@@ -91,6 +107,12 @@ dependencies {
 
     // libVLC：自带 FFmpeg 软解，so 只留 arm64-v8a
     implementation("org.videolan.android:libvlc-all:3.7.7")
+
+    testImplementation("junit:junit:4.13.2")
+    // 单测的 classpath 里 android.jar 排在前面，它的 org.json 是空壳
+    // （put() 不存值、size() 恒 0）。换成真的实现，否则所有断言都失真 ——
+    // 这个坑和旧链路 run.sh 里那条注释是同一个：org.json 必须在 android.jar 之前。
+    testImplementation("org.json:json:20231013")
 }
 
 // site-web.js 是 site-default.json 的派生产物（浏览器读不了 JSON，页面 CSP 是 connect-src 'none'）。
