@@ -1611,8 +1611,52 @@ function proxySummary() {
   return '直连。有机场或自建代理的话在这儿换一条路';
 }
 
+/**
+ * 订阅导入 + 测速的状态。
+ *
+ * 和 proxyState 分开放：代理状态是「核心在不在跑」（Java 侧的事实），
+ * 订阅状态是「这一页正在干什么」（纯前端），混一起会让 applyProxyCore
+ * 的合并逻辑把测速进度冲掉。
+ */
+function subState() {
+  if (!state.proxySub) {
+    state.proxySub = { url: '', count: 0, summary: '', speedNote: '', speed: [], testing: false, busy: false };
+  }
+  return state.proxySub;
+}
+
+/**
+ * 测速结果列表。只列「通了」的，按延迟升序（Java 侧已经排好）。
+ *
+ * 不通的不显示 —— 用户要的是「点哪个能用」，不是一份体检报告。
+ * 数量写在上面的提示行里，看得到「40 个里通了 6 个」这个事实。
+ */
+/**
+ * 重画设置页但保住滚动位置。
+ *
+ * 订阅和测速这两步是**原地更新**的（不换路由），如果直接 renderProxySettings()，
+ * 整页 innerHTML 换掉会让滚动条弹回顶部 —— 用户刚往下滚到测速列表，一刷新就
+ * 被扔回「返回设置」，体验很糟。
+ */
+function renderProxySettingsKeepScroll() {
+  const scroll = document.scrollingElement ? document.scrollingElement.scrollTop : 0;
+  renderProxySettings();
+  if (document.scrollingElement) document.scrollingElement.scrollTop = scroll;
+}
+
+function renderSpeedList(sub) {
+  const usable = (sub.speed || []).filter(item => item.ok);
+  if (!usable.length) return '';
+  return `<div class="speed-list">${usable.slice(0, 12).map(item => `
+    <button type="button" class="speed-item" data-proxy-use="${item.index}">
+      <span class="speed-ms">${item.ms}ms</span>
+      <span class="speed-node">${esc(item.node)}</span>
+    </button>`).join('')}</div>`;
+}
+
 function renderProxySettings() {
   const core = proxyState();
+  const sub = subState();
   const mode = core.mode || 'direct';
   const option = (item, on) =>
     `<button type="button" data-proxy-mode="${item.value}" aria-checked="${on ? 'true' : 'false'}" class="${on ? 'is-on' : ''}">${item.label}</button>`;
@@ -1642,10 +1686,10 @@ function renderProxySettings() {
     </section>
     ${mode === 'builtin' ? `<section class="settings-player">
       <h2>节点配置</h2>
-      <p>粘一条 vmess:// 或 ss:// 分享链接。核心只在本机 127.0.0.1 开一个 SOCKS5，不接管系统流量，别的 App 不受影响。</p>
+      <p>粘一条分享链接（vmess / vless / trojan / ss 都行）。核心只在本机 127.0.0.1 开一个 SOCKS5，不接管系统流量，别的 App 不受影响。</p>
       <form id="proxy-core-form" class="password-form">
         <label for="proxy-link">分享链接</label>
-        <input id="proxy-link" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="vmess://… 或 ss://…" value="${esc(core.link || '')}">
+        <input id="proxy-link" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="vmess:// 、vless:// 、trojan:// 、ss://" value="${esc(core.link || '')}">
         <p class="field-hint">这一条会存在 App 的私有目录里，包含 uuid / 密码，卸载即清。</p>
         <p id="proxy-core-form-error" class="auth-error" role="alert" hidden></p>
         <button type="submit">保存并启动</button>
@@ -1656,6 +1700,23 @@ function renderProxySettings() {
       </div>
       <p id="proxy-core-test" class="field-hint" hidden></p>
       <p class="field-hint">核心会一直跑到你手动停止或重启手机。切到后台不停 —— 后台可能在放音频。</p>
+    </section>
+    <section class="settings-player">
+      <h2>从订阅导入</h2>
+      <p>没有机场的话，粘一个订阅地址进来，App 拉下来自己测速挑最快的。有机场的人也可以用它一次导入几十个节点。</p>
+      <form id="proxy-sub-form" class="password-form">
+        <label for="proxy-sub-url">订阅地址</label>
+        <input id="proxy-sub-url" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://…/sub" value="${esc(sub.url || '')}">
+        <p class="field-hint">支持节点列表和 base64 两种格式。Clash 的 YAML 不支持，用机场后台的「V2Ray 订阅」链接。</p>
+        <button type="submit">拉取节点</button>
+      </form>
+      <p id="proxy-sub-status" class="field-hint"${sub.summary ? '' : ' hidden'}>${esc(sub.summary || '')}</p>
+      <div class="player-options">
+        <button type="button" data-proxy-sub="speed"${sub.count ? '' : ' disabled'}>${sub.testing ? '测速中…' : '测速并排序'}</button>
+      </div>
+      <p id="proxy-sub-speed" class="field-hint"${sub.speedNote ? '' : ' hidden'}>${esc(sub.speedNote || '')}</p>
+      ${renderSpeedList(sub)}
+      <p class="field-hint">这些是公开共享节点，随时可能失效；流量经过陌生人的服务器，别用来登录重要账号。</p>
     </section>` : ''}
     ${mode === 'external' ? `<section class="settings-account">
       <h2>代理地址</h2>
@@ -2891,6 +2952,76 @@ document.addEventListener('submit', async event => {
       if (error) { error.textContent = problem.message; error.hidden = false; }
     } finally {
       if (button.isConnected) { button.disabled = false; button.textContent = '保存并启动'; }
+    }
+    return;
+  }
+  // 订阅导入。拉取和测速分成两步：拉取几秒就回来，测速有大半分钟的可能，
+  // 合起来会让用户点一次等到底还不知道卡在哪一步。
+  if (event.target.id === 'proxy-sub-form') {
+    event.preventDefault();
+    const input = document.getElementById('proxy-sub-url');
+    const statusLine = document.getElementById('proxy-sub-status');
+    const button = event.target.querySelector('button[type="submit"]');
+    if (!input || !button) return;
+    const url = input.value.trim();
+    if (!url) { toast('先填一个订阅地址', true); return; }
+    button.disabled = true;
+    button.textContent = '正在拉取…';
+    const sub = subState();
+    if (statusLine) { statusLine.hidden = false; statusLine.classList.remove('is-bad'); statusLine.textContent = '正在拉取订阅…'; }
+    try {
+      const result = await proxyCoreCommand('sub?url=' + encodeURIComponent(url));
+      if (result.ok === false) throw new Error(result.error || '订阅没拉到');
+      // 换了订阅，上一次的测速结果整套作废 —— 下标对不上了。
+      state.proxySub = { url: result.url || url, count: result.count || 0,
+                         summary: result.summary || '', speedNote: '', speed: [], testing: false, busy: false };
+      renderProxySettingsKeepScroll();
+      toast('拉到 ' + (result.count || 0) + ' 个节点');
+    } catch (problem) {
+      if (statusLine) { statusLine.hidden = false; statusLine.classList.add('is-bad'); statusLine.textContent = problem.message; }
+      button.disabled = false;
+      button.textContent = '拉取节点';
+    }
+    return;
+  }
+  const subAction = event.target.closest('[data-proxy-sub]');
+  if (subAction) {
+    const sub = subState();
+    if (sub.busy) return;
+    sub.busy = true;
+    sub.testing = true;
+    sub.speedNote = '正在测速，最多 20 秒…';
+    sub.speed = [];
+    renderProxySettingsKeepScroll();
+    try {
+      const result = await proxyCoreCommand('speed');
+      sub.busy = false;
+      sub.testing = false;
+      if (result.ok === false) throw new Error(result.error || '测速失败');
+      sub.speed = Array.isArray(result.nodes) ? result.nodes : [];
+      sub.count = result.total || sub.count;
+      sub.speedNote = `测了 ${result.total || 0} 个，通了 ${result.usable || 0} 个。点一行直接连。`;
+      renderProxySettingsKeepScroll();
+    } catch (problem) {
+      sub.busy = false;
+      sub.testing = false;
+      sub.speedNote = problem.message;
+      renderProxySettingsKeepScroll();
+    }
+    return;
+  }
+  const useNode = event.target.closest('[data-proxy-use]');
+  if (useNode) {
+    const index = useNode.dataset.proxyUse;
+    useNode.disabled = true;
+    try {
+      const status = await proxyCoreCommand('use?index=' + encodeURIComponent(index));
+      if (status.ok === false) throw new Error(status.error || '这个节点没连上');
+      applyProxyCore(status);
+      toast(status.running ? '已连接 ' + (status.host || '') : '已切换');
+    } catch (problem) {
+      toast(problem.message, true);
+      useNode.disabled = false;
     }
     return;
   }

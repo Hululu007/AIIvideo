@@ -801,3 +801,14 @@ html[data-theme=dark] #setup-overlay .setup-market-copy small{color:#98989f}
 .settings-player .field-hint.is-bad{color:#c0392b;font-weight:600}
 html[data-theme=dark] .settings-player .field-hint.is-live{color:#4ade80}
 html[data-theme=dark] .settings-player .field-hint.is-bad{color:#ff6b5e}
+
+/* 测速结果列表。一行一个节点，左边延迟右边机器。
+   用 button 而不是 div：整行可点就是「连这个」，语义上该是可聚焦控件。 */
+.speed-list{display:flex;flex-direction:column;gap:6px;margin:0 0 10px}
+.speed-item{display:flex;align-items:center;gap:10px;min-height:42px;padding:0 12px;
+  border:1px solid rgba(127,127,127,.35);border-radius:12px;background:transparent;
+  color:inherit;font:inherit;font-size:13px;text-align:left;width:100%}
+.speed-item[disabled]{opacity:.4}
+.speed-ms{flex:0 0 auto;min-width:56px;font-variant-numeric:tabular-nums;font-weight:600;color:#1f9d55}
+html[data-theme=dark] .speed-ms{color:#4ade80}
+.speed-node{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

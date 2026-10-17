@@ -270,6 +270,34 @@ public final class ProxyCore {
     }
 
     /**
+     * 对**任意一个节点**测一次，不碰正在跑的核心。
+     *
+     * 这是批量测速要用的：一个进程只有一个核心实例，如果为了测 50 个节点
+     * 反复 start/stop，一是慢（每个都要起停），二是会把用户正在用的那条
+     * 打断。AAR 的 measureOutboundDelay 是「拿配置和 URL 单独连一次」，
+     * 和运行中的核心互不干扰，正好是这里要的语义。
+     *
+     * 失败一律返回 -1，不抛：测速失败是常态（免费节点大半不通），
+     * 抛异常只会让调用方每个节点都写一遍 try。
+     *
+     * @param timeoutSeconds 超时秒数。AAR 内部固定 12 秒，这个参数只是先做
+     *                       一次可用性判断（免得排到队尾的节点还白等）。
+     * @return 往返毫秒；-1 表示不通或超时
+     */
+    static long probe(XrayConfig.Node node, String url, int timeoutSeconds) {
+        if (node == null) return -1L;
+        try {
+            // 端口随便给一个 —— 这份配置只用来发起一次出站连接，
+            // 它的 inbound 根本不会被监听。给 0 会被 Xray 判非法，所以给个高位端口。
+            String config = XrayConfig.buildString(node, 20480);
+            String target = url == null || url.isEmpty() ? PROBE_URL : url;
+            return Libv2ray.measureOutboundDelay(config, target);
+        } catch (Throwable e) {
+            return -1L;
+        }
+    }
+
+    /**
      * 上下行累计字节。key 用 "proxy" 这个 outbound tag —— Xray 的统计名是
      * {@code <tag>>>>} 与 {@code <tag><<<}，这里按 AAR 的 queryStats(tag, direct)
      * 约定传即可。

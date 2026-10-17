@@ -19,6 +19,7 @@ import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -1992,6 +1993,8 @@ public final class UserSource {
     private static final String PROXY_STORE = "aii-proxy-core";
     private static final String CORE_MODE_KEY = "mode";
     private static final String CORE_LINK_KEY = "link";
+    /** 上次导入的订阅地址。重进设置页不用再粘一遍。 */
+    private static final String SUB_URL_KEY = "subUrl";
 
     static final String MODE_DIRECT = "direct";
     static final String MODE_BUILTIN = "builtin";
@@ -2039,6 +2042,9 @@ public final class UserSource {
             if ("test".equals(action)) return proxyTest(context, out);
             if ("mode".equals(action)) return proxyMode(context, param(query, "value"), out);
             if ("boot".equals(action)) return proxyBoot(context, out);
+            if ("sub".equals(action)) return proxySubscribe(context, param(query, "url"), out);
+            if ("speed".equals(action)) return proxySpeed(context, out);
+            if ("use".equals(action)) return proxyUse(context, param(query, "index"), out);
             return fail(out, "不认识的代理指令：" + action);
         } catch (Throwable e) {
             return fail(out, "代理指令失败：" + e.getClass().getSimpleName() + " " + e.getMessage());
@@ -2231,6 +2237,180 @@ public final class UserSource {
             proxyStart(context, "", "", new JSONObject());
         }
         return proxyStatus(context, out);
+    }
+
+    // ── 订阅与测速 ────────────────────────────────────────────────────
+    //
+    // 这一段是给「没有机场的人」准备的：粘一个订阅地址，App 拉下来自己测速，
+    // 挑最快的连上。有机场的人直接用 start?link= 那条，不经这里。
+
+    /**
+     * 缓存下来的测速结果。
+     *
+     * 只放内存不放盘：节点是随时会失效的东西，昨天测出来的「12ms 最快」
+     * 今天可能已经连不上了。持久化它只会让用户下次看到一个过期排序，
+     * 然后点进去转圈。
+     */
+    private static volatile List<SpeedTest.Item> lastSpeedTest;
+    private static volatile String lastSubUrl = "";
+
+    /**
+     * 拉订阅并解析，返回节点列表（**不测速**）。
+     *
+     * 为什么和测速分成两条命令：拉订阅是必成的（几秒），测速是可选的
+     * （20 秒上限）。合在一起的话用户想「先看看有多少个节点」也得等 20 秒。
+     */
+    private static JSONObject proxySubscribe(Context context, String url, JSONObject out) throws Exception {
+        String target = url == null ? "" : url.trim();
+        if (target.length() == 0) {
+            // 没给地址就用上次的。设置页重进一次不用再粘一遍。
+            target = proxyStore(context).getString(SUB_URL_KEY, "");
+            if (target == null) target = "";
+        }
+        if (target.length() == 0) {
+            return fail(out, "还没有订阅地址");
+        }
+
+        Subscription.Result parsed;
+        try {
+            parsed = Subscription.fetch(target, 20);
+        } catch (Throwable e) {
+            String m = e.getMessage();
+            out.put("ok", false);
+            out.put("error", m == null || m.isEmpty() ? "订阅拉取失败" : m);
+            out.put("url", target);
+            return out;
+        }
+
+        if (parsed.size() == 0) {
+            out.put("ok", false);
+            out.put("error", parsed.firstError == null
+                    ? "订阅里没有可用的节点" : parsed.firstError);
+            out.put("url", target);
+            return out;
+        }
+
+        proxyStore(context).edit().putString(SUB_URL_KEY, target).apply();
+        lastSubUrl = target;
+        // 换了订阅，旧的测速结果整套作废 —— 下标对不上了，留着只会让 use 用错节点。
+        lastSpeedTest = null;
+
+        log("订阅 " + target.substring(0, Math.min(50, target.length()))
+                + " → " + Subscription.summary(parsed));
+
+        out.put("ok", true);
+        out.put("url", target);
+        out.put("count", parsed.size());
+        out.put("failed", parsed.failed);
+        out.put("summary", Subscription.summary(parsed));
+        // 只回「哪台机器 + 协议」，不回 uuid/密码。
+        out.put("nodes", describeNodes(parsed));
+        return out;
+    }
+
+    /** 节点列表的脱敏形态。这份答复会进 logcat，所以不带凭据。 */
+    private static JSONArray describeNodes(Subscription.Result parsed) throws Exception {
+        JSONArray list = new JSONArray();
+        for (int i = 0; i < parsed.size(); i++) {
+            JSONObject item = new JSONObject();
+            item.put("index", i);
+            item.put("node", parsed.nodes.get(i).describe());
+            item.put("protocol", parsed.nodes.get(i).protocol);
+            list.put(item);
+        }
+        return list;
+    }
+
+    /**
+     * 对上次拉到的订阅里的节点批量测速。
+     *
+     * 结果按下标返回，`use?index=N` 用的就是这个下标。
+     * **不用排序后的下标** —— 排序只是给 UI 看的建议顺序，下标一旦被排序
+     * 打乱，前端拿它回查就会错位。
+     */
+    private static JSONObject proxySpeed(Context context, JSONObject out) throws Exception {
+        Subscription.Result parsed;
+        try {
+            String target = proxyStore(context).getString(SUB_URL_KEY, "");
+            if (target == null || target.length() == 0) {
+                return fail(out, "先导入订阅再测速");
+            }
+            parsed = Subscription.fetch(target, 20);
+        } catch (Throwable e) {
+            String m = e.getMessage();
+            out.put("ok", false);
+            out.put("error", m == null || m.isEmpty() ? "订阅拉取失败" : m);
+            return out;
+        }
+        if (parsed.size() == 0) return fail(out, "订阅里没有可用的节点");
+
+        // 数量必须限量，因为测速是**串行**的（并发会互相踩断，见 SpeedTest 的注释）。
+        // 12 个 × 3 秒封顶 = 36 秒，落在 20 秒上限内能测完的最多是 6~7 个，
+        // 但大多数节点会提前返回（通的 1~2 秒、死的立刻 connection refused），
+        // 实际能覆盖到 10 个上下。
+        //
+        // 为什么不是全测：400 个串行要十几分钟。用户要的是「几个能用的」，
+        // 不是一份完整体检报告。取前 12 个已经能覆盖绝大多数情况。
+        int limit = Math.min(parsed.size(), 12);
+        List<XrayConfig.Node> nodes = parsed.nodes.subList(0, limit);
+        List<String> links = parsed.links.subList(0, limit);
+
+        List<SpeedTest.Item> items = SpeedTest.run(nodes, links, null, null);
+        SpeedTest.sortBySpeed(items);
+        lastSpeedTest = items;
+
+        int usable = 0;
+        JSONArray arr = new JSONArray();
+        for (SpeedTest.Item item : items) {
+            if (item.ok()) usable++;
+            JSONObject o = new JSONObject();
+            o.put("index", item.index);
+            o.put("node", item.node.describe());
+            o.put("protocol", item.node.protocol);
+            o.put("ms", item.ms);
+            o.put("ok", item.ok());
+            o.put("error", item.error);
+            arr.put(o);
+        }
+
+        log("测速完成：" + usable + "/" + items.size() + " 可用");
+
+        out.put("ok", true);
+        out.put("total", items.size());
+        out.put("usable", usable);
+        out.put("nodes", arr);
+        return out;
+    }
+
+    /**
+     * 用测速结果里某个下标的节点起核心。
+     *
+     * 下标是 `speed` 返回的那个 `index`，不是排序位置。
+     * 找不到就明说，别静默什么都不做 —— 用户点了没反应最难受。
+     */
+    private static JSONObject proxyUse(Context context, String indexText, JSONObject out) throws Exception {
+        List<SpeedTest.Item> items = lastSpeedTest;
+        if (items == null || items.isEmpty()) {
+            return fail(out, "还没有测速结果，先测一次");
+        }
+        int index;
+        try {
+            index = Integer.parseInt(indexText == null ? "" : indexText.trim());
+        } catch (NumberFormatException e) {
+            return fail(out, "节点下标不是数字");
+        }
+        SpeedTest.Item hit = null;
+        for (SpeedTest.Item item : items) {
+            if (item.index == index) {
+                hit = item;
+                break;
+            }
+        }
+        if (hit == null) return fail(out, "这个下标不在测速结果里");
+        if (!hit.ok()) return fail(out, "这个节点没测通，换一个");
+        if (hit.link == null || hit.link.length() == 0) return fail(out, "这个节点没有原始链接");
+
+        return proxyStart(context, hit.link, null, out);
     }
 
     /** 前端的 node JSON → XrayConfig.Node。字段名和 XrayConfig 前向生成时一致。 */

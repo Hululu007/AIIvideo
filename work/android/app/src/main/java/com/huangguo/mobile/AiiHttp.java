@@ -8,6 +8,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.IOException;
+import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
@@ -606,6 +607,41 @@ public final class AiiHttp {
     /**
      * 带自定义头的朴素 GET。播放层解析要用它取播放页（对面按 User-Agent 分流）。
      */
+    /**
+     * 一次性拉取（订阅用）。**不复用连接池**。
+     *
+     * 2026-10-18 实测：同一条网络，设备上 curl 1.5 秒拿到 52KB，而走
+     * plainClient 的请求卡满 20 秒后 Read timed out。普通 GET 都正常，
+     * 只有这个 CDN 的地址会挂 —— 高度怀疑是 OkHttp 连接池里挂着一条
+     * 已死的链路（那个域名的 keep-alive 很短），复用它就一直等。
+     *
+     * 所以这里每次 new 一个 client、并且禁掉连接池复用。代价是一次额外的
+     * TLS 握手，换的是「一定不会踩到死连接」。订阅一天拉不了几次，
+     * 这点开销无所谓。
+     */
+    public static byte[] getOnce(String url, int timeoutSeconds) throws Exception {
+        Request request = new Request.Builder().url(url)
+                .header("Accept-Encoding", "identity")
+                .header("Connection", "close")
+                .build();
+        OkHttpClient one = new OkHttpClient.Builder()
+                .connectTimeout(Math.min(timeoutSeconds, 15), TimeUnit.SECONDS)
+                .readTimeout(timeoutSeconds, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(false)
+                .dns(IPV4_FIRST)
+                .build();
+        Response response = one.newCall(request).execute();
+        try {
+            if (!response.isSuccessful()) throw new IOException("HTTP " + response.code() + " @ " + hostOfUrl(url));
+            ResponseBody body = response.body();
+            return body == null ? new byte[0] : body.bytes();
+        } finally {
+            response.close();
+            one.dispatcher().executorService().shutdown();
+            one.connectionPool().evictAll();
+        }
+    }
+
     public static byte[] getRaw(String url, java.util.Map<String, String> headers, int timeoutSeconds) throws Exception {
         Request.Builder builder = new Request.Builder().url(url).header("Accept-Encoding", "identity");
         if (headers != null) {
@@ -712,16 +748,25 @@ public final class AiiHttp {
      */
     private static volatile OkHttpClient plainClient;
     private static volatile String plainAppliedEffective = null;
+    private static volatile int plainAppliedTimeout = -1;
 
     private static OkHttpClient plainClient(int timeoutSeconds) {
         final String want = effectiveProxy();
         OkHttpClient existing = plainClient;
-        if (existing != null && want.equals(plainAppliedEffective)) return existing;
+        // 判据里必须带上超时：只比代理串的话，第一个请求用几秒建的实例会被后面
+        // 所有不同超时的请求复用，传进来的 timeoutSeconds 等于没生效。
+        if (existing != null && want.equals(plainAppliedEffective)
+                && timeoutSeconds == plainAppliedTimeout) {
+            return existing;
+        }
         synchronized (AiiHttp.class) {
-            if (plainClient == null || !want.equals(plainAppliedEffective)) {
+            if (plainClient == null || !want.equals(plainAppliedEffective)
+                    || timeoutSeconds != plainAppliedTimeout) {
                 OkHttpClient.Builder builder = new OkHttpClient.Builder()
                         .connectTimeout(timeoutSeconds, TimeUnit.SECONDS)
-                        .readTimeout(timeoutSeconds, TimeUnit.SECONDS);
+                        .readTimeout(timeoutSeconds, TimeUnit.SECONDS)
+                        // [A/B] 临时去掉，对照是否 IPV4_FIRST 导致阻塞
+                        ;
                 Route route = parseProxy(want);
                 if (route != null) {
                     builder.proxy(route.proxy);
@@ -729,10 +774,44 @@ public final class AiiHttp {
                 }
                 plainClient = builder.build();
                 plainAppliedEffective = want;
+                plainAppliedTimeout = timeoutSeconds;
             }
             return plainClient;
         }
     }
+
+    /**
+     * IPv4 优先的 DNS。
+     *
+     * ── 为什么需要它 ──────────────────────────────────────────────────
+     * 2026-10-18 实测：这台机器（MIUI / Android 16 / 双卡）的网络上报给 App 的
+     * 默认路由是 **IPv6 单栈**（`::/0`，没有 IPv4 默认路由），而系统 DNS 仍然
+     * 同时返回 A 和 AAAA 记录。于是 OkHttp 拿到一个 AAAA 会去连 IPv6，本机没有
+     * IPv6 出口 → 连接一直挂到超时。
+     *
+     * 同一时刻 `curl -4` 3 秒拿到 200，`curl -6` 立刻 000 —— curl 有 Happy
+     * Eyeballs 会自动降级到 IPv4，而 OkHttp 这一版在单栈环境下不会。
+     *
+     * 表现是「订阅一直拉不下来，报 Read timed out」，看起来像网速问题，
+     * 实际上一个字节都没传。这种问题时有时无（换 WiFi 就好了），极难复现，
+     * 所以在这里钉死：**解析结果里只要有 IPv4，就只用 IPv4**。
+     *
+     * 只有 IPv6 的站点依然是可用的（列表为空时才退回原样），不影响纯 v6 环境。
+     */
+    private static final Dns IPV4_FIRST = new Dns() {
+        @Override
+        public List<InetAddress> lookup(String hostname) throws UnknownHostException {
+            List<InetAddress> all = Dns.SYSTEM.lookup(hostname);
+            if (all == null || all.isEmpty()) return all;
+            List<InetAddress> v4 = new ArrayList<InetAddress>(all.size());
+            for (int i = 0; i < all.size(); i++) {
+                InetAddress address = all.get(i);
+                if (address instanceof Inet4Address) v4.add(address);
+            }
+            // 一个 IPv4 都没有（纯 IPv6 站点 / v6-only 网络）就原样返回。
+            return v4.isEmpty() ? all : v4;
+        }
+    };
 
     /** plain 客户端的 HTTP/1.1 变体，用途同上：h2 被掐时的兜底。 */
     private static volatile OkHttpClient plainHttp1;
