@@ -429,8 +429,8 @@ public class ProxyCoreTest {
     @Test
     public void 不认识的分享链接报错() throws Exception {
         try {
-            XrayConfig.parseShareLink("trojan://pass@1.2.3.4:443");
-            fail("目前只认 vmess:// 与 ss://");
+            XrayConfig.parseShareLink("hysteria2://pass@1.2.3.4:443");
+            fail("hysteria2 不在支持列表里");
         } catch (IllegalArgumentException expected) {
             assertTrue(expected.getMessage().contains("vmess"));
         }

@@ -72,6 +72,13 @@ final class XrayConfig {
         String host;
         /** 指纹：chrome / firefox / safari / randomized … */
         String fingerprint;
+        /**
+         * reality 的公钥（分享链接里叫 pbk）。**没有它 reality 起不来** ——
+         * 客户端要靠它验证服务端临时密钥，缺了 Xray 会拒绝启动或在握手时失败。
+         */
+        String publicKey;
+        /** reality 的 shortId（链接里叫 sid）。老版本可空，新版本多数会给。 */
+        String shortId;
         /** vless / trojan 的流控，透传。 */
         String flow;
         /** grpc 的 serviceName。 */
@@ -295,7 +302,9 @@ final class XrayConfig {
             // libgojni.so 里 reality 只有 1 处字符串命中，八成是残缺实现。
             // 字段照摆，但不做任何「能用」的承诺。
             JSONObject reality = new JSONObject()
-                    .put("serverName", empty(node.host) ? node.server : node.host);
+                    .put("serverName", empty(node.host) ? node.server : node.host)
+                    .put("publicKey", empty(node.publicKey) ? "" : node.publicKey)
+                    .put("shortId", empty(node.shortId) ? "" : node.shortId);
             if (!empty(node.fingerprint)) reality.put("fingerprint", node.fingerprint);
             stream.put("realitySettings", reality);
         }
@@ -376,8 +385,255 @@ final class XrayConfig {
         String lower = text.toLowerCase(Locale.ROOT);
         if (lower.startsWith("vmess://")) return parseVmess(text.substring(8));
         if (lower.startsWith("ss://")) return parseShadowsocks(text.substring(5));
-        throw new IllegalArgumentException("只认 vmess:// 与 ss:// 分享链接");
+        if (lower.startsWith("vless://")) return parseVless(text.substring(8));
+        if (lower.startsWith("trojan://")) return parseTrojan(text.substring(9));
+        // 裸代理地址（不是节点链接，是「直接可用的代理」）：http://user:pass@h:p
+        // 和 socks5://h:p 这两种。免费订阅里这类不少，它们本来就能直接用。
+        if (lower.startsWith("socks5://")) return parseBareProxy("socks", text.substring(9));
+        if (lower.startsWith("socks://")) return parseBareProxy("socks", text.substring(8));
+        if (lower.startsWith("http://")) return parseBareProxy("http", text.substring(7));
+        if (lower.startsWith("https://")) return parseBareProxy("http", text.substring(8));
+        throw new IllegalArgumentException(
+                "认不出这个链接。支持 vmess:// 、vless:// 、trojan:// 、ss:// ，"
+                        + "以及 http(s):// 与 socks5:// 形式的裸代理地址");
     }
+
+    /**
+     * vless://uuid@host:port?encryption=none&security=tls&type=ws&path=/x&host=a.com&sni=...
+     *
+     * 和 trojan 共用一个 URL 解析器：两者形状完全一样（userinfo@host:port + query），
+     * 差别只在 userinfo 是 uuid 还是密码、以及默认端口不同。
+     *
+     * **userinfo 要原样保留**：vless 的 uuid 里没有特殊字符，但 trojan 的密码可能
+     * 带 @ 或 :（已经 percent-encode 过），交给 URI 解开比手工切字符串可靠。
+     */
+    private static Node parseVless(String body) throws JSONException {
+        return parseUrlStyle("vless", body, 443);
+    }
+
+    /**
+     * 裸代理地址：`[user:pass@]host:port`。
+     *
+     * 和上面那些「节点链接」的区别：这些是**已经能直接用的代理**，不需要额外
+     * 协议协商。免费订阅里成片出现（`http://1234:1234@1.2.3.4:2080` 那种）。
+     *
+     * 用户名密码是可选的，写法按「最后一个 @ 切」—— 和 vless/trojan 一致。
+     * 注意这里**不认 query**：这类地址后缀上的 ?xxx 是机场标签，不是参数。
+     */
+    private static Node parseBareProxy(String protocol, String body) {
+        String text = body;
+
+        int hash = text.indexOf('#');
+        if (hash >= 0) text = text.substring(0, hash);
+        int qmark = text.indexOf('?');
+        if (qmark >= 0) text = text.substring(0, qmark);
+        // 有些人会在末尾带一个多余斜杠
+        while (text.endsWith("/")) text = text.substring(0, text.length() - 1);
+
+        String user = null;
+        String pass = "";
+        int at = text.lastIndexOf('@');
+        if (at > 0) {
+            String cred = percentDecode(text.substring(0, at));
+            text = text.substring(at + 1);
+            int sep = cred.indexOf(':');
+            if (sep < 0) {
+                user = cred;
+            } else {
+                user = cred.substring(0, sep);
+                pass = cred.substring(sep + 1);
+            }
+            if (empty(user)) throw new IllegalArgumentException(protocol + " 代理地址的用户名是空的");
+        }
+
+        int colon = text.lastIndexOf(':');
+        if (colon <= 0) throw new IllegalArgumentException(protocol + " 代理地址缺端口");
+        String host = text.substring(0, colon).trim();
+        int port;
+        try {
+            port = Integer.parseInt(text.substring(colon + 1).trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(protocol + " 代理地址端口不是数字");
+        }
+        if (host.isEmpty()) throw new IllegalArgumentException(protocol + " 代理地址缺主机");
+        if (port <= 0 || port > 65535) throw new IllegalArgumentException(protocol + " 代理地址端口越界：" + port);
+
+        Node node = new Node(protocol, host, port);
+        // userServer() 把 uuid 当 username、method 当 password 填进去，
+        // 和 socks/http 出站的字段布局正好对上。
+        if (user != null) {
+            node.uuid = user;
+            node.method = pass;
+        }
+        return node;
+    }
+
+    /**
+     * vless / trojan 共用的解析：`userinfo@host:port?query#备注`。
+     *
+     * **不能用 java.net.URI。** 机场链接里的密码常常带 @ : # ? 这些字符（虽然有
+     * 的会 percent-encode、有的不会），URI 遇到没转义的 @ 会直接抛 URISyntaxException，
+     * 或者把 host 解析成前半截。所以这里手工切，规则是：
+     *
+     *   1. 先切掉 # 后面的备注
+     *   2. 再切掉 ? 后面的 query
+     *   3. **从右往左找最后一个 @** —— 密码里带 @ 是常见情况（如 p@ss），
+     *      而 host 部分不可能含 @，所以最后一个 @ 一定是分隔符
+     *   4. 剩下的 host:port 从右往左找最后一个 :
+     *
+     * 这套和上面 parseShadowsocks 用的是同一个思路，保持一致。
+     */
+    private static Node parseUrlStyle(String protocol, String body, int defaultPort) throws JSONException {
+        String text = body;
+
+        int hash = text.indexOf('#');
+        if (hash >= 0) text = text.substring(0, hash);
+
+        String query = "";
+        int qmark = text.indexOf('?');
+        if (qmark >= 0) {
+            query = text.substring(qmark + 1);
+            text = text.substring(0, qmark);
+        }
+
+        int at = text.lastIndexOf('@');
+        if (at <= 0) throw new IllegalArgumentException(protocol + " 链接缺 uuid/密码");
+        String userInfo = percentDecode(text.substring(0, at));
+        if (empty(userInfo)) throw new IllegalArgumentException(protocol + " 链接缺 uuid/密码");
+
+        String hostPort = text.substring(at + 1);
+        int colon = hostPort.lastIndexOf(':');
+        if (colon <= 0) throw new IllegalArgumentException(protocol + " 链接缺端口");
+        String host = hostPort.substring(0, colon).trim();
+        int port;
+        try {
+            port = Integer.parseInt(hostPort.substring(colon + 1).trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(protocol + " 链接端口不是数字");
+        }
+        if (host.isEmpty()) throw new IllegalArgumentException(protocol + " 链接缺服务器地址");
+        if (port <= 0 || port > 65535) throw new IllegalArgumentException(protocol + " 链接端口越界：" + port);
+
+        Node node = new Node(protocol, host, port > 0 ? port : defaultPort);
+        node.uuid = userInfo;
+        applyQuery(node, query);
+        return node;
+    }
+
+    /**
+     * 把 query 里的标准参数摊到 Node 上。
+     *
+     * 只认这些键（都是 vless/trojan/vmess 三家用同一套命名的）：
+     *   type            传输层 tcp/ws/grpc/h2
+     *   security        tls/none/reality（trojan 缺省按 tls）
+     *   path / host     ws、h2 用；host 同时兼作 SNI 缺省
+     *   sni             TLS 的 serverName，覆盖 host
+     *   fp              指纹
+     *   pbk / sid       reality 的公钥与 shortId
+     *   flow            vless 流控（xtls-rprx-vision 之类）
+     *   serviceName     grpc
+     *   alpn            暂不落字段，Xray 会用服务端协商
+     *
+     * 认不出的键直接忽略 —— 机场会塞一堆自家标签，报错反而不友好。
+     */
+    private static void applyQuery(Node node, String query) {
+        if (empty(query)) {
+            // trojan 几乎总是 TLS，而链接里通常不写 security。缺省补上，
+            // 否则生成出来的配置是明文连 443，连不上还看不出原因。
+            if ("trojan".equals(node.protocol)) node.tls = "tls";
+            return;
+        }
+        java.util.Map<String, String> q = new java.util.HashMap<String, String>();
+        for (String pair : query.split("&")) {
+            if (pair.isEmpty()) continue;
+            int eq = pair.indexOf('=');
+            if (eq <= 0) continue;
+            String k = percentDecode(pair.substring(0, eq)).toLowerCase(Locale.ROOT);
+            String v = percentDecode(pair.substring(eq + 1));
+            q.put(k, v);
+        }
+
+        String type = q.get("type");
+        if (!empty(type)) node.network = normalize(type);
+
+        String security = q.get("security");
+        if (!empty(security)) {
+            node.tls = normalize(security);
+        } else if ("trojan".equals(node.protocol)) {
+            node.tls = "tls";
+        }
+
+        String path = q.get("path");
+        if (!empty(path)) node.path = path;
+
+        String host = q.get("host");
+        if (!empty(host)) node.host = host;
+
+        String sni = q.get("sni");
+        if (!empty(sni)) node.host = sni;
+
+        String fp = q.get("fp");
+        if (!empty(fp)) node.fingerprint = fp;
+
+        String pbk = q.get("pbk");
+        if (!empty(pbk)) node.publicKey = pbk;
+
+        String sid = q.get("sid");
+        if (!empty(sid)) node.shortId = sid;
+
+        String flow = q.get("flow");
+        if (!empty(flow)) node.flow = flow;
+
+        // 键在上面统一转成了小写，这里必须用小写键取 —— 写成 serviceName 永远拿不到。
+        String serviceName = q.get("servicename");
+        if (!empty(serviceName)) node.serviceName = serviceName;
+
+        // grpc 有时把 serviceName 写在 path 上（vmess 那套习惯），兼容一下。
+        if ("grpc".equals(node.network) && empty(node.serviceName) && !empty(node.path) && !"/".equals(node.path)) {
+            node.serviceName = node.path;
+        }
+    }
+
+    /**
+     * 只解开 %XX，**不碰 +**。
+     *
+     * URLDecoder 会把 + 解成空格，这在 query 里符合
+     * application/x-www-form-urlencoded，但 trojan 的密码里 + 是真的加号，
+     * 解成空格就连不上了。机场链接里的路径和密码基本都是 percent-encode 的。
+     */
+    private static String percentDecode(String value) {
+        if (value == null || value.indexOf('%') < 0) return value;
+        try {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(value.length());
+            for (int i = 0; i < value.length(); i++) {
+                char c = value.charAt(i);
+                if (c == '%' && i + 2 < value.length()) {
+                    int hi = Character.digit(value.charAt(i + 1), 16);
+                    int lo = Character.digit(value.charAt(i + 2), 16);
+                    if (hi >= 0 && lo >= 0) {
+                        out.write((hi << 4) + lo);
+                        i += 2;
+                        continue;
+                    }
+                }
+                out.write(String.valueOf(c).getBytes(Charset.forName("UTF-8")));
+            }
+            return utf8(out.toByteArray());
+        } catch (Throwable e) {
+            return value;
+        }
+    }
+
+    /**
+     * trojan://password@host:port?security=tls&sni=...&type=ws&path=/x#备注
+     *
+     * trojan 强制 TLS，链接里通常不写 security 字段。这里不替用户补 ——
+     * 缺省按 tls 处理是在下面 parseUrlStyle 里统一做的（见 q("security") 那段）。
+     */
+    private static Node parseTrojan(String body) throws JSONException {
+        return parseUrlStyle("trojan", body, 443);
+    }
+
 
     private static Node parseVmess(String base64) throws JSONException {
         String json = utf8(base64Decode(base64));
