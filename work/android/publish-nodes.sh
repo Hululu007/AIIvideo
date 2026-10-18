@@ -73,7 +73,7 @@ UPDATED=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('up
 echo "提交并推送"
 cd "$REPO"
 git add "$FILE"
-git commit -q -m "免费节点池更新（$UPDATED）" || { echo "没有变化可提交。"; exit 0; }
+git commit -q -m "免费节点池更新（${UPDATED}）" || { echo "没有变化可提交。"; exit 0; }
 git push origin main
 
 echo

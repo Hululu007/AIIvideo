@@ -169,10 +169,20 @@ final class Endpoints {
                     + "/work/android/app/src/main/assets/free-nodes.json";
 
     static java.util.List<String> nodesUrls() {
+        // 2026-10-18：刚发布一份新节点池，结果手机上还是旧的 178 条。
+        // 查下来是 gh.dpik.top 这个镜像的缓存不认查询串（带 ?t= 也照样吐旧文件），
+        // 而它是候选里的第一个 —— 客户端「第一个成功的就用」，于是永远拿到旧的那份。
+        // gh-proxy.com 同一时刻已经是新的。
+        //
+        // 两处改动：
+        //   ① 顺序换成 gh-proxy 优先、dpik 次之 —— 缓存策略更规矩的那个放前面。
+        //   ② 每个地址带一个时间戳查询串：对认 query 的 CDN 能绕过缓存，
+        //      对不认的也没坏处。清单只有 50KB，多这一次请求可以忽略。
+        String bust = "?t=" + System.currentTimeMillis();
         java.util.List<String> urls = new java.util.ArrayList<String>(3);
-        urls.add(AKAMS_A + "/" + RAW_NODES);
-        urls.add(AKAMS_B + "/" + RAW_NODES);
-        urls.add(RAW_NODES);
+        urls.add(AKAMS_B + "/" + RAW_NODES + bust);
+        urls.add(AKAMS_A + "/" + RAW_NODES + bust);
+        urls.add(RAW_NODES + bust);
         return urls;
     }
 }
