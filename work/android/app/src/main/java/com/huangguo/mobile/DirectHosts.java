@@ -45,6 +45,68 @@ final class DirectHosts {
         HOSTS.put("149.104.21.177.sslip.io", "黄果 API_BASE（Endpoints.java）");
         HOSTS.put("cab3f.nt17g20k.cc",       "黄果 当前入口 origin");
         HOSTS.put("huangguoai.com",          "黄果 备用入口（被污染，DoH 兜着）");
+
+        // ── 樱花动漫（yhdm）的第三方采集站 CDN ────────────────────────
+        //
+        // 2026-10-18 实测（真机 7f8f5254，内置核心开在荷兰节点）：
+        // 这一族 CDN 全部是**国内直连更快、走外网节点反而 TLS 被掐**。
+        //
+        //   bfikuncdn.com      直连 200 / 走代理 200（但分片域 kkzycdn.com 走代理 000）
+        //   hn.bfvvs.com       直连 200 / 走代理 VARIANT_FAIL
+        //   hd.kuktxu.com      直连 200 / 走代理 VARIANT_FAIL
+        //   v1.ppqrrs.com      直连 403（根路径拒，真实路径可用）/ 走代理 MASTER_FAIL
+        //   v13.rstu6.com      直连 403 / 走代理 MASTER_FAIL
+        //   vod12.wgslsw.com   直连 403 / 走代理 MASTER_FAIL
+        //
+        // 症状和 AGE动漫 那轮一模一样：接口通、列表出来、点开播放 403 或
+        // SSLHandshakeException。区别只是这次是 12 条线路里 11 条被拖死。
+        //
+        // 站点换采集站比换域名勤，这张表注定不全 —— 所以适配器在挑线路时会
+        // 把**探测成功的分片域名**运行时补进来（见 YhdmAdapter#probeLine），
+        // 这里留的是常见的那批，省掉每集的探测开销。
+        String[][] yhdmCdn = {
+            { "bfikuncdn.com",  "樱花 线路 ikzy 主列表 + 分片" },
+            { "kkzycdn.com",    "樱花 ikzy 的分片域（:65 端口）" },
+            { "modujx17.com",   "樱花 线路 mdzy（主 + 分片）" },
+            { "bfvvs.com",      "樱花 线路 hnzy" },
+            { "kuktxu.com",     "樱花 线路 jyzy" },
+            { "jisuzyv.com",    "樱花 线路 jszy" },
+            { "lzcdn31.com",    "樱花 线路 lzzy" },
+            { "ffzy-plays.com", "樱花 线路 ffzy" },
+            { "xluuss.com",     "樱花 线路 xlzy" },
+            { "gsuus.com",      "樱花 线路 gszy" },
+            { "gszyi.com",      "樱花 gszy 的分片域（:999 端口）" },
+            { "ukubf3.com",     "樱花 线路 ukzy" },
+            { "ppqrrs.com",     "樱花 线路 wjzy2" },
+            { "rstu6.com",      "樱花 线路 snzy" },
+            { "wgslsw.com",     "樱花 线路 yhzy" },
+            { "feifei-play.com","樱花 线路 ffzy 的镜像" },
+        };
+        for (String[] row : yhdmCdn) HOSTS.put(row[0], row[1]);
+    }
+
+    /**
+     * 运行时补一条直连域名。
+     *
+     * 为什么要动态：樱花动漫的播放地址来自十几个第三方采集站，域名随线路轮换，
+     * 静态表永远追不上。适配器在挑线路时会实测每个分片域名「直连能不能拿到
+     * 字节」，能就把域名扔进来 —— 之后 VlcRelay.wrap 见到它直接返回 null
+     * （VLC 自己去连，连本地中继那一跳都省了），AiiHttp 也不再给它挂代理。
+     *
+     * 只加不减：一次探测通过不代表永远通，但不加一定慢/不通。判断成本远高于
+     * 误判成本，所以宁可留着。
+     *
+     * 注意 **Xray 的 routing 规则是核心启动时生成的**，这里加的条目对内置核心
+     * 那条出口不生效 —— 但没关系：VlcRelay 见到直连域名会绕开中继、VLC 直接连
+     * 目标，本来就不过 Xray。
+     */
+    static void add(String host, String why) {
+        if (host == null) return;
+        String h = host.toLowerCase().trim();
+        if (h.length() == 0) return;
+        synchronized (HOSTS) {
+            if (!HOSTS.containsKey(h)) HOSTS.put(h, why);
+        }
     }
 
     private DirectHosts() {}
@@ -53,7 +115,11 @@ final class DirectHosts {
     static boolean isDirect(String host) {
         if (host == null || host.length() == 0) return false;
         String h = host.toLowerCase().trim();
-        for (String entry : HOSTS.keySet()) {
+        // 快照遍历：适配器会在别的线程 add()，直接遍历 keySet 会撞
+        // ConcurrentModificationException（这张表以前是只读的，现在不是了）。
+        java.util.List<String> snapshot;
+        synchronized (HOSTS) { snapshot = new java.util.ArrayList<>(HOSTS.keySet()); }
+        for (String entry : snapshot) {
             if (h.equals(entry) || h.endsWith("." + entry)) return true;
         }
         return false;
@@ -62,7 +128,9 @@ final class DirectHosts {
     /** 生成 Xray routing 用的 domain: 规则值列表（Xray 自带子域匹配语义）。 */
     static java.util.List<String> domainRules() {
         java.util.List<String> rules = new java.util.ArrayList<>();
-        for (String entry : HOSTS.keySet()) rules.add("domain:" + entry);
+        synchronized (HOSTS) {
+            for (String entry : HOSTS.keySet()) rules.add("domain:" + entry);
+        }
         return rules;
     }
 }

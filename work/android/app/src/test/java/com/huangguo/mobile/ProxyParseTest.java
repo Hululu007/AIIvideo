@@ -6,7 +6,7 @@ import static org.junit.Assert.assertNull;
 import org.junit.Test;
 
 /**
- * AiiHttp.parseProxy() 的单元测试：把各种代理串喂进去，看谁能过。
+ * {@link ProxyRoute#parse} 的单元测试：把各种代理串喂进去，看谁能过。
  *
  * 这个函数的产出直接决定了「设置里填的代理能不能用」。机场节点格式（ss / vmess /
  * vless / trojan / hysteria2 / tuic）目前**解析不出来**，返回 null，App 会提示
@@ -72,10 +72,14 @@ public class ProxyParseTest {
         assertNull(invoke("tuic://uuid:pass@1.2.3.4:443#node"));
     }
 
-    private static Object invoke(String value) throws Exception {
-        Class<?> type = Class.forName("com.huangguo.mobile.AiiHttp");
-        java.lang.reflect.Method method = type.getDeclaredMethod("parseProxy", String.class);
-        method.setAccessible(true);
-        return method.invoke(null, value);
+    /**
+     * 解析入口。
+     *
+     * 2026-10-18：`AiiHttp.parseProxy` 被抽成了 {@link ProxyRoute#parse} ——
+     * 代理从「字符串」变成了「值对象」，解析、挂认证、生成 {@link java.net.Proxy}
+     * 都收在那一个类里。用例跟着挪过去，断言不变：认不出来的返回 null。
+     */
+    private static Object invoke(String value) {
+        return ProxyRoute.parse(value).route;
     }
 }
