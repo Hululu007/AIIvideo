@@ -1,15 +1,15 @@
 {
-  "versionName": "1.0.26",
-  "tag": "v1.0.26",
-  "versionCode": 10026,
-  "apk": "AIIvideo-v1.0.26-release.apk",
+  "versionName": "1.0.30",
+  "tag": "v1.0.30",
+  "versionCode": 10030,
+  "apk": "AIIvideo-v1.0.30-release.apk",
   "urls": [
-    "https://gh-proxy.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.26/AIIvideo-v1.0.26-release.apk",
-    "https://ghfile.geekertao.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.26/AIIvideo-v1.0.26-release.apk",
-    "https://gh.dpik.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.26/AIIvideo-v1.0.26-release.apk",
-    "https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.26/AIIvideo-v1.0.26-release.apk"
+    "https://gh-proxy.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.30/AIIvideo-v1.0.30-release.apk",
+    "https://ghfile.geekertao.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.30/AIIvideo-v1.0.30-release.apk",
+    "https://gh.dpik.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.30/AIIvideo-v1.0.30-release.apk",
+    "https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.30/AIIvideo-v1.0.30-release.apk"
   ],
-  "sha256": "7b25d8de245ab49f54c1115be52591dcb32c0b12272dc94924d6bcc4207184f5",
-  "size": 48973975,
-  "notes": "修源市场清单的识别与报错：贴 market.json 这类清单时直接列出可勾选的源，不再先失败一次再猜形状；清单拉不下来时说清是超时、404 还是格式不对，而不是甩一句「认不出这是什么配置」。市场缩到 2 条影视线路。"
+  "sha256": "8f889271e6d0aa2b795f662bfdce602c9f03da12354ffb19f0ea9423da59d2b0",
+  "size": 48977795,
+  "notes": "91porn 修两个真 bug：详情页每次渲染换一部片（站点游客标记 ga 没带）、列表页封面标题跟详情对不上（网格页在乱写，改为拿详情页校正）。高清分类 0 部作品（卡片走 view_video_hd.php）。全部类型页 0 个标签（标签栏就是站点分类栏）。顺带修设置子页返回键、播放器退回详情残留启动页。"
 }
