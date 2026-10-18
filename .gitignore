@@ -31,10 +31,13 @@ work/chengzi-noads.apk
 # ── 第三方原始样本 ────────────────────────────────────────────────────
 # 这是**别人的应用**，不是这个项目的代码，提交上来等于二次分发。
 #
-# 但它是 clean 唯一的输入。想从零重建的话，自己放一份到
-# work/shells/chengzi-v0.3.15.apk（build.sh clean 找不到会明确告诉你）。
-# 不放也能用 —— 只是只有 fast 那条路，没有可复现证明。
+# 2026-10-18：这份样本和它产出的 cz-final.apk 一起删了（合计 72MB）。
+# apktool 链路退役之后它没有任何消费者 —— build.sh 没了，java-src 也没了，
+# 「从样本重建 cz_repack」这件事已经没有意义。
+# 规则留着：万一有人再往里放一份，至少不会被误提交。
 work/shells/chengzi-v0.3.15.apk
+work/shells/*.apk
+work/shells/*.keystore
 
 # ── 过程中的截图（25MB）───────────────────────────────────────────────
 # README 用的三张在 docs/shots/ 里。
