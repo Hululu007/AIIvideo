@@ -167,10 +167,12 @@ for (String str12 : (List<String>) linkedHashMap2.get(str9)) {
 
 `Text` / `Http` / `Ctl` / `Mime` / `Json` / `Constants` 都在同包下，已经写好了，不要改。
 
-**如果需要某个常量但本地类里没有**：去
-`/Users/zhaoruizhe/Desktop/project/T/hg/work/shells/cz_repack/smali*/<原包路径>/<类名>.smali`
-里 `grep 'field public static final 常量名'` 拿真实值，然后加到对应的本地类里。
-不要瞎猜值。
+**如果需要某个常量但本地类里没有**：原始 APK 已经不在树里了
+（`cz_repack/` 是 apktool 的解包产物，2026-10-18 前就删了，重建它需要
+`work/shells/chengzi-v0.3.15.apk` + `patches/`，而且 apktool 链路本身已退役）。
+所以现在只有两条路：从 `work/shells/chengzi-v0.3.15.apk` 里按需反编译那一个类，
+或者去 `patches/` 里找当时抄下来的值。**不要瞎猜值** —— 常量猜错的表现是
+运行时 403 或签名不对，和编译错误完全不同一种难查。
 
 `androidx.exifinterface` 如果被用到，加一行依赖到 `app/build.gradle.kts`：
 `implementation("androidx.exifinterface:exifinterface:1.3.7")`。

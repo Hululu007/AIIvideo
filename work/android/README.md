@@ -217,7 +217,7 @@ curl -s http://127.0.0.1:9222/json   # 取 webSocketDebuggerUrl
 skipped，不会红 —— 但也就等于没测。要跑完整版：
 
 ```bash
-cd ../shells/java-test/fixtures && python3 refresh.py
+cd ../shells/fixtures && python3 refresh.py
 cp *.html ../../../android/app/src/test/resources/
 ```
 
