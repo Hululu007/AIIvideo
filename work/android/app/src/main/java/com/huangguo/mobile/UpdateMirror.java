@@ -36,16 +36,54 @@ public final class UpdateMirror {
 
     private UpdateMirror() {}
 
-    /** 依次尝试（JSON 数组字符串），返回第一个拉得下来、且看着像 JSON 的文本。 */
+    /**
+     * 把清单的所有候选都拉一遍，返回 **versionCode 最大**的那份。
+     *
+     * ── 为什么不「第一个成功就用」──
+     * 2026-10-18 实测：发完 1.0.24，gh.dpik.top 那条还在吐 1.0.22（服务端缓存，
+     * **加时间戳查询串也绕不过**），另外两条已经是新版。按顺序取第一个的结果是
+     * 「发布了，但走这条镜像的用户永远看不到」—— 而且下个周期可能又读到同一份。
+     *
+     * 清单不到 1KB，全拉一遍挑最新的，代价可以忽略。
+     *
+     * 全部失败返回 null；任何一份不是合法 JSON 的直接跳过。
+     */
     public static String fetch(String urlsJson, int timeoutSeconds) {
         List<String> urls = parse(urlsJson);
+        List<String> bodies = new ArrayList<String>(urls.size());
         for (int i = 0; i < urls.size(); i++) {
             String body = read(urls.get(i), timeoutSeconds);
+            if (body != null) bodies.add(body);
+        }
+        return newestOf(bodies);
+    }
+
+    /**
+     * 从若干份候选清单里挑 versionCode 最大的那份。
+     *
+     * 抽成独立方法是为了能单测 —— 这一层出错的后果很隐蔽：不会报错，只会
+     * 让一部分用户永远收不到更新。网络那部分（read）交给真机验。
+     */
+    static String newestOf(List<String> bodies) {
+        String best = null;
+        long bestCode = -1;
+        for (int i = 0; i < bodies.size(); i++) {
+            String body = bodies.get(i);
             if (body == null) continue;
             String trimmed = body.trim();
-            if (trimmed.length() > 2 && trimmed.startsWith("{")) return body;
+            if (trimmed.length() <= 2 || !trimmed.startsWith("{")) continue;
+            long code;
+            try {
+                code = new org.json.JSONObject(trimmed).optLong("versionCode", 0L);
+            } catch (Throwable th) {
+                continue;
+            }
+            if (code > bestCode) {
+                bestCode = code;
+                best = body;
+            }
         }
-        return null;
+        return best;
     }
 
     /**
