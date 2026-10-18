@@ -737,6 +737,9 @@ public final class MainActivity extends Activity {
         this.requests.shutdownNow();
         this.localRequests.shutdownNow();
         this.coverRequests.shutdownNow();
+        // 站点侧那个隐藏 WebView（见 SiteFetchWebView）。它挂在 decor 上，
+        // 不销毁的话渲染进程会一直留着，定时器和视频缓冲都不退。
+        SiteFetchWebView.shutdown();
         WebView webView = this.webView;
         if (webView != null) {
             webView.removeJavascriptInterface("AndroidHost");

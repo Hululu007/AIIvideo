@@ -333,6 +333,17 @@ public final class AiiHttp {
         applyHeaders(builder, profile, url);
         // 不要压缩。这条链路本来就慢，多一次解压不值当，也让响应体大小可预期。
         builder.header("Accept-Encoding", "identity");
+        // 分流：直连表里的域名现拼一个不带代理的 client（client(profile) 是按
+        // 代理串缓存的，可能挂着内置核心的 SOCKS）。见 rawWith 同一段注释。
+        if (DirectHosts.isDirect(hostOfUrl(url))) {
+            OkHttpClient.Builder bypass = new OkHttpClient.Builder()
+                    .connectTimeout(http.connectTimeoutMillis(), TimeUnit.MILLISECONDS)
+                    .readTimeout(http.readTimeoutMillis(), TimeUnit.MILLISECONDS);
+            if (http.dispatcher() != null && http.dns() instanceof SmartDns) {
+                bypass.dns(http.dns());
+            }
+            http = bypass.build();
+        }
         Response response = http.newCall(builder.build()).execute();
         try {
             int code = response.code();
@@ -609,6 +620,17 @@ public final class AiiHttp {
      */
     private static byte[] rawWith(OkHttpClient http, Request request, String url,
                                   java.util.Map<String, String> cookieOut) throws Exception {
+        // 分流：直连表里的域名把代理摘掉。传进来的 client 可能已经挂着
+        // effectiveProxy（plainClient 是按代理串缓存的，不能改），所以命中时
+        // 现拼一个不带代理的 client —— 这类请求都是接口级、量不大，多 new 一次
+        // 可忽略；重要的事只有一个：绝不再进那条节点。
+        if (DirectHosts.isDirect(hostOfUrl(url))) {
+            OkHttpClient.Builder bypass = new OkHttpClient.Builder()
+                    .connectTimeout(http.connectTimeoutMillis(), TimeUnit.MILLISECONDS)
+                    .readTimeout(http.readTimeoutMillis(), TimeUnit.MILLISECONDS)
+                    .dns(IPV4_FIRST);
+            http = bypass.build();
+        }
         Response response = http.newCall(request).execute();
         try {
             if (cookieOut != null) {
@@ -659,7 +681,8 @@ public final class AiiHttp {
         // 下载都绕过了代理去直连 GitHub —— 国内基本不通，表现是「节点池更新失败：
         // Read timed out」和「订阅拉取失败：failed to connect ... from 192.168.x.x」。
         // 这两个功能恰恰是最需要代理的：它们下载的地址就在墙外。
-        Route route = parseProxy(effectiveProxy());
+        // 分流例外：直连表里的域名（AGE/黄果 这类）摘掉代理，理由见 rawWith。
+        Route route = DirectHosts.isDirect(hostOfUrl(url)) ? null : parseProxy(effectiveProxy());
         if (route != null) {
             oneBuilder.proxy(route.proxy);
             attachAuth(oneBuilder, route);
@@ -1067,6 +1090,29 @@ public final class AiiHttp {
             if (Character.isWhitespace(host.charAt(i))) return null;
         }
         return new Route(new Proxy(type, InetSocketAddress.createUnresolved(host, port)), user, pass);
+    }
+
+    /**
+     * 当前生效的 {@link java.net.Proxy}，供 {@link SiteFetchWebView} 用。
+     *
+     * <p><b>为什么 WebView 也要问这里</b>（2026-10-18 加 missav 时才发现的洞）：
+     * 隐藏 WebView 是**另一个网络栈**，OkHttp 的 {@code proxy()} 对它一点用没有。
+     * 而需要过 Cloudflare 的站点恰恰都是「国内直连不通、必须走代理」的那种
+     * （missav / mrds66 / hanime1 在源市场里都标着「需代理」）。所以 WebView
+     * 忘了挂代理 = 过盾那一步必然超时，而日志只会说「过盾超时」，看不出是网络不通。
+     *
+     * <p>返回 null 表示当前是直连，调用方就别去碰 {@code ProxyController}。
+     *
+     * <p>不把 {@link Route} 整个暴露出去的原因：它带账号密码，
+     * 而这个方法的返回值会进 logcat 附近的调试路径。
+     */
+    static java.net.Proxy effectiveJavaProxy() {
+        try {
+            Route route = parseProxy(effectiveProxy());
+            return route == null ? null : route.proxy;
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     /**

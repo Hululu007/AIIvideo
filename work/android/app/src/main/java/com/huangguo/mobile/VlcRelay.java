@@ -137,6 +137,12 @@ final class VlcRelay {
         if (originalUrl.startsWith("http://127.0.0.1:") || originalUrl.startsWith("http://localhost")) {
             return null;
         }
+        // 分流：直连表里的域名连中继都不用绕 —— VLC 自己拉原始地址就是直连，
+        // 绕一跳本地 OkHttp 纯属白费（而且 relayClient 如果不摘代理，反而把
+        // 直连域名又塞回那条节点，表就白挂了）。
+        try {
+            if (DirectHosts.isDirect(new java.net.URI(originalUrl).getHost())) return null;
+        } catch (Exception ignored) {}
         try {
             VlcRelay relay = ensure();
             if (relay.port() <= 0) return null;
@@ -154,12 +160,12 @@ final class VlcRelay {
     // 而且中文路径/%2B 这类会来回转义。base64url 字母表里没有 + / =，
     // 放进 query 不需要再编码，VLC 自己拼相对地址也不会踩到。
 
-    private static String encode(String s) {
+    static String encode(String s) {
         return java.util.Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(s.getBytes(StandardCharsets.UTF_8));
     }
 
-    private static String decode(String s) {
+    static String decode(String s) {
         try {
             return new String(java.util.Base64.getUrlDecoder().decode(s), StandardCharsets.UTF_8);
         } catch (Throwable e) {
@@ -208,6 +214,7 @@ final class VlcRelay {
 
     private void serve(Socket client) {
         Response response = null;
+        String original = null;
         try {
             client.setSoTimeout(IDLE_MS);
             client.setTcpNoDelay(true);
@@ -244,7 +251,7 @@ final class VlcRelay {
 
             String query = target.substring(PATH.length() + 1);
             String encoded = param(query, "u");
-            String original = encoded == null ? null : decode(encoded);
+            original = encoded == null ? null : decode(encoded);
             if (original == null || original.length() == 0) {
                 writeSimple(out, 400, "Bad target");
                 return;
@@ -259,9 +266,24 @@ final class VlcRelay {
                 return;
             }
 
+            // ── 过盾域名改走 WebView ──────────────────────────────────
+            //
+            // 2026-10-18 真机：surrit.com 的 playlist.m3u8 用 OkHttp（走代理、
+            // 带 Referer、强制 HTTP/1.1）一律 403 —— Cloudflare 的
+            // "Attention Required"，和 Mac 上 curl 的响应一模一样。而同一个
+            // 地址在站点 WebView 里 fetch 是 200，跨源、不带 cookie 也是 200。
+            // 差的是浏览器栈那一层（TLS 指纹/UA），OkHttp 改不了。
+            //
+            // 所以这一族域名不再自己发请求，交给已经过了盾的那个 WebView。
+            if (SiteFetchWebView.isShielded(original)) {
+                serveFromWebView(out, original);
+                return;
+            }
+
             Request.Builder builder = new Request.Builder().url(original).get();
             applyHeaders(builder, headers);
             response = MediaProxy.relayClient().newCall(builder.build()).execute();
+            log("上游 " + response.code() + " " + response.protocol() + " " + shortUrl(original));
 
             writeHead(out, response);
 
@@ -279,8 +301,12 @@ final class VlcRelay {
             }
         } catch (Throwable e) {
             // 用户播完退出、拖进度、VLC 主动断连都会走到这里，属于正常。
-            // 只记异常类型，别把 message 也写出去（可能含签名参数）。
-            log("连接结束：" + e.getClass().getSimpleName());
+            // 但取流本身挂掉也走这里，两者得能分开 —— 所以带上正在取的那个地址
+            // 和异常全名（ConnectionReset / SocketTimeout / SSLHandshake 各指向
+            // 完全不同的原因：上游掐了 / 代理不通 / Cloudflare 拦了）。
+            log("连接结束：" + e.getClass().getName()
+                    + (original == null ? "" : " @" + shortUrl(original))
+                    + (e.getMessage() == null ? "" : " " + e.getMessage()));
         } finally {
             if (response != null) {
                 try {
@@ -290,6 +316,112 @@ final class VlcRelay {
             }
             closeQuietly(client);
         }
+    }
+
+    /**
+     * 借 WebView 的栈取一份回来，整块写给 VLC。
+     *
+     * <p><b>为什么播放列表必须改写</b>：surrit 的 master 里子播放列表是相对路径
+     * （{@code 720p/video.m3u8}），子列表里 1147 个分片也是相对路径
+     * （{@code video0.jpeg}）。VLC 会相对<b>它拿到的那个地址</b>去解析，而那个
+     * 地址是 {@code http://127.0.0.1:port/s?u=<base64>} —— 相对解析出来是
+     * {@code http://127.0.0.1:port/720p/video.m3u8}，query 丢失，中继只会回
+     * 404。所以每一行 URI 都得换成「绝对地址再包一层中继」的形式。
+     *
+     * <p>不换 Content-Type 会踩另一个坑：分片在服务器上标的是
+     * {@code image/jpeg}（伪装成图片躲审查）。VLC 的 HLS 解复用器按类型分流，
+     * 照抄 {@code image/jpeg} 它会去当图片处理。所以自己判：文本里以
+     * {@code #EXTM3U} 开头就是播放列表，其余按 MPEG-TS 给。
+     */
+    private void serveFromWebView(OutputStream out, String original) throws IOException {
+        byte[] data;
+        try {
+            data = SiteFetchWebView.fetchBytes(original);
+        } catch (Throwable e) {
+            log("取流失败 @" + shortUrl(original) + " " + e.getClass().getSimpleName()
+                    + " " + e.getMessage());
+            writeSimple(out, 502, "Upstream fetch failed");
+            return;
+        }
+
+        boolean playlist = isPlaylist(original, data);
+        byte[] body = data;
+        String type;
+        if (playlist) {
+            String text = new String(data, StandardCharsets.UTF_8);
+            body = rewritePlaylist(text, original).getBytes(StandardCharsets.UTF_8);
+            type = "application/vnd.apple.mpegurl";
+        } else {
+            type = "video/mp2t";
+        }
+
+        StringBuilder head = new StringBuilder(160);
+        head.append("HTTP/1.1 200 OK\r\n");
+        head.append("Content-Type: ").append(type).append("\r\n");
+        head.append("Content-Length: ").append(body.length).append("\r\n");
+        head.append("Accept-Ranges: none\r\n");
+        head.append("Connection: close\r\n\r\n");
+        out.write(head.toString().getBytes(StandardCharsets.ISO_8859_1));
+        out.write(body);
+        out.flush();
+    }
+
+    private static boolean isPlaylist(String url, byte[] data) {
+        if (data.length >= 7
+                && data[0] == '#' && data[1] == 'E' && data[2] == 'X' && data[3] == 'T') {
+            return true;
+        }
+        String u = url.toLowerCase(Locale.ROOT);
+        int q = u.indexOf('?');
+        if (q > 0) u = u.substring(0, q);
+        return u.endsWith(".m3u8");
+    }
+
+    /**
+     * 把播放列表里每一行 URI 换成中继自己的绝对地址。
+     *
+     * <p>注释行（{@code #} 开头）原样留着 —— 包括 {@code #EXT-X-TOKEN}，
+     * VLC 不认识的标签会忽略，改了反而可能让分片对不上。
+     */
+    private String rewritePlaylist(String text, String baseAbs) {
+        String prefix = "http://127.0.0.1:" + port + PATH + "?u=";
+        String[] out = rewriteM3u8(text, baseAbs, prefix);
+        log("播放列表改写 " + out[1] + " 条 @" + shortUrl(baseAbs));
+        return out[0];
+    }
+
+    /**
+     * 播放列表改写的纯函数版本（{@code [改写后文本, 改写条数]}）。
+     *
+     * <p>抽成静态是为了能被单测直接钉住：这段逻辑的输入输出完全由参数决定，
+     * 但一旦写错，症状是「能开播但拖进度/切码率就断」—— 在真机上极难二分。
+     *
+     * @param prefix 每条 URI 要拼的前缀，形如 {@code http://127.0.0.1:PORT/s?u=}
+     */
+    static String[] rewriteM3u8(String text, String baseAbs, String prefix) {
+        StringBuilder sb = new StringBuilder(text.length() + 256);
+        String[] lines = text.split("\n");
+        int rewrites = 0;
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            String t = line.trim();
+            if (t.length() == 0 || t.startsWith("#")) {
+                sb.append(line).append('\n');
+                continue;
+            }
+            String abs;
+            try {
+                abs = new java.net.URI(baseAbs).resolve(t).toString();
+            } catch (Exception e) {
+                abs = t;
+            }
+            // 这里**不能**回头用 wrap()：它会把「直连表里的域名」退回原地址，
+            // 而这条路上原地址就是 Cloudflare 的 403。必须让 VLC 的每一个
+            // 请求都回到中继来。
+            sb.append(prefix).append(encode(abs)).append('\n');
+            rewrites++;
+        }
+        return new String[] { sb.toString(), String.valueOf(rewrites) };
     }
 
     /**
@@ -401,6 +533,14 @@ final class VlcRelay {
             socket.close();
         } catch (Throwable ignored) {
         }
+    }
+
+    /** 日志里的地址：去掉 query（可能带签名），只留主机 + 路径尾巴。 */
+    private static String shortUrl(String url) {
+        if (url == null) return "";
+        int q = url.indexOf('?');
+        String s = q > 0 ? url.substring(0, q) : url;
+        return s.length() <= 140 ? s : s.substring(0, 60) + "…" + s.substring(s.length() - 70);
     }
 
     private static void log(String message) {

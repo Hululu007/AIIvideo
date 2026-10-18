@@ -120,6 +120,19 @@ jadx 版的 return 写成了 `new WebResourceResponse(str2, ...)` —— **所�
 `Log.d("AIIvideo", "[hot] ...")` —— 一个「静默工作、静默失败」的子系统，没有
 日志就只能靠猜。
 
+## 2026-10-18：代理分流（DirectHosts）
+
+代理三档开关是全局的，为 91porn 开内置核心后，AGE动漫这类直连可用的源也被
+拖着走节点，节点抖就报 SSLHandshake。修法是显式域名表 `DirectHosts`（没有
+geosite，只能写显式域名），三个出口共用：
+
+- `AiiHttp`（rawWith / getOnce / getWith）命中表就不挂代理；
+- `VlcRelay.wrap` 命中表直接返回 null，VLC 自己直连，省掉中继一跳；
+- `XrayConfig.routing()` 把表生成 `domain: [...] → direct` 规则。
+
+**新接直连可用的源时，往 `DirectHosts.HOSTS` 加一行**，三个出口自动生效。
+背景与实测数据见 [`../docs/2026-10-18-代理分流与播放器修复.md`](../docs/2026-10-18-代理分流与播放器修复.md)。
+
 ## 桥指令注册表
 
 `Bridge.dispatch()` 原来是**两段嵌套 switch**：`switch (str.hashCode())` 里 40 个

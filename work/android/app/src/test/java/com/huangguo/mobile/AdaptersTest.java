@@ -7,6 +7,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
+import java.util.List;
 import org.json.JSONObject;
 import org.junit.Test;
 
@@ -133,6 +134,42 @@ public class AdaptersTest {
         assertEquals("hgsrc:cms|https://a.com/api.php/provide/vod",
                 Adapters.byId("cms").identity(api("https://a.com/api.php/provide/vod")));
         assertNull(Adapters.byId("cms").identity(api(null)));
+    }
+
+    /**
+     * 会发网络请求的 matchesUrl 必须排在纯字符串匹配的后面。
+     *
+     * <p>2026-10-18 加 missav 时踩到：{@code Mrds66Site.matchesUrl} 第 ③ 步是<b>指纹探测</b>，
+     * 拿任何它不认识的 URL 真发一次请求。missav 排在它后面，于是每次加 missav 源，
+     * mrds66 都先花 12~24 秒去 missav 上做一遍指纹探测、超时、返回 false，
+     * 才轮到 missav 认出来。症状是「加源要等二十多秒」，日志里还有一条
+     * {@code mrds66 探针失败：…missav.live…} —— 看着像 mrds66 挂了。
+     *
+     * <p>所以这条断言盯的是<b>顺序</b>，不是谁认不认得出来。
+     */
+    @Test
+    public void 纯字符串匹配排在指纹探测前面() {
+        int missav = indexOf("missav");
+        int mrds66 = indexOf("mrds66");
+        assertTrue("名单里没有 missav", missav >= 0);
+        assertTrue("名单里没有 mrds66", mrds66 >= 0);
+        assertTrue("missav 必须排在 mrds66 前面：mrds66 的 matchesUrl 会真的发网络请求做指纹探测，"
+                + "排在后面会让每次加 missav 源都先白等 12~24 秒（missav=" + missav
+                + ", mrds66=" + mrds66 + "）", missav < mrds66);
+    }
+
+    /** cms 是唯一按响应形状认的，必须排最后 —— 排前面会把普通 JSON 配置拽进 CMS 那条路。 */
+    @Test
+    public void cms永远排最后() {
+        assertEquals("cms 不在最后一位", Adapters.ALL.size() - 1, indexOf("cms"));
+    }
+
+    private static int indexOf(String id) {
+        List<SiteAdapter> all = Adapters.ALL;
+        for (int i = 0; i < all.size(); i++) {
+            if (id.equals(all.get(i).id())) return i;
+        }
+        return -1;
     }
 
     /** cms 只能按形状认，不能按域名认 —— 认错了会把普通 JSON 配置拽进 CMS 那条路。 */

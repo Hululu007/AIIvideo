@@ -27,12 +27,24 @@ window.NativeCallbacks = {
 // URL 归一已移进 cover.js（IMG_ORIGIN 和补全逻辑都在那边），这里只留个别名，
 // 因为 adaptVideo / adaptHome 拼卡片数据时要反复用。
 const coverImageUrl = raw => window.HGCover.resolveUrl(raw);
+// 桥调用没有超时，这是「详情页永远停在正在获取选集…」的根源：Java 那侧一旦
+// 因为 Activity 重建、线程池卡住、请求丢了而不回调，这个 Promise 就永远不
+// settle —— 页面一直 loading，连错误都没有。Java 的读超时是 15 秒，这里给
+// 30 秒上限（CMS 的详情偶尔要连两个接口），超时就当失败处理，页面能进错误态、
+// 返回键也正常。
+const BRIDGE_TIMEOUT_MS = 30000;
 function bridgeCall(action, args = {}) {
   return new Promise((resolve, reject) => {
     const id = bridgeInstance + ':' + (++requestNumber);
-    callbacks.set(id, { resolve, reject });
+    const timer = setTimeout(() => {
+      if (!callbacks.has(id)) return;
+      callbacks.delete(id);
+      reject(new Error('请求超时（' + action + '）'));
+    }, BRIDGE_TIMEOUT_MS);
+    const finish = fn => value => { clearTimeout(timer); fn(value); };
+    callbacks.set(id, { resolve: finish(resolve), reject: finish(reject) });
     try { AndroidHost.request(id, action, JSON.stringify({ ...args, source: contentSource })); }
-    catch (error) { callbacks.delete(id); reject(error); }
+    catch (error) { clearTimeout(timer); callbacks.delete(id); reject(error); }
   });
 }
 // 播放层（hxm/http.js）要用同一条桥。它是本模块作用域里的东西，得显式挂出去。
@@ -3131,6 +3143,10 @@ async function goDetail(id, trigger) {
   }
   const token = ++routeToken;
   const entrySource = bannerChanging && trigger?.closest('.hero') ? null : HGCardTransition.capture(trigger);
+  // 从播放器回来时 content 里可能还留着「正在打开播放器…」的 boot 占位页，
+  // 把它当返回目标存下来，返回时就会还原出那一屏残页。占位页不算页面。
+  const placeholder = state.route === 'feed' || content.firstElementChild?.classList?.contains('feed-boot');
+  if (placeholder) { content.replaceChildren(); state.route = 'detail'; }
   rememberScreen();
   state.previous = {
     route: state.route, tab: state.tab, sub: subIndex(state.tab), query: state.query,
@@ -3236,7 +3252,9 @@ window.hgResume = () => {
   // 从内置播放器（VlcPlayerActivity）回来：把那一场的位置收下、写回进度。
   // 放在这儿而不是只听 visibilitychange：WebView 被 Activity 盖住时
   // document.hidden 经常一直是 false，那条事件根本不发。
-  feedPlayer.resume?.();
+  // 这里抛出去会让整个 hgResume 中断，route 就永久停在 'feed' ——
+  // 之后每次按返回都只会被 feedClose 拨回详情页，用户看到的就是「返回没反应」。
+  try { feedPlayer.resume?.(); } catch (error) { console.log('[resume] 收进度失败：' + (error.message || error)); }
   // 播放全程在原生里，页面这边没有 feed 页可回 —— 退出播放器后落回详情页。
   // 先把 route 归位、清掉「正在打开播放器…」boot 残页，再进 goDetail：
   // goDetail 会把当前屏幕抓成 state.previous，若不先归位，残页会顶掉真正的

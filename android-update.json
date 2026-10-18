@@ -1,15 +1,15 @@
 {
-  "versionName": "1.0.30",
-  "tag": "v1.0.30",
-  "versionCode": 10030,
-  "apk": "AIIvideo-v1.0.30-release.apk",
+  "versionName": "1.0.31",
+  "tag": "v1.0.31",
+  "versionCode": 10031,
+  "apk": "AIIvideo-v1.0.31-release.apk",
   "urls": [
-    "https://gh-proxy.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.30/AIIvideo-v1.0.30-release.apk",
-    "https://ghfile.geekertao.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.30/AIIvideo-v1.0.30-release.apk",
-    "https://gh.dpik.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.30/AIIvideo-v1.0.30-release.apk",
-    "https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.30/AIIvideo-v1.0.30-release.apk"
+    "https://gh-proxy.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.31/AIIvideo-v1.0.31-release.apk",
+    "https://ghfile.geekertao.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.31/AIIvideo-v1.0.31-release.apk",
+    "https://gh.dpik.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.31/AIIvideo-v1.0.31-release.apk",
+    "https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.31/AIIvideo-v1.0.31-release.apk"
   ],
-  "sha256": "8f889271e6d0aa2b795f662bfdce602c9f03da12354ffb19f0ea9423da59d2b0",
-  "size": 48977795,
-  "notes": "91porn 修两个真 bug：详情页每次渲染换一部片（站点游客标记 ga 没带）、列表页封面标题跟详情对不上（网格页在乱写，改为拿详情页校正）。高清分类 0 部作品（卡片走 view_video_hd.php）。全部类型页 0 个标签（标签栏就是站点分类栏）。顺带修设置子页返回键、播放器退回详情残留启动页。"
+  "sha256": "48ef43d72600d49738ee4f76c601d194c923f77b2fa616805e7499e26c3cb783",
+  "size": 48998879,
+  "notes": "新增 MissAV 源：整站挂在 Cloudflare 后面，抓取全部走真 WebView 过盾后同源 fetch；视频 CDN surrit.com 同样挡 okhttp，取流改借 WebView 逐块取字节、播放列表改写后交给中继，两小时片长可拖进度、四档码率。顺带修四处：分类只有第一页（缺 pages 字段）、点分类 0 部作品（分类地址三种形态拼错）、全部类型空白（要分组信封）、集数 undefined（别名表缺 episodeNumber）。「无码影片」下补 12 个子站（无码流出/FC2/HEYZO/东京热/一本道/Caribbeancom/Gachinco/人妻斩…），素人 5 个。另修桥调用无超时导致详情页永久 loading。"
 }

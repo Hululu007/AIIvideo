@@ -87,6 +87,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     private LibVLC libVLC;
     private MediaPlayer player;
     private SurfaceView surface;
+    private View topScrim, bottomScrim;
 
     private final JSONObject payload = new JSONObject();
 
@@ -662,6 +663,13 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             new PagerSnapHelper().attachToRecyclerView(pager);
             feedAdapter = new FeedAdapter();
             pager.setAdapter(feedAdapter);
+            // 从第 N 集点进来时 curPos=N-1，但 RecyclerView 初始布局永远落在第 0
+            // 页 —— 不滚过去，pageAt(curPos) 是 null，attachVout 在 pv==null 处
+            // 静默 return，音频照播、vout 永远没挂（表现：有声无画，日志
+            // Opaque Vout request failed）。滚动必须在布局完成后，所以 post 一拍。
+            if (curPos > 0) pager.post(new Runnable() {
+                @Override public void run() { pager.scrollToPosition(curPos); }
+            });
             pager.addOnScrollListener(new RecyclerView.OnScrollListener() {
                 @Override public void onScrollStateChanged(RecyclerView rv, int newState) {
                     if (newState == RecyclerView.SCROLL_STATE_IDLE) {
@@ -731,11 +739,13 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         }
 
         // 上下两条渐变压暗。控件浮在渐变上，不再是整条黑块。
-        View topScrim = scrim(true);
+        // scrim 跟着控件一起显隐（animateBar 里同步），否则控件收了渐变还在，
+        // 上下永远压着两道暗带 —— 「画面上半截发黑」就是它。
+        topScrim = scrim(true);
         topScrim.setLayoutParams(new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(130), Gravity.TOP));
         root.addView(topScrim);
-        View bottomScrim = scrim(false);
+        bottomScrim = scrim(false);
         bottomScrim.setLayoutParams(new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(170), Gravity.BOTTOM));
         root.addView(bottomScrim);
@@ -1042,6 +1052,9 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     private void setControlsVisible(boolean visible) {
         animateBar(topBar, visible);
         animateBar(bottomBar, visible);
+        // 渐变跟着走：它是给控件垫底的，控件收了它还挂着就是两道死黑带。
+        if (topScrim != null) topScrim.animate().alpha(visible ? 1f : 0f).setDuration(180).start();
+        if (bottomScrim != null) bottomScrim.animate().alpha(visible ? 1f : 0f).setDuration(180).start();
         MediaPlayer current = feedMode ? activeFeedPlayer : player;
         if (visible) {
             ui.removeCallbacks(hideControls);

@@ -11,6 +11,21 @@
 
 ## 工作流约定（2026-10-17 定，别再搞反）
 
+## 2026-10-18 下午：代理分流 + 播放三修 —— 已完成（真机验证）
+
+四个 bug 一轮修完，细节全在
+[`docs/2026-10-18-代理分流与播放器修复.md`](docs/2026-10-18-代理分流与播放器修复.md)：
+
+1. **代理全局拖垮直连源**（AGE动漫 SSLHandshake）：新 `DirectHosts` 显式域名表，
+   `AiiHttp` / `VlcRelay.wrap` / `XrayConfig` 三个出口共用。以后新接直连源往
+   `DirectHosts.HOSTS` 加一行即可。
+2. **视频 → 选集 → 返回死循环**：`hgResume` 先把 route 归位再进 `goDetail`，
+   boot 残页不再污染 `state.previous`。
+3. **设置四个子页「返回设置」落首页**：`hgBack` 补 `source/proxy/player/market`
+   四个返回分支（老坑，一直没暴露）。
+4. **VLC 第 N 集有声无画 + 上下常驻暗带**：pager 没滚到 `curPos` 导致 vout
+   永远不挂（`pager.post(scrollToPosition)` 修）；scrim 跟控件一起显隐。
+
 **本地 git = 代码回滚用。** 想提交就提交，不纠结提交信息、不纠结某个文件该不该进
 仓库。它就是个存档点，唯一用途是出问题时能退回去。
 

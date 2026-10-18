@@ -360,11 +360,20 @@ final class XrayConfig {
     }
 
     private static JSONObject routing() throws JSONException {
+        // 分流：DirectHosts 里的域名（AGE动漫/黄果 这些直连可用的源）从本地
+        // SOCKS 进来后直接 freedom 出站，不进代理节点 —— 源不背节点的抖动。
+        // Xray 的 domain: 规则自带子域匹配语义（domain:x.com 命中 x.com 和 *.x.com）。
+        JSONArray domains = new JSONArray();
+        for (String rule : DirectHosts.domainRules()) domains.put(rule);
         JSONArray rules = new JSONArray()
                 // api 自己的流量必须直连，否则查统计会绕一圈走代理。
                 .put(new JSONObject()
                         .put("type", "field")
                         .put("inboundTag", new JSONArray().put("api"))
+                        .put("outboundTag", TAG_DIRECT))
+                .put(new JSONObject()
+                        .put("type", "field")
+                        .put("domain", domains)
                         .put("outboundTag", TAG_DIRECT));
         return new JSONObject().put("domainStrategy", "AsIs").put("rules", rules);
     }

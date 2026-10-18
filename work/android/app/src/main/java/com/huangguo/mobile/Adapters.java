@@ -13,13 +13,37 @@ import java.util.List;
  */
 final class Adapters {
 
-    /** 顺序即优先级：先按地址认，认不出来才按响应形状认。 */
+    /**
+     * 顺序即优先级：先按地址认，认不出来才按响应形状认。
+     *
+     * <p><b>排序有一条硬规则：会发网络请求的 matchesUrl 必须排在纯字符串匹配的后面。</b>
+     * 2026-10-18 加 missav 时踩到：{@code Mrds66Site.matchesUrl} 第 ③ 步是<b>指纹探测</b> ——
+     * 拿任何它不认识的 URL 真发一次请求，看回页面上有没有它的指纹词。而 missav 排在它后面，
+     * 于是每次加 missav 源，mrds66 都先花 12~24 秒去 missav 上做一遍指纹探测、超时、
+     * 返回 false，才轮到 missav 认出来。用户看到的是「加源要等二十多秒」，
+     * 而且日志里会出现一条极具误导性的报错：
+     *
+     * <pre>
+     *   [http] GET missav.live/
+     *   [source] mrds66 探针失败：SocketTimeoutException: … missav.live … port 443
+     * </pre>
+     *
+     * 「mrds66 探针失败」+ 一个完全不相干的域名，看起来像 mrds66 挂了。
+     *
+     * <p>所以 <b>mrds66 排到 missav 后面</b>：missav 是精确域名 + 指纹双判据，
+     * 纯字符串匹配，零网络开销；mrds66 的指纹探测只在它自己那些没登记过的镜像上才需要跑。
+     */
     static final List<SiteAdapter> ALL = Collections.unmodifiableList(Arrays.<SiteAdapter>asList(
             new AgedmSite(),
             new Hanime1Site(),
-            new Mrds66Site(),
             new Porn91Site(),
+            // 纯字符串匹配的排前面 —— 它们不给后面的指纹探测添 12~24 秒的等待。
+            // missav 必须在 Mrds66Site 之前，原因见上面的注释。
+            new MissavSite(),
+            new Mrds66Site(),
             new OpenListSite(),
+            // cms 永远最后：它是唯一按响应形状认的，排在前面会把普通 JSON
+            // 配置拽进 CMS 那条路。
             new CmsSite()));
 
     private Adapters() {}
