@@ -1,15 +1,15 @@
 {
-  "versionName": "1.0.24",
-  "tag": "v1.0.24",
-  "versionCode": 10024,
-  "apk": "AIIvideo-v1.0.24-release.apk",
+  "versionName": "1.0.25",
+  "tag": "v1.0.25",
+  "versionCode": 10025,
+  "apk": "AIIvideo-v1.0.25-release.apk",
   "urls": [
-    "https://gh-proxy.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.24/AIIvideo-v1.0.24-release.apk",
-    "https://ghfile.geekertao.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.24/AIIvideo-v1.0.24-release.apk",
-    "https://gh.dpik.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.24/AIIvideo-v1.0.24-release.apk",
-    "https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.24/AIIvideo-v1.0.24-release.apk"
+    "https://gh-proxy.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.25/AIIvideo-v1.0.25-release.apk",
+    "https://ghfile.geekertao.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.25/AIIvideo-v1.0.25-release.apk",
+    "https://gh.dpik.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.25/AIIvideo-v1.0.25-release.apk",
+    "https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.25/AIIvideo-v1.0.25-release.apk"
   ],
-  "sha256": "2a2d304da1f709dfd9a120950a943859a40fa9c00e96245018303505aae3ff20",
-  "size": 48946739,
-  "notes": "更新与节点池不再依赖自己的服务器：热更清单、热更包、APK 清单、免费节点池全部搬进仓库，走 gh 镜像 + raw。修掉热更从来没生效过的 bug（envelope.json 写错了对象）。热更换了新密钥，只对 1.0.24 及以后生效。"
+  "sha256": "d7d71a441a6aca29c693fc28ea7dd5834278d4d8ac969f163b09b43d6d15102a",
+  "size": 48973375,
+  "notes": "适配器层重构：站点识别/分流/校验/白名单收成一份注册表，加站点只改一处。新增 OpenList（asmrgay.com，文件站，卡片=目录、伪装扩展名的 MPEG-TS 视频按体积放行）与 91porn（901.26702.app，补站点识别、修中文搜索）。mrds66 修 UA 被挡、封面 AES、简介残标签。免费节点清空旧 178 条，换成订阅里逐条实测可用的 7 条 HTTPS 代理；订阅与节点池下载改走代理。"
 }
