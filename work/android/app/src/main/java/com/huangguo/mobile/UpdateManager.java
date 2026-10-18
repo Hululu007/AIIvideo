@@ -43,7 +43,6 @@ final class UpdateManager {
     private static final String MANIFEST_URL = Endpoints.UPDATE_MANIFEST;
     private static final int MANUAL_LIMIT = 5;
     private static final long MANUAL_WINDOW_MS = 3600000;
-    private static final String RELEASE_BASE = Endpoints.RELEASE_BASE;
     private static final Pattern VERSION = Pattern.compile("\\d+\\.\\d+\\.\\d+");
     private Candidate candidate;
     private final Context context;
@@ -146,8 +145,14 @@ final class UpdateManager {
 
         Candidate candidate = new Candidate();
         candidate.version = version;
+        // 清单里给了 urls 就从中挑最快的（那是发布时写死的，正常情况都走这条）。
+        // 没给就自己拼 GitHub Releases 的地址 —— 而且**要带镜像**：裸的
+        // github.com/releases 地址在国内基本下不动，只挑一个等于挑了个最慢的。
         JSONArray mirrors = manifest.optJSONArray("urls");
-        candidate.url = mirrors == null ? RELEASE_BASE + apkName : UpdateMirror.pick(mirrors.toString());
+        if (mirrors == null) {
+            mirrors = new JSONArray(Endpoints.mirrorsOf(Endpoints.releaseUrl(tag, apkName)));
+        }
+        candidate.url = UpdateMirror.pick(mirrors.toString());
         candidate.digest = "sha256:" + sha256;
         candidate.size = manifest.optLong("size");
         candidate.notes = manifest.optString("notes");

@@ -7,14 +7,18 @@ package com.huangguo.mobile;
  * （HuangGuoApp、AccountService、HotUpdateManager、UpdateManager 两处），
  * 换一次要改五处，漏一处就是线上半瘫：可能热更拉得到、但账号登不上。
  *
- * ── 三条路径 ──
- * API_BASE   账号 / 片单 / 头像。Parse SDK 的 server 参数，后端是自己写的
- *            Parse REST 子集（见 server/account/），Caddy 剥掉 /api 前缀转发。
- * HOT_INDEX  前端热更：签名清单 + 热更包。**不再走自己的服务器**，全部在
- *            GitHub 仓库的 hot/ 目录里，见 HOT_RAW 的注释。
- * UPDATES    应用自更新：更新清单 + release APK。
+ * ── 两条路径，走向不一样 ──
  *
- * ── 为什么是 sslip.io ──
+ * API_BASE   账号 / 片单 / 头像。走自己的服务器（149.104.21.177.sslip.io），
+ *            那是唯一还依赖自己机器的业务 —— 它必须有服务端逻辑，跑不了静态托管。
+ *            Parse SDK 的 server 参数，后端是自写的 Parse REST 子集
+ *            （见 server/account/），Caddy 剥掉 /api 前缀转发。
+ *
+ * 更新这类**纯静态分发**（热更清单 + 热更包 + APK）2026-10-18 起全部搬出
+ * 自己的机器，改走 GitHub + gh 镜像。理由很简单：内容是静态的，没有理由
+ * 让它受某台机器的欠费、被封、磁盘满影响。见 UPDATE_MANIFEST / HOT_RAW。
+ *
+ * ── 为什么 API 用 sslip.io ──
  * 便宜 VPS 没绑域名时，sslip.io 把 149.104.21.177.sslip.io 解析回 149.104.21.177，
  * 而 TLS 证书能签给这个域名（签给裸 IP 的话要 SAN 里带 IP，很多 CA 不做）。
  * 代价是换 IP 就等于换域名 —— 所以地址必须集中，见上。
@@ -90,10 +94,6 @@ final class Endpoints {
         return urls;
     }
 
-    /** 应用自更新的清单与 APK 目录。 */
-    static final String UPDATES_BASE = "https://149.104.21.177.sslip.io/updates";
-
-
     // ── gh 镜像 ────────────────────────────────────────────────────────
     //
     // github.akams.cn 是一组公益 gh 代理的**导航站**（它自己不代理），真正的
@@ -116,33 +116,49 @@ final class Endpoints {
     /**
      * 更新清单的多个镜像，按顺序尝试。
      *
-     * 顺序有讲究：先自建（可控、能立刻发版），再 gh 代理（GitHub 在国内直连不稳），
-     * 最后 GitHub 原始地址兜底。UpdateMirror.fetch() 拿到的是 JSON 数组字符串，
-     * 逐个试到通为止。
+     * 三条都是同一个文件的不同入口 —— 不是笔误。gh 镜像的用法是「把 GitHub
+     * 原始地址整段拼在镜像主机后面当路径」。
      *
-     * 注意后面几条都是同一个文件的不同入口 —— 不是笔误。gh 镜像的用法是
-     * 「把 GitHub 原始地址整段拼在镜像主机后面当路径」。
+     * ── 2026-10-18 起不再有「自建服务器」那一条 ──
+     * 以前第一条是 https://149.104.21.177.sslip.io/updates/android-update.json。
+     * 那条挂了不代表全挂，但它意味着「更新这件事仍然有一台机器可以掐断」。
+     * 现在清单、APK、热更包全在 GitHub，一台自己的机器都不参与。
+     *
+     * 顺序：镜像 A → 镜像 B → raw。国内直连 raw 基本不通，所以放最后。
+     * UpdateMirror.fetch() 拿到的是 JSON 数组字符串，逐个试到通为止。
      */
     static final String UPDATE_MANIFEST = "[\""
-            + UPDATES_BASE + "/android-update.json\",\""
             + AKAMS_A + "/" + RAW_UPDATE + "\",\""
             + AKAMS_B + "/" + RAW_UPDATE + "\",\""
             + RAW_UPDATE + "\"]";
 
-    /** 更新清单里没给 urls 时，APK 按这个前缀拼。 */
-    static final String RELEASE_BASE = UPDATES_BASE + "/";
+    /**
+     * APK 在 GitHub Releases 上的地址。
+     *
+     * 只在清单里没给 `urls` 时用（正常发布的清单都会给）。以前这里拼的是
+     * 自己服务器的前缀，现在改成 Releases —— Releases 的路径里带 tag，
+     * 用前缀表达不出来，所以从一个常量变成一个方法。
+     */
+    static final String RELEASE_REPO =
+            "https://github.com/zhaoruizhe81/AIIvideo/releases/download";
+
+    static String releaseUrl(String tag, String apkName) {
+        return RELEASE_REPO + "/" + tag + "/" + apkName;
+    }
 
 
     /**
      * 免费节点池的候选地址，按顺序试，第一个成功的就用。
      *
-     * 顺序是「可控性优先」，不是「速度优先」：
+     * 三条全是 GitHub 的不同入口，顺序是「国内可用性优先」：
      *
-     *   1. 自己的香港服务器   同一台机器还挂着账号 API。它在正常状态时最快，
-     *                        而且它一有问题我们立刻知道
-     *   2. akams 镜像 A       HK 挂了 / 被墙时的第一条路（国内直连 raw 基本不通）
-     *   3. akams 镜像 B       同一个服务商的不同主机，A 被限速时兜住
-     *   4. GitHub 原始        在国外、或前三条全挂时的最后一条
+     *   1. akams 镜像 A   国内直连 raw 基本不通，镜像才是常态路径
+     *   2. akams 镜像 B   同一个服务商的不同主机，A 被限速或挂掉时兜住
+     *   3. GitHub 原始    在国外、或前两条全挂时的最后一条
+     *
+     * 以前第一条是自建的香港镜像。去掉了 —— 这是纯静态文件，没有理由让
+     * 它受某台机器欠费、被封、磁盘满的影响。现在这台机器上只剩账号 API
+     * 还依赖自己（那是真的需要服务端逻辑）。
      *
      * 为什么文件放在仓库的 assets 目录：它就是 APK 里那份的原件。
      * 维护者改节点 = 编辑 free-nodes.json + 提交 + 推送，发版和热更用的是同一份，
@@ -152,13 +168,8 @@ final class Endpoints {
             "https://raw.githubusercontent.com/zhaoruizhe81/AIIvideo/main"
                     + "/work/android/app/src/main/assets/free-nodes.json";
 
-    /** 自建镜像。publish-nodes.sh 往这里传，Caddy 直接读盘。 */
-    private static final String MIRROR_NODES =
-            "https://149.104.21.177.sslip.io/nodes/free-nodes.json";
-
     static java.util.List<String> nodesUrls() {
-        java.util.List<String> urls = new java.util.ArrayList<String>(4);
-        urls.add(MIRROR_NODES);
+        java.util.List<String> urls = new java.util.ArrayList<String>(3);
         urls.add(AKAMS_A + "/" + RAW_NODES);
         urls.add(AKAMS_B + "/" + RAW_NODES);
         urls.add(RAW_NODES);
