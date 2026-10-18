@@ -64,7 +64,7 @@
 
 ```bash
 cd work/android
-./scripts/build.sh verify    # 清空重建 + 126 个单测 + 断言 APK
+./scripts/build.sh verify    # 清空重建 + 242 个单测 + 断言 APK
 ./scripts/build.sh install   # 构建 → 装真机 → 冷启动 → 截图
 ```
 

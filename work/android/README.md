@@ -11,14 +11,14 @@ cd work/android
 ./gradlew :app:assembleRelease      # 出 app-arm64-v8a-release.apk（约 47 MB）
 ./gradlew :app:assembleDebug        # debug 包
 ./gradlew :app:compileDebugJavaWithJavac   # 只验编译，秒级
-./gradlew :app:testDebugUnitTest           # 单元测试，126 个用例
+./gradlew :app:testDebugUnitTest           # 单元测试，242 个用例
 ```
 
 或者用脚本（推荐，日志更清楚）：
 
 ```bash
 ./scripts/build.sh check      # 编译 + 资源 + assets
-./scripts/build.sh test       # 126 个单元测试
+./scripts/build.sh test       # 242 个单元测试
 ./scripts/build.sh build      # 出 release APK
 ./scripts/build.sh install    # 构建 → 装真机 → 冷启动 → 截图
 ./scripts/build.sh verify     # 清空重建 + 测试 + 断言 APK 内容
@@ -175,8 +175,8 @@ curl -s http://127.0.0.1:9222/json   # 取 webSocketDebuggerUrl
 
 ## 测试
 
-233 个 JUnit 用例（2026-10-18），全部在 JVM 上跑，不需要设备，秒级。
-其中 26 个是联网用例，默认跳过，加 `-Dhg.live=1` 才跑。
+242 个 JUnit 用例（2026-10-18），全部在 JVM 上跑，不需要设备，秒级。
+其中 30 个默认跳过：联网用例要加 `-Dhg.live=1` 才跑，fixture 用例缺快照也跳过。
 
 | 测试类 | 用例 | 测什么 |
 |---|---|---|
