@@ -37,6 +37,26 @@ interface SiteAdapter {
         throw new UnsupportedOperationException("适配器没有实现 /api/ 分流：" + id());
     }
 
+    /**
+     * 给已保存的配置补缺省块 —— <b>纯本地，不发请求</b>。
+     *
+     * 为什么需要这一步：配置是用户加源那天生成的**快照**，存进 prefs 之后
+     * 再也不会重新生成。适配器后来加了新东西（比如樱花动漫的 {@code net}
+     * 路由声明），老用户手里的旧配置里就没有这一块 —— 而症状极难归因：
+     *
+     * <pre>
+     *   适配器读自己的代码是对的，运行时用的却是三小时前那份配置。
+     *   表现：新逻辑完全没生效，日志里还一切正常。
+     * </pre>
+     *
+     * 2026-10-18 就是这么踩的：`net.proxy` 明明写进了 buildConfig，
+     * 真机上 CDN 却还在走代理 —— 因为那份配置是 22:42 存的。
+     *
+     * 所以补一个钩子：{@link SiteProfile} 构造时调一次，适配器可以把**能离线
+     * 推导出来的**键补上（本地拼的、不依赖网络的）。要联网探的东西别放这儿。
+     */
+    default void patch(JSONObject config) {}
+
     /** 这个适配器对配置的必填项要求。返回 null 表示通过。 */
     default String check(JSONObject config) { return null; }
 

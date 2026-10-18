@@ -33,6 +33,11 @@ final class DualContentRepository {
         this.huangguo = new SiteRepository(context, siteProfile);
     }
 
+    /** 控制面（源/播放器/代理/进度/HTTP）要用的 profile。转发给底下的 SiteRepository。 */
+    SiteProfile profileForControl() {
+        return this.huangguo.profileForControl();
+    }
+
     JSONObject category(String categoryId, int page) throws Exception {
         return this.huangguo.category(categoryId, page);
     }

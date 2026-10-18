@@ -140,8 +140,12 @@ final class VlcRelay {
         // 分流：直连表里的域名连中继都不用绕 —— VLC 自己拉原始地址就是直连，
         // 绕一跳本地 OkHttp 纯属白费（而且 relayClient 如果不摘代理，反而把
         // 直连域名又塞回那条节点，表就白挂了）。
+        // 路由决策只问 NetRoute 一处。以前这里问的是 DirectHosts（白名单），
+        // 而源的 net.proxy 声明改由 NetRoute 接管 —— 两处各问一个表就会漂。
+        // 语义只有一条：**这条地址明确该走代理才绕中继**，其余直连。
         try {
-            if (DirectHosts.isDirect(new java.net.URI(originalUrl).getHost())) return null;
+            String host = new java.net.URI(originalUrl).getHost();
+            if (!NetRoute.mustProxy(host)) return null;
         } catch (Exception ignored) {}
         try {
             VlcRelay relay = ensure();
@@ -284,6 +288,43 @@ final class VlcRelay {
             applyHeaders(builder, headers);
             response = MediaProxy.relayClient().newCall(builder.build()).execute();
             log("上游 " + response.code() + " " + response.protocol() + " " + shortUrl(original));
+
+            // ── 播放列表必须改写，不管走哪条路 ─────────────────────────
+            //
+            // 2026-10-18 接 yhdm 踩到：这条 OkHttp 路原来只透传。master m3u8
+            // 里的码率子列表是相对路径（/20261018/…/1754kb/hls/index.m3u8），
+            // VLC 相对「它拿到的那个地址」解析 —— 而那是
+            // http://127.0.0.1:port/s?u=<base64>，相对解析丢掉 query，
+            // 变成 http://127.0.0.1:port/20261018/…，中继只认 /s?u=，回 404。
+            // VLC 日志是「libvlc demux: cannot peek」，和上游 200 并排出现 ——
+            // 上游 200 是最坏的那种坏法：日志看着没问题，播放就是起不来。
+            // serveFromWebView 那条路早就有改写（见它上面那段注释），
+            // 这里补上同一条。判定用 Content-Type / 扩展名，不读 body
+            // （透传要保持流式，大分片不能整块进内存）。
+            String ctype = response.header("Content-Type", "");
+            String pathOnly = original.toLowerCase(Locale.ROOT);
+            int qmark = pathOnly.indexOf('?');
+            if (qmark > 0) pathOnly = pathOnly.substring(0, qmark);
+            boolean playlistByUrl = pathOnly.endsWith(".m3u8")
+                    || ctype.contains("mpegurl");
+            if (playlistByUrl && response.code() == 200) {
+                // 播放列表都是小文本（master 几百字节、媒体列表几十 KB），
+                // 整块读进来改写再写回，不走流式。
+                byte[] data = response.body() == null ? new byte[0] : response.body().bytes();
+                String text = new String(data, StandardCharsets.UTF_8);
+                String rewritten = rewritePlaylist(text, original);
+                String type = "application/vnd.apple.mpegurl";
+                StringBuilder head = new StringBuilder(160);
+                head.append("HTTP/1.1 200 OK\r\n");
+                head.append("Content-Type: ").append(type).append("\r\n");
+                head.append("Content-Length: ").append(rewritten.length()).append("\r\n");
+                head.append("Accept-Ranges: none\r\n");
+                head.append("Connection: close\r\n\r\n");
+                out.write(head.toString().getBytes(StandardCharsets.ISO_8859_1));
+                out.write(rewritten.getBytes(StandardCharsets.UTF_8));
+                out.flush();
+                return;
+            }
 
             writeHead(out, response);
 

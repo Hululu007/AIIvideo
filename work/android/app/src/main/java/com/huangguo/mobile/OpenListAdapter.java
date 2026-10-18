@@ -1,7 +1,7 @@
 package com.huangguo.mobile;
 
 import static com.huangguo.mobile.SiteCfg.*;
-import static com.huangguo.mobile.UserSource.fetch;
+import static com.huangguo.mobile.SourceConfig.fetch;
 import static com.huangguo.mobile.UserSource.log;
 
 import org.json.JSONArray;

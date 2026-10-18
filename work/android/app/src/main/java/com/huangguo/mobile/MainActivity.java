@@ -856,6 +856,29 @@ public final class MainActivity extends Activity {
             s.store.saveCache("detail:" + strOptString, jSONObjectDetail);
             return jSONObjectDetail;
         });
+
+        // ── 控制面：五个子系统各占一条 action ────────────────────────────
+        //
+        // 2026-10-18 之前这些全挤在 detail 桥里，靠 "__source:xxx" 这种前缀
+        // 字符串分流 —— 一条 action 同时承载「取详情页」和「六个子系统的控制面」，
+        // 加一个功能要在 app.js 包一层、再在 UserSource 的 startsWith 链上插一段。
+        //
+        // 现在按前缀拆成独立 action：detail 只留详情，控制面各回各家。
+        // 前端的调用也从 bridgeCall('detail', {id:'__xxx:'+cmd}) 改成
+        // bridgeCall('source', {id:cmd})，语义直接写在 action 名上。
+        //
+        // SiteRepository.detail 里那段 "__ 开头就转控制面" 的兼容分支**保留**：
+        // 热更新的旧版 JS 还在用旧写法，删了就是「升级完页面全废」。
+        this.commands.put("source", jSONObject ->
+                control(UserSource.PREFIX, jSONObject));
+        this.commands.put("player", jSONObject ->
+                control(UserSource.PLAYER_PREFIX, jSONObject));
+        this.commands.put("proxy", jSONObject ->
+                control(UserSource.PROXY_PREFIX, jSONObject));
+        this.commands.put("progress", jSONObject ->
+                control(UserSource.PROGRESS_PREFIX, jSONObject));
+        this.commands.put("http", jSONObject ->
+                control(UserSource.HTTP_PREFIX, jSONObject));
         this.commands.put("check-update", jSONObject -> this.updates.check(jSONObject.optBoolean("manual")));
         this.commands.put("account", jSONObject -> services().account.profile());
         this.commands.put("apply-hot-update", jSONObject -> {
@@ -1029,6 +1052,20 @@ public final class MainActivity extends Activity {
             }
             return Boolean.valueOf(z);
         });
+    }
+
+    /**
+     * 控制面统一入口。前缀由这里补上，前端只传裸指令。
+     *
+     * <p>五个子系统仍然共用 {@link UserSource#handle} 那一条链（它们的实现本来
+     * 就在一起：源配置、代理核心、播放器、进度，互相都要读同一份状态）。
+     * 拆的是**桥上的入口**，不是实现 —— 实现拆不拆是下一个问题，
+     * 而入口不拆的话，加一个功能永远要动两个文件。
+     */
+    private Object control(String prefix, JSONObject args) throws Exception {
+        Services s = services();
+        String command = prefix + (args == null ? "" : args.optString(Text.ATTR_ID));
+        return UserSource.handle(this, s.repository.profileForControl(), command);
     }
 
     /** newest 与 recommend 原来共用 case 10/31，唯一差别就是传给 repository 的布尔值和缓存键前缀。 */

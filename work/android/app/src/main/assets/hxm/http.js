@@ -10,7 +10,7 @@
 (function () {
   function call(command) {
     if (typeof window.HG_BRIDGE !== 'function') return Promise.reject(new Error('桥没就绪'));
-    return window.HG_BRIDGE('detail', { id: '__http:' + command }).then(function (reply) {
+    return window.HG_BRIDGE('http', { id: command }).then(function (reply) {
       const r = typeof reply === 'string' ? JSON.parse(reply) : reply;
       if (!r || r.ok === false) throw new Error((r && r.error) || 'HTTP 失败');
       return r;

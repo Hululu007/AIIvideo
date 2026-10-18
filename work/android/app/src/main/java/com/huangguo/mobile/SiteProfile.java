@@ -23,7 +23,7 @@ final class SiteProfile {
     }
 
     SiteProfile(Context context, JSONObject jSONObject) throws Exception {
-        jSONObject = UserSource.has(context) ? UserSource.read(context) : jSONObject;
+        jSONObject = SourceConfig.has(context) ? SourceConfig.read(context) : jSONObject;
         JSONObject jSONObjectMerge = merge(new JSONObject(new String(HotUpdateManager.read(context.getAssets().open("site-default.json"), 131072), StandardCharsets.UTF_8)), jSONObject == null ? new JSONObject() : jSONObject);
         this.rules = jSONObjectMerge;
         String strReplaceAll = jSONObjectMerge.getString("origin").replaceAll("/+$", "");
@@ -53,6 +53,21 @@ final class SiteProfile {
         if (!"plain".equals(string) && ((keyBytes("key").length != 16 && keyBytes("key").length != 24 && keyBytes("key").length != 32) || keyBytes("iv").length != 16)) {
             throw new IllegalArgumentException("无效封面密钥或 IV");
         }
+        // 让适配器给旧配置补缺省块（纯本地）。必须在 NetRoute.configure 之前 ——
+        // 它补的正是 net 块，顺序反了就等于没补。
+        String adapterId = jSONObjectMerge.optString("adapter", "");
+        if (adapterId.length() > 0) {
+            SiteAdapter impl = Adapters.byId(adapterId);
+            if (impl != null) {
+                try { impl.patch(jSONObjectMerge); } catch (Throwable e) {
+                    UserSource.log("适配器补配置失败（" + adapterId + "）：" + e);
+                }
+            }
+        }
+
+        // 网络路由跟着源走。这是整个 App 里唯一一处「当前源长什么样」的组装点，
+        // 不在这儿装就得在每个适配器里各装一遍 —— 那份名单注定漂。
+        NetRoute.configure(jSONObjectMerge.optJSONObject("net"), strReplaceAll);
         this.fingerprint = hex(MessageDigest.getInstance("SHA-256").digest(this.rules.toString().getBytes(StandardCharsets.UTF_8)));
     }
 

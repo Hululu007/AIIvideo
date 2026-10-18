@@ -7,7 +7,13 @@
   const SPEED_KEY = 'hgpref:feedrate';
   const ORIENTATION_KEY = 'hgpref:feedorientation';
   const FLIP_KEY = 'hgpref:feedflip';
-  const URL_TTL = 8 * 60 * 1000;
+  // 播放地址缓存的有效期。
+  //
+  // 原来写 8 分钟，2026-10-18 被它骗了两次：线路已经判死，缓存里还留着
+  // 那个 403 地址，点播放**连 /api/play 都不发**，日志里什么都看不到。
+  // 现在两条一起上：TTL 收到 2 分钟，播放器报错时主动 urlForget。
+  // 采集站的 m3u8 本来就活不长，长缓存省下的那点时间不值这个坑。
+  const URL_TTL = 2 * 60 * 1000;
   const HOLD_MS = 280;
   const PRELOAD_DISTANCE = 1;
   const KEEP_DISTANCE = 3;
@@ -142,11 +148,26 @@
       } catch (error) { return ''; }
     }
 
-    function urlRemember(videoId, ep, url) {
+    /** 从缓存里取备选线路（和 urlRecall 同一条记录，同一个 TTL）。 */
+    function urlLinesRecall(videoId, ep) {
+      try {
+        const hit = JSON.parse(localStorage.getItem(URL_KEY) || '{}')[videoId + ':' + ep];
+        if (!hit || !Array.isArray(hit.alts)) return [];
+        if (Date.now() - (hit.at || 0) > URL_TTL) return [];
+        return hit.alts.map(u => ({ url: u }));
+      } catch (error) { return []; }
+    }
+
+    function urlRemember(videoId, ep, url, lines) {
       if (!url) return;
       try {
         const all = JSON.parse(localStorage.getItem(URL_KEY) || '{}');
-        all[videoId + ':' + ep] = { url, at: Date.now() };
+        // 备选线路一起存：重进这一集时内置播放器还要靠它换线兜底。
+        // 不存的话「缓存命中」这条路上 alts 恒为空，兜底就少一层。
+        const alts = Array.isArray(lines)
+          ? lines.map(l => l && (l.url || l.source)).filter(Boolean).filter(u => u !== url).slice(0, 6)
+          : [];
+        all[videoId + ':' + ep] = { url, at: Date.now(), alts };
         const keys = Object.keys(all);
         if (keys.length > 80) {
           keys.sort((a, b) => (all[a].at || 0) - (all[b].at || 0))
@@ -206,7 +227,7 @@
      * AppStore 之后才进得了「我的 → 观看历史」，登录了还会同步到账号后端。
      * 之前只写了 localStorage，「观看历史」永远是空的。
      *
-     * 走 detail 那条桥上的 __progress: 指令（和 __source: 一个套路）——
+     * 走 progress 桥的 set 指令（2026-10-18 起控制面独立 action）——
      * MainActivity 的 dispatch 是 packed-switch 按编号跳的，加动作要同时改两张表。
      */
     function report(page, time, dur, force) {
@@ -241,7 +262,7 @@
         //
         source: window.HG_SOURCE_KEY || ''
       });
-      bridgeCall('detail', { id: '__progress:set?payload=' + encodeURIComponent(payload) })
+      bridgeCall('progress', { id: 'set?payload=' + encodeURIComponent(payload) })
         .catch(() => {});
       scheduleSync();
     }
@@ -313,8 +334,14 @@
     async function resolveUrl(videoId, ep, onStep) {
       const step = typeof onStep === 'function' ? onStep : () => {};
       const cached = urlRecall(videoId, ep);
-      if (cached) return cached;
+      if (cached) {
+        // 缓存命中也把备选带出来：备选来自上一次 /api/play，命中缓存说明
+        // 那条地址还在 2 分钟内，备选一样新鲜。缓存里没存备选就给空数组，
+        // 播放器兜底那条路就少一层 —— 所以下面 remember 时把备选一起存了。
+        return { url: cached, lines: urlLinesRecall(videoId, ep) };
+      }
       const info = await api('episode', { id: videoId, episode: ep });
+      const rawLines = Array.isArray(info.lines) ? info.lines : [];
       let url = info.source || info.url || '';
       if (!url) throw new Error('未取得播放地址');
       // AGE动漫 给的是密文，解密要跑站点的 wasm —— 最长十几秒，期间把进度写出来。
@@ -329,8 +356,8 @@
           throw new Error('解析失败：' + (error && error.message ? error.message : String(error)));
         }
       }
-      if (url) urlRemember(videoId, ep, url);
-      return url;
+      if (url) urlRemember(videoId, ep, url, rawLines);
+      return { url, lines: rawLines };
     }
 
     /**
@@ -369,14 +396,25 @@
       const start = (memory && Number(memory.ep) === ep && memory.time > 5)
         ? Math.round(memory.time * 1000) : 0;
 
-      let url;
-      try { url = await resolveUrl(id, ep, boot); }
+      let resolved;
+      try { resolved = await resolveUrl(id, ep, boot); }
       catch (error) { boot(error.message || '取不到播放地址'); return; }
+      const url = resolved.url;
+      const lines = Array.isArray(resolved.lines) ? resolved.lines : [];
 
       if (!window.HG_PLAYER) { boot('这个版本没有带内置播放器'); return; }
       const prefs = playerPrefs();
+      // 备选线路：适配器排好序的 lines（第一条就是 url 本身，去掉）。
+      // 内置播放器在 EncounteredError 时按这个列表换线重试 —— 这条兜底
+      // 不依赖任何探测/缓存判断，是整条链路上唯一永远成立的机制。
+      // 只有当前这一集有；别的集是滑动时现取的。
+      const alts = lines
+        .map(line => line && (line.url || line.source))
+        .filter(Boolean)
+        .filter(u => u !== url);
       const payload = {
         url,
+        alts,
         eps: episodes,
         index,
         id,
@@ -835,8 +873,8 @@
         if (page) report(page, pos, dur, true);
         else if (bridgeCall) {
           // 记的这一集不在当前这部里（用户从观看历史进来的），照样要把进度送回去。
-          bridgeCall('detail', {
-            id: '__progress:set?payload=' + encodeURIComponent(JSON.stringify({
+          bridgeCall('progress', {
+            id: 'set?payload=' + encodeURIComponent(JSON.stringify({
               id,
               episode: ep,
               position: Math.round(pos * 1000),
@@ -950,7 +988,7 @@
 
     /**
      * 问一次清晰度。主 m3u8 里那张码率表只有取回文本才看得见，而页面 CSP 的
-     * connect-src 是 'none' —— 所以这段走 Java（__player:variants）。
+     * connect-src 是 'none' —— 所以这段走 Java（player 桥的 variants）。
      *
      * 空列表**不是错误**：那个站只有一路（实测量子/暴风两家的 master 都只有
      * 一档：RESOLUTION=1080x608 + BANDWIDTH=800000）。这时按钮照旧显示当前这一路，
@@ -1105,7 +1143,7 @@
           const page = externalBtn.closest('.feed-page');
           const src = page?.querySelector('video')?.currentSrc || page?.querySelector('video')?.getAttribute('src') || '';
           if (!src) { toast('还没有可播放的地址', true); return; }
-          window.HG_BRIDGE?.('detail', { id: '__player:external?url=' + encodeURIComponent(src) })
+          window.HG_BRIDGE?.('player', { id: 'external?url=' + encodeURIComponent(src) })
             .then(reply => {
               const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
               if (result && result.ok === false) toast(result.error || '没能打开外部播放器', true);
@@ -1257,7 +1295,7 @@
           const page = externalBtn.closest('.feed-page');
           const src = page?.querySelector('video')?.currentSrc || page?.querySelector('video')?.getAttribute('src') || '';
           if (!src) { toast('还没有可播放的地址', true); return; }
-          window.HG_BRIDGE?.('detail', { id: '__player:external?url=' + encodeURIComponent(src) })
+          window.HG_BRIDGE?.('player', { id: 'external?url=' + encodeURIComponent(src) })
             .then(reply => {
               const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
               if (result && result.ok === false) toast(result.error || '没能打开外部播放器', true);

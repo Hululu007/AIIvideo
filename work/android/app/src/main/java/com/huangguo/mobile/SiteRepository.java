@@ -31,6 +31,17 @@ final class SiteRepository {
         throw new UnsupportedOperationException("category 已改为纯 REST，抓 HTML 的分支已移除");
     }
 
+    /**
+     * 控制面（源/播放器/代理/进度/HTTP）要用的 profile。
+     *
+     * 单独开一个访问器而不是把字段放开：detail 那条路是「按 id 取数据」，
+     * 这条是「把当前生效的源配置交给状态机」—— 两者语义不同，
+     * 将来 profile 的来源变了（比如按请求选源），只改这里。
+     */
+    SiteProfile profileForControl() {
+        return this.profile;
+    }
+
     JSONObject detail(String str) throws Exception {
         String str2;
         if (str.startsWith("__")) {

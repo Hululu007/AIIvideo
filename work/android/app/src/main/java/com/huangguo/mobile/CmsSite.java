@@ -81,7 +81,7 @@ final class CmsSite implements SiteAdapter {
     private JSONObject enrich(String url, JSONObject fetched) throws Exception {
         JSONObject merged = new JSONObject(fetched.toString());
         try {
-            JSONObject rich = UserSource.fetch(SiteCfg.withParams(url, "ac=detail&pg=1"));
+            JSONObject rich = SourceConfig.fetch(SiteCfg.withParams(url, "ac=detail&pg=1"));
             if (rich.has("list")) merged.put("list", rich.getJSONArray("list"));
             if (!merged.has("class") && rich.has("class")) merged.put("class", rich.getJSONArray("class"));
         } catch (Exception e) {
@@ -91,7 +91,7 @@ final class CmsSite implements SiteAdapter {
 
         if (!SiteCfg.hasHierarchy(merged) && url.contains("/at/xml/")) {
             try {
-                JSONObject sibling = UserSource.fetch(
+                JSONObject sibling = SourceConfig.fetch(
                         SiteCfg.withParams(url.replace("/at/xml/", "/"), "ac=list"));
                 int filled = SiteCfg.mergeParents(merged.optJSONArray("class"),
                         sibling.optJSONArray("class"));
@@ -344,7 +344,7 @@ final class CmsSite implements SiteAdapter {
             String firstId = firstVideoId(probe);
             if (firstId.length() > 0) {
                 try {
-                    JSONObject one = UserSource.fetch(withParams(url, "ac=detail&ids=" + firstId));
+                    JSONObject one = SourceConfig.fetch(withParams(url, "ac=detail&ids=" + firstId));
                     hosts = coverHostsOf(one);
                 } catch (Exception ignored) {}
             }

@@ -52,7 +52,7 @@ final class AgedmSite implements SiteAdapter {
      */
     public JSONObject probe(String url) throws Exception {
         final String api = "https://api.agedm.io";
-        JSONObject probe = UserSource.fetch(api + "/v2/home-list");
+        JSONObject probe = SourceConfig.fetch(api + "/v2/home-list");
         if (probe.optJSONArray("latest") == null || probe.optJSONArray("recommend") == null) {
             throw new IOException("AGE动漫 的接口没有返回预期数据，可能改版了");
         }

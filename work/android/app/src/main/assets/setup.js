@@ -58,10 +58,10 @@
     }
   }
 
-  /** 问 Java 现在配没配源。走 detail 桥的 __source:get 指令。 */
+  /** 问 Java 现在配没配源。走 source 桥的 get 指令（2026-10-18 起控制面独立 action）。 */
   async function current() {
     try {
-      const reply = await bridgeCall('detail', { id: '__source:get' });
+      const reply = await bridgeCall('source', { id: 'get' });
       return typeof reply === 'string' ? JSON.parse(reply) : reply;
     } catch (error) {
       // 桥本身出问题（比如 detail 那个分支没打进去）时不能装死，
@@ -87,7 +87,7 @@
     };
     let body = '';
     try {
-      const reply = await bridgeCall('detail', { id: '__source:fetch?url=' + encodeURIComponent(url) });
+      const reply = await bridgeCall('source', { id: 'fetch?url=' + encodeURIComponent(url) });
       const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
       if (!result || !result.ok) return fail((result && result.error) || '未知原因');
       body = result.body || '';
@@ -135,7 +135,7 @@
     for (let index = 0; index < urls.length; index += 1) {
       apply.textContent = `正在添加 ${index + 1}/${urls.length}…`;
       try {
-        const reply = await bridgeCall('detail', { id: '__source:set?url=' + encodeURIComponent(urls[index]) });
+        const reply = await bridgeCall('source', { id: 'set?url=' + encodeURIComponent(urls[index]) });
         const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
         if (!result || !result.ok) failed.push((result && result.error) || '设置失败');
       } catch (error) {
@@ -166,7 +166,7 @@
     showError('');
 
     try {
-      const reply = await bridgeCall('detail', { id: '__source:set?url=' + encodeURIComponent(url) });
+      const reply = await bridgeCall('source', { id: 'set?url=' + encodeURIComponent(url) });
       const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
       if (!result || !result.ok) {
         // 粘进来的可能不是「一个源」，而是「一份源清单」（市场）。这种情况别直接
@@ -224,7 +224,7 @@
    */
   async function applySiteConfig() {
     try {
-      const reply = await bridgeCall('detail', { id: '__source:web' });
+      const reply = await bridgeCall('source', { id: 'web' });
       const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
       if (!result || !result.ok || !result.web) return;
       Object.assign(window.HG_SITE = window.HG_SITE || {}, result.web);

@@ -36,10 +36,8 @@ import org.videolan.libvlc.interfaces.IVLCVout;
 
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.PagerSnapHelper;
@@ -108,20 +106,20 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     private boolean hwDecode = true;
 
     private FrameLayout root;
-    private LinearLayout topBar;
-    private LinearLayout bottomBar;
-    private TextView titleView;
-    private TextView metaView;
-    private TextView clockView;
-    private TextView hintView;
-    private TextView errorView;
-    private IconButton playButton;
-    private TextView speedButton;
-    private SeekBar seekBar;
-    private LinearLayout speedPanel;
+
+    /**
+     * 控制层：顶栏/底栏/进度条/倍速面板/提示/错误块，以及那套手绘控件工厂。
+     * 2026-10-18 从本类搬进 {@link VlcControlsView}。之前 buildUi() 一个人占
+     * 270 行、还带一整套自制控件 —— 等于把 mini UI 框架焊死在播放器里。
+     */
+    private VlcControlsView controls;
+
+    /** 当前倍速。控制层只负责显示，值在这儿 —— 换集要沿用。 */
+    /** 上一次写进副标题的文本。逐帧比较用，避免每帧都 setText。 */
+    private String lastMeta = "";
+
     private float feedRate = 1f;
     private static final float[] RATE_CHOICES = {2f, 1.5f, 1.25f, 1f, 0.75f, 0.5f};
-    private ProgressBar spinner;
 
     // ── mini-feed（整部剧上下滑）──────────────────────────────────────
     //
@@ -139,11 +137,17 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     private int pageA = -1, pageB = -1;
     private MediaPlayer activeFeedPlayer;
     /** 退到后台的那一刻是不是正在播。回来时只在这条为真才自动续播。 */
-    private boolean feedWasPlaying;
-    private final Map<MediaPlayer, String> playingUrl = new HashMap<MediaPlayer, String>();
-    private final Map<Integer, String> urlCache = new HashMap<Integer, String>();
-    private final Set<Integer> resolving = new HashSet<Integer>();
-    private final Set<Integer> failed = new HashSet<Integer>();
+    /**
+     * 这一集的全部状态：地址缓存、解析令牌、失败标记、player↔地址、换线游标、续播现场。
+     *
+     * 以前是五个集合平铺在 Activity 字段里，加第六个时很容易漏一句 clear()，
+     * 表现是「上一部的地址被当成这一部的」—— 对着日志猜很久。规则全在
+     * {@link VlcSession}，那边有单测钉着；这里只调，不再自己维护集合。
+     */
+    private final VlcSession session = new VlcSession();
+
+    /** 没有备选线路时的空表，省得每处都判 null。 */
+    private static final String[] NO_ALTS = new String[0];
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final Runnable hideControls = new Runnable() {
@@ -271,6 +275,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             curPos = Math.max(0, Math.min(eps.length - 1, payload.optInt("index", 0)));
         }
 
+        controls = new VlcControlsView(this, new ControlsHost());
         buildUi();
         if (!feedMode) {
             surface.getHolder().addCallback(new SurfaceHolder.Callback() {
@@ -286,7 +291,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
                 }
             });
         }
-        applyImmersive();
+        VlcControlsView.applyImmersive(this);
         startPlayback();
     }
 
@@ -407,7 +412,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             // 第一个事件再来落位置 —— 见 onEvent 里的 LengthChanged。
         }
 
-        metaView.setText((hwDecode ? "硬解优先" : "软解") + " · " + abi());
+        controls.setMeta((hwDecode ? "硬解优先" : "软解") + " · " + abi());
         ui.postDelayed(hideControls, HIDE_CONTROLS_MS);
     }
 
@@ -476,8 +481,8 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     @Override protected void onStart() {
         super.onStart();
         // 只恢复「是被后台打断的播放」。用户自己按暂停退出去，回来还该是暂停。
-        if (feedMode && feedWasPlaying) {
-            feedWasPlaying = false;
+        if (feedMode && session.wasPlaying()) {
+            session.setWasPlaying(false);
             MediaPlayer mp = activeFeedPlayer;
             if (mp != null) {
                 try { mp.play(); } catch (Throwable ignored) {}
@@ -498,7 +503,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             if (mp == null) continue;
             try {
                 if (mp.isPlaying()) {
-                    if (mp == activeFeedPlayer) feedWasPlaying = true;
+                    if (mp == activeFeedPlayer) session.setWasPlaying(true);
                     mp.pause();
                 }
             } catch (Throwable ignored) {}
@@ -562,10 +567,8 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             // feed 用的是一对 player，closePlayer 只管单集那个 —— 不在这里收掉
             // 旧的一对，再 initFeedVlc 就是两个实例叠着放，声音会双重。
             releaseFeedPlayers();
-            urlCache.clear();
-            playingUrl.clear();
-            resolving.clear();
-            failed.clear();
+            // 换集：五个集合 + 换线游标 + 续播现场一起清。
+            session.reset();
         }
         closePlayer();
         startPlayback();
@@ -624,28 +627,21 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
 
     // ── 界面 ─────────────────────────────────────────────────────────
 
-    private int dp(float value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
-    }
-
-    private int ui(int color) {
-        return color;
-    }
-
-    private android.graphics.drawable.GradientDrawable rounded(int color, int radiusDp) {
-        android.graphics.drawable.GradientDrawable d = new android.graphics.drawable.GradientDrawable();
-        d.setColor(color);
-        d.setCornerRadius(dp(radiusDp));
-        return d;
-    }
-
-    private View scrim(boolean fromTop) {
-        View view = new View(this);
-        view.setBackground(new android.graphics.drawable.GradientDrawable(
-                fromTop ? android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM
-                        : android.graphics.drawable.GradientDrawable.Orientation.BOTTOM_TOP,
-                new int[]{0xD9000000, 0x00000000}));
-        return view;
+    /** 手势阈值要用 dp；实现归 VlcControlsView。 */
+    private int dp(float value) { return controls.dp(value); }
+    /** 控制层回调用到这里。只转「用户做了什么」，不搬状态。 */
+    private final class ControlsHost implements VlcControlsView.Host {
+        @Override public void onBack() { finish(); }
+        @Override public void onPlayPause() { togglePlay(); }
+        @Override public void onSeekBy(long deltaMs) { seekBy(deltaMs); }
+        @Override public void onSeekTo(long permille) {
+            MediaPlayer target = feedMode ? activeFeedPlayer : player;
+            if (target != null && durationMs > 0) target.setTime(durationMs * permille / 1000);
+        }
+        @Override public void onSpeedToggle() { toggleSpeedPanel(); }
+        @Override public void onScrubStart() { ui.removeCallbacks(hideControls); }
+        @Override public void onScrubEnd() { ui.postDelayed(hideControls, HIDE_CONTROLS_MS); }
+        @Override public int durationMs() { return (int) durationMs; }
     }
 
     private void buildUi() {
@@ -738,323 +734,18 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             root.addView(surface);
         }
 
-        // 上下两条渐变压暗。控件浮在渐变上，不再是整条黑块。
-        // scrim 跟着控件一起显隐（animateBar 里同步），否则控件收了渐变还在，
-        // 上下永远压着两道暗带 —— 「画面上半截发黑」就是它。
-        topScrim = scrim(true);
-        topScrim.setLayoutParams(new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(130), Gravity.TOP));
-        root.addView(topScrim);
-        bottomScrim = scrim(false);
-        bottomScrim.setLayoutParams(new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(170), Gravity.BOTTOM));
-        root.addView(bottomScrim);
-
-        // 错误时不黑屏 —— 黑着屏最说不清是「在缓冲」还是「已经死了」。
-        errorView = new TextView(this);
-        errorView.setTextColor(0xFFE9E9EC);
-        errorView.setTextSize(14f);
-        errorView.setGravity(Gravity.CENTER);
-        errorView.setBackground(rounded(0xE6171720, 18));
-        errorView.setPadding(dp(26), dp(20), dp(26), dp(20));
-        errorView.setVisibility(View.GONE);
-        FrameLayout.LayoutParams errorParams = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.CENTER);
-        errorParams.setMargins(dp(32), 0, dp(32), 0);
-        root.addView(errorView, errorParams);
-
-        spinner = new ProgressBar(this);
-        FrameLayout.LayoutParams spinParams = new FrameLayout.LayoutParams(dp(42), dp(42), Gravity.CENTER);
-        spinner.setLayoutParams(spinParams);
-        root.addView(spinner);
-
-        hintView = new TextView(this);
-        hintView.setTextColor(0xFFFFFFFF);
-        hintView.setTextSize(14f);
-        hintView.setGravity(Gravity.CENTER);
-        hintView.setBackground(rounded(0xB3000000, 20));
-        hintView.setPadding(dp(20), dp(11), dp(20), dp(11));
-        hintView.setVisibility(View.GONE);
-        hintView.setLayoutParams(new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
-        root.addView(hintView);
-
-        // 顶栏：返回（圆钮）+ 标题 + 编码信息。整条透明，靠渐变压暗。
-        topBar = new LinearLayout(this);
-        topBar.setOrientation(LinearLayout.HORIZONTAL);
-        topBar.setGravity(Gravity.CENTER_VERTICAL);
-        topBar.setPadding(dp(14), dp(10), dp(18), dp(10));
-
-        TextView back = new TextView(this);
-        back.setText("←");
-        back.setTextSize(19f);
-        back.setTextColor(0xFFFFFFFF);
-        back.setGravity(Gravity.CENTER);
-        back.setBackground(rounded(0x33000000, 24));
-        back.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { finish(); }
-        });
-        topBar.addView(back, new LinearLayout.LayoutParams(dp(44), dp(44)));
-
-        LinearLayout titles = new LinearLayout(this);
-        titles.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        titleParams.setMargins(dp(14), 0, 0, 0);
-        titles.setLayoutParams(titleParams);
-        titleView = new TextView(this);
-        titleView.setTextColor(0xFFFFFFFF);
-        titleView.setTextSize(15.5f);
-        titleView.setSingleLine(true);
-        titleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        titleView.setShadowLayer(dp(2), 0, dp(1), 0x99000000);
-        String title = payload.optString("title", "");
-        if (title.length() == 0) title = "播放中";
-        titleView.setText(title);
-        titles.addView(titleView);
-        metaView = new TextView(this);
-        metaView.setTextColor(0xB3FFFFFF);
-        metaView.setTextSize(11.5f);
-        metaView.setSingleLine(true);
-        titles.addView(metaView);
-        topBar.addView(titles);
-
-        root.addView(topBar, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP));
-
-        // 底栏：细进度条 + 时间 + 控制按钮
-        bottomBar = new LinearLayout(this);
-        bottomBar.setOrientation(LinearLayout.VERTICAL);
-        bottomBar.setPadding(dp(18), dp(8), dp(18), dp(20));
-
-        seekBar = new SeekBar(this);
-        styleSeekBar(seekBar);
-        bottomBar.addView(seekBar, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(2), dp(4), dp(2), 0);
-
-        clockView = new TextView(this);
-        clockView.setTextColor(0xFFFFFFFF);
-        clockView.setTextSize(12f);
-        clockView.setText("00:00 / --:--");
-        row.addView(clockView, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        // 中间一组要真正居中：左右各放一个等重占位
-        LinearLayout group = new LinearLayout(this);
-        group.setOrientation(LinearLayout.HORIZONTAL);
-        group.setGravity(Gravity.CENTER_VERTICAL);
-        group.addView(makeIconButton(IconButton.REW, new View.OnClickListener() {
-            @Override public void onClick(View v) { seekBy(-10000); }
-        }));
-        playButton = makeIconButton(IconButton.PAUSE, new View.OnClickListener() {
-            @Override public void onClick(View v) { togglePlay(); }
-        });
-        group.addView(playButton);
-        group.addView(makeIconButton(IconButton.FWD, new View.OnClickListener() {
-            @Override public void onClick(View v) { seekBy(10000); }
-        }));
-        row.addView(group);
-
-        speedButton = makeButton("1×", new View.OnClickListener() {
-            @Override public void onClick(View v) { toggleSpeedPanel(); }
-        });
-        speedButton.setGravity(Gravity.CENTER);
-        // 倍速是胶囊，不能被 weight 拉宽 —— 外面包一个等重容器、靠右放
-        android.widget.FrameLayout speedSlot = new android.widget.FrameLayout(this);
-        speedSlot.addView(speedButton, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.END | Gravity.CENTER_VERTICAL));
-        row.addView(speedSlot, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        bottomBar.addView(row);
-        root.addView(bottomBar, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
-
-        // 倍速面板：挂在底栏上方靠右，点击选项即生效
-        speedPanel = new LinearLayout(this);
-        speedPanel.setOrientation(LinearLayout.VERTICAL);
-        speedPanel.setBackground(rounded(0xE6202128, 14));
-        speedPanel.setPadding(dp(6), dp(6), dp(6), dp(6));
-        speedPanel.setVisibility(View.GONE);
-        FrameLayout.LayoutParams panelParams = new FrameLayout.LayoutParams(
-                dp(120), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END | Gravity.BOTTOM);
-        panelParams.setMargins(0, 0, dp(20), dp(96));
-        root.addView(speedPanel, panelParams);
-
-        // 进度条拖动：拖动期间不跟着播放头跳，松手才 seek。
-        seekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
-                if (!fromUser || durationMs <= 0) return;
-                clockView.setText(fmt(durationMs * progress / 1000) + " / " + fmt(durationMs));
-            }
-            @Override public void onStartTrackingTouch(SeekBar bar) {
-                ui.removeCallbacks(hideControls);
-            }
-            @Override public void onStopTrackingTouch(SeekBar bar) {
-                MediaPlayer target = feedMode ? activeFeedPlayer : player;
-                if (target != null && durationMs > 0) {
-                    target.setTime(durationMs * bar.getProgress() / 1000);
-                }
-                ui.postDelayed(hideControls, HIDE_CONTROLS_MS);
-            }
-        });
-
-        if (!feedMode) {
-            root.setOnTouchListener(new View.OnTouchListener() {
-                @Override public boolean onTouch(View v, MotionEvent event) {
-                    return onRootTouch(event);
-                }
-            });
-        }
-
-        setContentView(root);
-        // 播放中把播放按钮渲染成暂停，暂停时反之。
-        setControlsVisible(true);
-    }
-
-    /** 播放控制键：图标用 Canvas 画，不走字符 —— ⏪⏸ 那类字符在小米上是彩色 emoji。 */
-    private static class IconButton extends View {
-        static final int PAUSE = 0, PLAY = 1, REW = 2, FWD = 3;
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private int icon = PLAY;
-
-        IconButton(Context context) { super(context); }
-
-        void setIcon(int which) { icon = which; invalidate(); }
-
-        @Override protected void onDraw(Canvas canvas) {
-            float cx = getWidth() / 2f, cy = getHeight() / 2f;
-            float u = getWidth() / 12f;
-            paint.setColor(0xFFFFFFFF);
-            if (icon == PAUSE) {
-                float w = u;
-                canvas.drawRect(cx - u * 1.5f - w / 2, cy - u * 2f, cx - u * 1.5f + w / 2, cy + u * 2f, paint);
-                canvas.drawRect(cx + u * 1.5f - w / 2, cy - u * 2f, cx + u * 1.5f + w / 2, cy + u * 2f, paint);
-            } else if (icon == PLAY) {
-                Path path = new Path();
-                path.moveTo(cx - u * 1.2f, cy - u * 2f);
-                path.lineTo(cx + u * 1.8f, cy);
-                path.lineTo(cx - u * 1.2f, cy + u * 2f);
-                path.close();
-                canvas.drawPath(path, paint);
-            } else {
-                boolean fwd = icon == FWD;
-                for (int i = 0; i < 2; i++) {
-                    float off = (fwd ? 1 : -1) * (i == 0 ? u * 0.6f : u * 2.6f);
-                    Path path = new Path();
-                    if (fwd) {
-                        path.moveTo(cx + off - u * 1.1f, cy - u * 1.6f);
-                        path.lineTo(cx + off + u * 0.9f, cy);
-                        path.lineTo(cx + off - u * 1.1f, cy + u * 1.6f);
-                    } else {
-                        path.moveTo(cx + off + u * 1.1f, cy - u * 1.6f);
-                        path.lineTo(cx + off - u * 0.9f, cy);
-                        path.lineTo(cx + off + u * 1.1f, cy + u * 1.6f);
+        // 控制层：顶栏/底栏/进度条/倍速面板/提示/错误块 —— 全在 VlcControlsView。
+        controls.attach(root, payload.optString("title", ""), !feedMode,
+                new View.OnTouchListener() {
+                    @Override public boolean onTouch(View v, MotionEvent event) {
+                        return onRootTouch(event);
                     }
-                    path.close();
-                    canvas.drawPath(path, paint);
-                }
-            }
-        }
+                });
+        setContentView(root);
+        controls.setVisible(true);
     }
-
-    private IconButton makeIconButton(int icon, View.OnClickListener click) {
-        IconButton button = new IconButton(this);
-        button.setIcon(icon);
-        button.setContentDescription(icon == IconButton.PAUSE ? "暂停" : icon == IconButton.PLAY ? "播放"
-                : icon == IconButton.REW ? "快退" : "快进");
-        button.setBackground(rounded(0x30FFFFFF, 30));
-        button.setOnClickListener(click);
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(56), dp(56));
-        params.setMargins(dp(6), 0, dp(6), 0);
-        button.setLayoutParams(params);
-        return button;
-    }
-
-    /** 细线进度条：4dp 圆角轨道 + 白色已播 + 14dp 圆点拇指，全代码绘制。 */
-    private void styleSeekBar(SeekBar bar) {
-        int inset = dp(11);   // 轨道 4dp，撑在 26dp 高的条里
-        bar.setMax(1000);   // 上轮重构时丢了这行：默认满量 100，进度全错
-        android.graphics.drawable.GradientDrawable trackBg = new android.graphics.drawable.GradientDrawable();
-        trackBg.setColor(0x66FFFFFF);
-        trackBg.setCornerRadius(dp(2));
-
-        android.graphics.drawable.GradientDrawable trackPro = new android.graphics.drawable.GradientDrawable();
-        trackPro.setColor(0xFFFFFFFF);
-        trackPro.setCornerRadius(dp(2));
-
-        android.graphics.drawable.LayerDrawable layers = new android.graphics.drawable.LayerDrawable(
-                new android.graphics.drawable.Drawable[]{trackBg, trackPro});
-        layers.setId(0, android.R.id.background);
-        layers.setId(1, android.R.id.progress);
-        layers.setLayerInset(0, 0, inset, 0, inset);
-        layers.setLayerInset(1, 0, inset, 0, inset);
-        bar.setProgressDrawable(layers);
-
-        android.graphics.drawable.GradientDrawable thumb = new android.graphics.drawable.GradientDrawable();
-        thumb.setShape(android.graphics.drawable.GradientDrawable.OVAL);
-        thumb.setColor(0xFFFFFFFF);
-        thumb.setSize(dp(14), dp(14));
-        bar.setThumb(thumb);
-        bar.setThumbOffset(0);
-        bar.setPadding(0, dp(6), 0, dp(6));
-    }
-
-    private TextView makeButton(String text, View.OnClickListener click) {
-        return makeButton(text, click, false);
-    }
-
-    private TextView makeButton(String text, View.OnClickListener click, boolean primary) {
-        TextView button = new TextView(this);
-        button.setText(text);
-        button.setTextSize(primary ? 15f : 12.5f);
-        button.setTextColor(0xFFFFFFFF);
-        button.setGravity(Gravity.CENTER);
-        button.setBackground(primary ? rounded(0x30FFFFFF, 24) : rounded(0x1FFFFFFF, 19));
-        button.setPadding(primary ? dp(10) : dp(15), dp(10), primary ? dp(10) : dp(15), dp(10));
-        button.setOnClickListener(click);
-        button.setPadding(primary ? dp(8) : dp(14), dp(9), primary ? dp(8) : dp(14), dp(9));
-        button.setLayoutParams(new LinearLayout.LayoutParams(
-                primary ? dp(48) : ViewGroup.LayoutParams.WRAP_CONTENT,
-                primary ? dp(48) : ViewGroup.LayoutParams.WRAP_CONTENT));
-        return button;
-    }
-
-    /** 沉浸式全屏。上滑调出系统栏是系统行为，不拦。 */
-    private void applyImmersive() {
-        try {
-            Window window = getWindow();
-            if (Build.VERSION.SDK_INT >= 30) {
-                window.setDecorFitsSystemWindows(false);
-                android.view.WindowInsetsController controller = window.getInsetsController();
-                if (controller != null) {
-                    controller.hide(android.view.WindowInsets.Type.systemBars());
-                    controller.setSystemBarsBehavior(
-                            android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
-                }
-            } else {
-                window.getDecorView().setSystemUiVisibility(
-                        View.SYSTEM_UI_FLAG_FULLSCREEN
-                                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
-            }
-        } catch (Throwable ignored) {}
-    }
-
     private void setControlsVisible(boolean visible) {
-        animateBar(topBar, visible);
-        animateBar(bottomBar, visible);
-        // 渐变跟着走：它是给控件垫底的，控件收了它还挂着就是两道死黑带。
-        if (topScrim != null) topScrim.animate().alpha(visible ? 1f : 0f).setDuration(180).start();
-        if (bottomScrim != null) bottomScrim.animate().alpha(visible ? 1f : 0f).setDuration(180).start();
+        controls.setVisible(visible);
         MediaPlayer current = feedMode ? activeFeedPlayer : player;
         if (visible) {
             ui.removeCallbacks(hideControls);
@@ -1063,16 +754,8 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             ui.removeCallbacks(hideControls);
         }
     }
-
-    private void animateBar(View bar, boolean visible) {
-        float target = visible ? 1f : 0f;
-        bar.animate().alpha(target).setDuration(180).start();
-        bar.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
-        if (!visible && speedPanel != null) speedPanel.setVisibility(View.GONE);
-    }
-
     private void toggleControls() {
-        setControlsVisible(bottomBar.getVisibility() != View.VISIBLE);
+        setControlsVisible(!controls.isBarVisible());
     }
 
     // ── 手势 ─────────────────────────────────────────────────────────
@@ -1156,8 +839,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     private long gestureTarget = 0;
 
     private void showHint(String text) {
-        hintView.setText(text);
-        hintView.setVisibility(View.VISIBLE);
+        controls.showHint(text);
         ui.removeCallbacks(hideHint);
     }
 
@@ -1167,7 +849,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     }
 
     private final Runnable hideHint = new Runnable() {
-        @Override public void run() { hintView.setVisibility(View.GONE); }
+        @Override public void run() { controls.hideHint(); }
     };
 
     // ── 播放控制 ─────────────────────────────────────────────────────
@@ -1192,10 +874,10 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         boolean wasPlaying = player.isPlaying();
         if (wasPlaying) {
             player.pause();
-            playButton.setIcon(IconButton.PLAY);
+            controls.setPlayIcon(VlcControlsView.IconButton.PLAY);
         } else {
             player.play();
-            playButton.setIcon(IconButton.PAUSE);
+            controls.setPlayIcon(VlcControlsView.IconButton.PAUSE);
         }
         setControlsVisible(true);
     }
@@ -1204,31 +886,13 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     private int speedIndex = 0;
 
     private void toggleSpeedPanel() {
-        if (speedPanel == null) return;
-        if (speedPanel.getVisibility() == View.VISIBLE) {
-            speedPanel.setVisibility(View.GONE);
-            return;
-        }
         MediaPlayer player = feedTarget();
         float current = player == null ? feedRate : player.getRate();
         if (current <= 0.01f) current = feedRate;
-        speedPanel.removeAllViews();
-        for (final float rate : RATE_CHOICES) {
-            final boolean on = Math.abs(rate - current) < 0.01f;
-            TextView item = new TextView(this);
-            item.setText(trimRate(rate) + "×");
-            item.setTextSize(14f);
-            item.setTextColor(on ? 0xFF4C8DFF : 0xFFF2F2F5);
-            item.getPaint().setFakeBoldText(on);
-            item.setGravity(Gravity.CENTER);
-            item.setPadding(dp(10), dp(13), dp(10), dp(13));
-            item.setOnClickListener(new View.OnClickListener() {
-                @Override public void onClick(View v) { chooseRate(rate); }
-            });
-            speedPanel.addView(item, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        }
-        speedPanel.setVisibility(View.VISIBLE);
+        // 面板的搭建（选项、高亮、显隐）归控制层；这边只说「现在是多少倍速」。
+        controls.toggleSpeedPanel(current, RATE_CHOICES, new VlcControlsView.RatePicker() {
+            @Override public void onPick(float rate) { chooseRate(rate); }
+        });
         ui.removeCallbacks(hideControls);
     }
 
@@ -1236,8 +900,8 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         feedRate = rate;
         MediaPlayer player = feedTarget();
         if (player != null) player.setRate(rate);
-        speedButton.setText(trimRate(rate) + "×");
-        speedPanel.setVisibility(View.GONE);
+        controls.setSpeedLabel(trimRate(rate) + "×");
+        controls.hideSpeedPanel();
         showHint("倍速 " + trimRate(rate) + "×");
         hideHintSoon();
         ui.postDelayed(hideControls, HIDE_CONTROLS_MS);
@@ -1253,10 +917,10 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     private void showError(String text) {
         errorText = text;
         errorShown = true;
-        spinner.setVisibility(View.GONE);
-        errorView.setText(text + "\n\n点返回可以换一个源试试。");
-        errorView.setVisibility(View.VISIBLE);
-        metaView.setText("播放失败");
+        controls.setSpinnerVisible(false);
+        controls.setError(text + "\n\n点返回可以换一个源试试。");
+        controls.setError(text + "\n\n点返回可以换一个源试试。");
+        controls.setMeta("播放失败");
     }
 
     // ── libVLC 回调（跑在 VLC 自己的线程上） ──────────────────────────
@@ -1290,18 +954,18 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
                 android.util.Log.i("HG.Vlc", "首帧：onCreate→播放 " + (now - tCreate)
                         + "ms（其中 play() 之后 " + (now - tPlay) + "ms）");
             }
-            spinner.setVisibility(View.GONE);
-            playButton.setIcon(IconButton.PAUSE);
+            controls.setSpinnerVisible(false);
+            controls.setPlayIcon(VlcControlsView.IconButton.PAUSE);
             describeTrack();
         } else if (type == MediaPlayer.Event.Buffering) {
-            if (event.getBuffering() < 100f && !player.isPlaying()) spinner.setVisibility(View.VISIBLE);
-            else spinner.setVisibility(View.GONE);
+            if (event.getBuffering() < 100f && !player.isPlaying()) controls.setSpinnerVisible(true);
+            else controls.setSpinnerVisible(false);
         } else if (type == MediaPlayer.Event.Paused) {
-            playButton.setIcon(IconButton.PLAY);
+            controls.setPlayIcon(VlcControlsView.IconButton.PLAY);
             setControlsVisible(true);
         } else if (type == MediaPlayer.Event.EndReached) {
             ended = true;
-            playButton.setIcon(IconButton.PLAY);
+            controls.setPlayIcon(VlcControlsView.IconButton.PLAY);
             setControlsVisible(true);
             persist(true);
         } else if (type == MediaPlayer.Event.EncounteredError) {
@@ -1319,16 +983,16 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             String text = track.width + "×" + track.height
                     + (codec.length() > 0 ? " " + codec : "")
                     + " · " + (hwDecode ? "硬解优先" : "软解");
-            if (!text.equals(metaView.getText().toString())) metaView.setText(text);
+            if (!text.equals(lastMeta)) { lastMeta = text; controls.setMeta(text); }
         } catch (Throwable ignored) {}
     }
 
     private void updateClock(long time) {
         if (durationMs <= 0) durationMs = player == null ? 0 : player.getLength();
-        clockView.setText(fmt(time) + " / " + (durationMs > 0 ? fmt(durationMs) : "--:--"));
+        controls.setClock(fmt(time) + " / " + (durationMs > 0 ? fmt(durationMs) : "--:--"));
         if (durationMs > 0) {
             int progress = (int) Math.min(1000, time * 1000 / durationMs);
-            if (!seekBar.isPressed()) seekBar.setProgress(progress);
+            if (!controls.seekBar.isPressed()) controls.seekBar.setProgress(progress);
         }
     }
 
@@ -1399,11 +1063,11 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
                 try { mp.stop(); } catch (Throwable ignored) {}
             }
             try { mp.getVLCVout().detachViews(); } catch (Throwable ignored) {}
-            playingUrl.remove(mp);
+            session.clearPlayingUrl(mp);
             if (mp == playerA) pageA = pos; else pageB = pos;
         }
         // 幂等：这一页就挂在这个 player 上、地址也没变。滑走又滑回来走这条。
-        if (pos == claimed && url.equals(playingUrl.get(mp))) {
+        if (pos == claimed && url.equals(session.playingUrlOf(mp))) {
             try {
                 if (!mp.isPlaying()) mp.play();
                 mp.setVolume(100);
@@ -1415,7 +1079,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             activeFeedPlayer = mp;
             MediaPlayer otherQuiet = (mp == playerA) ? playerB : playerA;
             try { if (otherQuiet.isPlaying()) otherQuiet.pause(); } catch (Throwable ignored) {}
-            spinner.setVisibility(View.GONE);
+            controls.setSpinnerVisible(false);
             updateEpisodeUi();
             return;
         }
@@ -1427,7 +1091,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         if (agent.length() > 0) media.addOption(":http-user-agent=" + agent);
         mp.setMedia(media);
         media.release();
-        playingUrl.put(mp, url);
+        session.setPlayingUrl(mp, url);
         long resume = resumeOf(pos);
         mp.play();
         if (resume > 2000) mp.setTime(resume);
@@ -1438,7 +1102,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         // 另一个若在响，静下来（它认领着别的页，回滑时从原地继续）
         MediaPlayer other = (mp == playerA) ? playerB : playerA;
         try { if (other.isPlaying()) other.pause(); } catch (Throwable ignored) {}
-        spinner.setVisibility(View.GONE);
+        controls.setSpinnerVisible(false);
         setControlsVisible(false);
         updateEpisodeUi();
     }
@@ -1492,13 +1156,13 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         // 屏幕上什么都没有，声音却还是上一集 —— 用户只会当成卡死。
         silenceOthers(pos);
         // 滑回一集失败过的页面时要重新给机会：上一次可能只是那会儿网络抖了。
-        failed.remove(pos);
+        session.clearFailed(pos);
         // 页面起播时给的地址（index 那一集）直接吃掉——它刚刚就在网页播放器里放着
-        if (pos == payload.optInt("index", -1) && urlCache.get(pos) == null) {
+        if (pos == payload.optInt("index", -1) && !session.hasUrl(pos)) {
             String seed = payload.optString("url", "");
-            if (seed.length() > 0) urlCache.put(pos, seed);
+            session.rememberUrl(pos, seed);
         }
-        String url = urlCache.get(pos);
+        String url = session.urlOf(pos);
         if (url != null) {
             playPage(pos, url);
             preloadAround(pos);
@@ -1509,15 +1173,15 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         PageView pv = feedAdapter.pageAt(pos);
         if (pv != null) { pv.spin.setVisibility(View.VISIBLE); pv.error.setVisibility(View.GONE); }
         final int target = pos;
-        if (!resolving.add(pos)) return;   // 已经有人在取了
+        if (!session.beginResolve(pos)) return;   // 已经有人在取了
         new Thread(new Runnable() {
             @Override public void run() {
                 final String url = resolveViaJs(eps[target]);
                 ui.post(new Runnable() {
                     @Override public void run() {
-                        resolving.remove(target);
+                        session.endResolve(target);
                         if (url == null || url.length() == 0) {
-                            failed.add(target);
+                            session.markFailed(target);
                             PageView pv = feedAdapter.pageAt(target);
                             if (pv != null) {
                                 pv.spin.setVisibility(View.GONE);
@@ -1526,7 +1190,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
                             }
                             return;
                         }
-                        urlCache.put(target, url);
+                        session.rememberUrl(target, url);
                         if (target == curPos) {
                             playPage(target, url);
                             preloadAround(target);
@@ -1544,17 +1208,17 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     }
 
     private void preload(final int pos) {
-        if (pos < 0 || pos >= eps.length || urlCache.containsKey(pos) || resolving.contains(pos)
-                || failed.contains(pos)) return;
-        resolving.add(pos);
+        if (pos < 0 || pos >= eps.length || session.hasUrl(pos) || session.isResolving(pos)
+                || session.hasFailed(pos)) return;
+        session.beginResolve(pos);
         new Thread(new Runnable() {
             @Override public void run() {
                 final String url = resolveViaJs(eps[pos]);
                 ui.post(new Runnable() {
                     @Override public void run() {
-                        resolving.remove(pos);
+                        session.endResolve(pos);
                         if (url != null && url.length() > 0) {
-                            urlCache.put(pos, url);
+                            session.rememberUrl(pos, url);
                             // 用户可能在预取排队期间就滑到了这一页 —— 那时 activate
                             // 看到 resolving 里已有它就直接返回了，没人负责起播，
                             // 结果就是画面停在上一集、声音也还是上一集。这里补上。
@@ -1671,8 +1335,8 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     }
 
     private void updateEpisodeUi() {
-        titleView.setText(payload.optString("title", "播放中") + " · 第 " + eps[curPos] + " 集");
-        metaView.setText((hwDecode ? "硬解优先" : "软解") + " · " + abi()
+        controls.setTitle(payload.optString("title", "播放中") + " · 第 " + eps[curPos] + " 集");
+        controls.setMeta((hwDecode ? "硬解优先" : "软解") + " · " + abi()
                 + " · " + (curPos + 1) + "/" + eps.length);
     }
 
@@ -1683,7 +1347,8 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             long position = mp == null ? 0 : Math.max(0, mp.getTime());
             long duration = mp == null ? 0 : mp.getLength();
             JSONObject record = new JSONObject();
-            record.put("url", urlCache.containsKey(curPos) ? urlCache.get(curPos) : payload.optString("url", ""));
+            String cached = session.urlOf(curPos);
+            record.put("url", cached != null ? cached : payload.optString("url", ""));
             record.put("id", payload.optString("id", ""));
             record.put("episode", eps[curPos]);
             record.put("title", payload.optString("title", ""));
@@ -1709,8 +1374,8 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         playerB = null;
         pageA = pageB = -1;
         activeFeedPlayer = null;
-        feedWasPlaying = false;
-        playingUrl.clear();
+        session.setWasPlaying(false);
+        session.forgetPlayers();
     }
 
     /** 彻底关掉一个 player：先静音再停，stop 之后 VLC 还会吐几百毫秒的尾巴。 */
@@ -1743,19 +1408,21 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         } else if (type == MediaPlayer.Event.TimeChanged) {
             long time = mp.getTime();
             if (durationMs <= 0) durationMs = mp.getLength();
-            clockView.setText(fmt(time) + " / " + (durationMs > 0 ? fmt(durationMs) : "--:--"));
-            if (durationMs > 0 && !seekBar.isPressed()) {
-                seekBar.setProgress((int) Math.min(1000, time * 1000 / durationMs));
+            controls.setClock(fmt(time) + " / " + (durationMs > 0 ? fmt(durationMs) : "--:--"));
+            if (durationMs > 0 && !controls.seekBar.isPressed()) {
+                controls.seekBar.setProgress((int) Math.min(1000, time * 1000 / durationMs));
             }
             describeFeedTrack(mp);
         } else if (type == MediaPlayer.Event.Playing) {
             PageView pv = feedAdapter != null ? feedAdapter.pageAt(curPos) : null;
             if (pv != null) pv.spin.setVisibility(View.GONE);
-            playButton.setIcon(IconButton.PAUSE);
+            controls.setPlayIcon(VlcControlsView.IconButton.PAUSE);
+            // 起播成功 → 换线游标归零。下一次报错还从第一条备选试起。
+            session.resetAlt(curPos);
             describeFeedTrack(mp);
             ui.postDelayed(hideControls, HIDE_CONTROLS_MS);
         } else if (type == MediaPlayer.Event.Paused) {
-            playButton.setIcon(IconButton.PLAY);
+            controls.setPlayIcon(VlcControlsView.IconButton.PLAY);
             setControlsVisible(true);
         } else if (type == MediaPlayer.Event.EndReached) {
             ended = true;
@@ -1765,17 +1432,64 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             if (curPos + 1 < eps.length) {
                 pager.smoothScrollToPosition(curPos + 1);
             } else {
-                playButton.setIcon(IconButton.PLAY);
+                controls.setPlayIcon(VlcControlsView.IconButton.PLAY);
                 setControlsVisible(true);
             }
         } else if (type == MediaPlayer.Event.EncounteredError) {
-            PageView pv = feedAdapter.pageAt(curPos);
+            tryNextAlt();
+        }
+    }
+
+    /**
+     * 这一页的备选线路。
+     *
+     * 只有**起播那一集**带 —— 页面把适配器排好序的 lines 去掉第一条之后塞进
+     * payload.alts（feed-player.js 那边写着「内置播放器在 EncounteredError 时
+     * 按这个列表换线重试」）。别的集是滑动时现取的，没有备选，返回空表。
+     */
+    private String[] altsOf(int pos) {
+        if (pos != payload.optInt("index", -1)) return NO_ALTS;
+        org.json.JSONArray raw = payload.optJSONArray("alts");
+        if (raw == null || raw.length() == 0) return NO_ALTS;
+        ArrayList<String> out = new ArrayList<String>();
+        for (int i = 0; i < raw.length(); i++) {
+            // 只滤空串，不滤「和当前那条一样」的 —— 数组必须每次调用都一模一样长，
+            // 否则会话里那个「试到第几条」的游标会跟着数组一起缩，第二条就提前认输。
+            String line = raw.optString(i, "");
+            if (line.length() > 0) out.add(line);
+        }
+        return out.isEmpty() ? NO_ALTS : out.toArray(new String[0]);
+    }
+
+    /**
+     * 内置播放器解不了这一条线时换代选线路。用完才认输。
+     *
+     * 这条兜底不依赖任何探测或缓存判断，是整条链路上唯一永远成立的机制 ——
+     * 前面那些（首条线路、预取、缓存命中）都可能因为站点抽风而全线失效，
+     * 只有「这条放不了就换下一条」不需要任何假设。
+     *
+     * 游标在 {@link VlcSession#takeNextAlt} 里，每调一次前进一格；成功起播时
+     * 由 Playing 事件清零，所以「换过一条能放」之后下一次报错还是从第一条试起。
+     */
+    private void tryNextAlt() {
+        String[] alts = altsOf(curPos);
+        int next = session.takeNextAlt(curPos, alts.length);
+        if (next < 0) {
+            PageView pv = feedAdapter == null ? null : feedAdapter.pageAt(curPos);
             if (pv != null) {
                 pv.spin.setVisibility(View.GONE);
                 pv.error.setVisibility(View.VISIBLE);
                 pv.error.setText("第 " + eps[curPos] + " 集内置播放器也解不了，回上一页重新取一次");
             }
+            return;
         }
+        // 幂等判断认的是「这个 player 上挂着哪条地址」，所以换代选之前必须先把
+        // 旧的那条抹掉，否则 playPage 会认为「地址没变」而直接 play 旧流。
+        MediaPlayer mp = playerFor(curPos);
+        if (mp != null) session.clearPlayingUrl(mp);
+        session.rememberUrl(curPos, alts[next]);
+        android.util.Log.i("HG.Vlc", "换线：第 " + eps[curPos] + " 集 → 备选 " + (next + 1) + "/" + alts.length);
+        playPage(curPos, alts[next]);
     }
 
     private void describeFeedTrack(MediaPlayer mp) {
@@ -1783,7 +1497,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             IMedia.VideoTrack track = mp.getCurrentVideoTrack();
             if (track == null) return;
             String codec = track.codec == null ? "" : track.codec.toUpperCase(Locale.US);
-            metaView.setText(track.width + "×" + track.height
+            controls.setMeta(track.width + "×" + track.height
                     + (codec.length() > 0 ? " " + codec : "")
                     + " · " + (hwDecode ? "硬解优先" : "软解")
                     + " · 第 " + eps[curPos] + " 集");

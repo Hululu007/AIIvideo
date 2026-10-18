@@ -137,8 +137,8 @@ public final class AiiHttp {
     static String effectiveProxy(String mode, String builtin, String raw) {
         String core = builtin == null ? "" : builtin;
         String manual = raw == null ? "" : raw;
-        if (UserSource.MODE_DIRECT.equals(mode)) return "";
-        if (UserSource.MODE_EXTERNAL.equals(mode)) return manual;
+        if (ProxyConsole.MODE_DIRECT.equals(mode)) return "";
+        if (ProxyConsole.MODE_EXTERNAL.equals(mode)) return manual;
         return core.length() > 0 ? core : manual;
     }
 
@@ -147,7 +147,7 @@ public final class AiiHttp {
         Context context = appContext;
         if (context == null) return "";
         try {
-            return UserSource.proxyMode(context);
+            return ProxyConsole.proxyMode(context);
         } catch (Throwable e) {
             return "";
         }
@@ -335,7 +335,7 @@ public final class AiiHttp {
         builder.header("Accept-Encoding", "identity");
         // 分流：直连表里的域名现拼一个不带代理的 client（client(profile) 是按
         // 代理串缓存的，可能挂着内置核心的 SOCKS）。见 rawWith 同一段注释。
-        if (DirectHosts.isDirect(hostOfUrl(url))) {
+        if (NetRoute.directOnly(hostOfUrl(url))) {
             OkHttpClient.Builder bypass = new OkHttpClient.Builder()
                     .connectTimeout(http.connectTimeoutMillis(), TimeUnit.MILLISECONDS)
                     .readTimeout(http.readTimeoutMillis(), TimeUnit.MILLISECONDS);
@@ -343,6 +343,12 @@ public final class AiiHttp {
                 bypass.dns(http.dns());
             }
             http = bypass.build();
+        } else if (NetRoute.mustProxy(hostOfUrl(url)) && http.proxy() == null) {
+            // 自洽性兜底：路由说要走代理，可这个 client 身上没有代理。
+            // 只会发生在一处 —— 缓存的 client 是代理还没起来（effectiveProxy 空）
+            // 时建的，之后没被换掉。表现是「域名被 DNS 污染，直连 75 秒超时」。
+            // 不在这里修的话，错的那一次就一直是那一次，而且日志里看不出是路由的问题。
+            http = proxiedClient(profile, http);
         }
         Response response = http.newCall(builder.build()).execute();
         try {
@@ -366,7 +372,7 @@ public final class AiiHttp {
             // 进程起来就把老的「手填地址 + 默认直连」迁成 external。
             // 不能等用户打开设置页才迁 —— 那之前所有请求都会变成直连，
             // 用户看到的是「升级完就全站连不上了」。
-            UserSource.migrateProxyMode(appContext);
+            ProxyConsole.migrateProxyMode(appContext);
         }
     }
 
@@ -624,12 +630,14 @@ public final class AiiHttp {
         // effectiveProxy（plainClient 是按代理串缓存的，不能改），所以命中时
         // 现拼一个不带代理的 client —— 这类请求都是接口级、量不大，多 new 一次
         // 可忽略；重要的事只有一个：绝不再进那条节点。
-        if (DirectHosts.isDirect(hostOfUrl(url))) {
+        if (NetRoute.directOnly(hostOfUrl(url))) {
             OkHttpClient.Builder bypass = new OkHttpClient.Builder()
                     .connectTimeout(http.connectTimeoutMillis(), TimeUnit.MILLISECONDS)
                     .readTimeout(http.readTimeoutMillis(), TimeUnit.MILLISECONDS)
                     .dns(IPV4_FIRST);
             http = bypass.build();
+        } else if (NetRoute.mustProxy(hostOfUrl(url)) && http.proxy() == null) {
+            http = proxiedClient(null, http);      // 同 getWith 那条兜底
         }
         Response response = http.newCall(request).execute();
         try {
@@ -682,11 +690,8 @@ public final class AiiHttp {
         // Read timed out」和「订阅拉取失败：failed to connect ... from 192.168.x.x」。
         // 这两个功能恰恰是最需要代理的：它们下载的地址就在墙外。
         // 分流例外：直连表里的域名（AGE/黄果 这类）摘掉代理，理由见 rawWith。
-        Route route = DirectHosts.isDirect(hostOfUrl(url)) ? null : parseProxy(effectiveProxy());
-        if (route != null) {
-            oneBuilder.proxy(route.proxy);
-            attachAuth(oneBuilder, route);
-        }
+        ProxyRoute route = NetRoute.directOnly(hostOfUrl(url)) ? null : effectiveRoute();
+        if (route != null) route.applyTo(oneBuilder);
         OkHttpClient one = oneBuilder.build();
         Response response = one.newCall(request).execute();
         try {
@@ -808,99 +813,86 @@ public final class AiiHttp {
         }
     }
 
-    private static OkHttpClient client(SiteProfile profile) {
-        final String want = effectiveProxy();
-        OkHttpClient existing = client;
-        // 代理改了必须重建 —— OkHttp 的 proxy 是构造期定下来的，改不了。
-        if (existing != null && want.equals(appliedEffective)) return existing;
-        synchronized (AiiHttp.class) {
-            if (client == null || !want.equals(appliedEffective)) {
-                OkHttpClient.Builder builder = new OkHttpClient.Builder()
-                        .dns(new SmartDns(profile))
-                        .connectTimeout(CONNECT_TIMEOUT, TimeUnit.SECONDS)
-                        .readTimeout(READ_TIMEOUT, TimeUnit.SECONDS);
-                Route route = parseProxy(want);
-                if (route != null) {
-                    builder.proxy(route.proxy);
-                    attachAuth(builder, route);
-                    log("走代理 " + describe(route));
-                } else if (want.length() > 0) {
-                    log("代理地址认不出来，按直连处理：" + want);
-                }
-                client = builder.build();
-                appliedEffective = want;
-            }
-            return client;
+    // ── 客户端工厂（唯一一处）────────────────────────────────────────
+
+    /**
+     * 客户端缓存。key 里带齐所有会影响实例行为的参数：
+     * <b>协议版本 + 超时 + 路由 + DNS 实现</b>。
+     *
+     * <p>以前是四个字段四份判断（{@code client} / {@code http1Client} /
+     * {@code plainClient} / {@code plainHttp1}，各自配一个 {@code appliedXxx}
+     * 记录「上次是按什么参数建的」）。四份代码干同一件事，而且各自漏过不同的边：
+     * plainClient 忘了比超时（不同超时的请求复用同一个实例，传进来的
+     * timeoutSeconds 等于没生效），http1Client 忘了比 DNS。
+     *
+     * <p>改成「参数算 key」之后，这类漏判在结构上不存在 —— 参数不同，key 就不同，
+     * 一定是新实例。
+     */
+    private static final java.util.Map<String, OkHttpClient> CLIENTS =
+            new java.util.concurrent.ConcurrentHashMap<String, OkHttpClient>();
+
+    /**
+     * 建一个客户端。
+     *
+     * @param http1     只谈 HTTP/1.1（h2 被中间设备重置时的兜底）
+     * @param dns       null 表示用 OkHttp 默认解析；和别的实现不共用缓存
+     * @param route     null 表示直连
+     */
+    private static OkHttpClient clientFor(boolean http1, int connectSeconds, int readSeconds,
+                                          Dns dns, ProxyRoute route) {
+        String key = (http1 ? "h1" : "h2")
+                + "|" + connectSeconds + "/" + readSeconds
+                + "|" + (route == null ? "direct" : route.key())
+                + "|" + (dns == null ? "system" : dns.getClass().getSimpleName());
+        OkHttpClient hit = CLIENTS.get(key);
+        if (hit != null) return hit;
+
+        OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                .connectTimeout(connectSeconds, TimeUnit.SECONDS)
+                .readTimeout(readSeconds, TimeUnit.SECONDS);
+        if (http1) builder.protocols(java.util.Collections.singletonList(okhttp3.Protocol.HTTP_1_1));
+        if (dns != null) builder.dns(dns);
+        if (route != null) {
+            route.applyTo(builder);
+            log("走代理 " + route.describe());
         }
+        OkHttpClient built = builder.build();
+        CLIENTS.put(key, built);
+        return built;
     }
 
-    /** 只谈 HTTP/1.1 的同一套客户端。给「h2 被中间设备重置」的场景兜底用。 */
-    private static volatile OkHttpClient http1Client;
-    private static volatile String http1AppliedEffective = null;
+    /** 主客户端：带 SmartDns（DoH + 配置钉死的地址）。 */
+    private static OkHttpClient client(SiteProfile profile) {
+        return clientFor(false, CONNECT_TIMEOUT, READ_TIMEOUT, new SmartDns(profile), effectiveRoute());
+    }
 
+    /** 主客户端的 HTTP/1.1 变体。 */
     private static OkHttpClient http1Client(SiteProfile profile) {
-        final String want = effectiveProxy();
-        OkHttpClient existing = http1Client;
-        if (existing != null && want.equals(http1AppliedEffective)) return existing;
-        synchronized (AiiHttp.class) {
-            if (http1Client == null || !want.equals(http1AppliedEffective)) {
-                OkHttpClient.Builder builder = new OkHttpClient.Builder()
-                        .dns(new SmartDns(profile))
-                        .protocols(java.util.Collections.singletonList(okhttp3.Protocol.HTTP_1_1))
-                        .connectTimeout(CONNECT_TIMEOUT, TimeUnit.SECONDS)
-                        .readTimeout(READ_TIMEOUT, TimeUnit.SECONDS);
-                Route route = parseProxy(want);
-                if (route != null) {
-                    builder.proxy(route.proxy);
-                    attachAuth(builder, route);
-                }
-                http1Client = builder.build();
-                http1AppliedEffective = want;
-            }
-            return http1Client;
-        }
+        return clientFor(true, CONNECT_TIMEOUT, READ_TIMEOUT, new SmartDns(profile), effectiveRoute());
+    }
+
+    /** 朴素客户端：指定超时、不带 SmartDns。 */
+    private static OkHttpClient plainClient(int timeoutSeconds) {
+        return clientFor(false, timeoutSeconds, timeoutSeconds, null, effectiveRoute());
+    }
+
+    /** 朴素客户端的 HTTP/1.1 变体。 */
+    private static OkHttpClient plainHttp1Client(int timeoutSeconds) {
+        return clientFor(true, timeoutSeconds, timeoutSeconds, null, effectiveRoute());
     }
 
     /**
-     * CMS 适配器专用的朴素客户端：不套我们的 headers 模板、不用 DoH。
+     * 按当前路由现拼一个 client，**照抄传进来那个的超时和 DNS**。
      *
-     * 但**必须缓存**，而且**必须挂代理** —— 这两条第一版都漏了：
-     *   · 每次 new 一个 OkHttpClient 等于每条请求都重来一遍连接池和 TLS 握手
-     *   · 用户的代理设置在这里被完全忽略（CMS 源的请求根本没走代理）
-     * 代理改了要重建，跟主客户端一个规矩。
+     * 用在「路由说要代理、但手里的 client 没有代理」这唯一一种自洽性破洞上。
+     * 这不是分流逻辑，是纠错：分流只该在 {@link NetRoute} 里判一次。
      */
-    private static volatile OkHttpClient plainClient;
-    private static volatile String plainAppliedEffective = null;
-    private static volatile int plainAppliedTimeout = -1;
-
-    private static OkHttpClient plainClient(int timeoutSeconds) {
-        final String want = effectiveProxy();
-        OkHttpClient existing = plainClient;
-        // 判据里必须带上超时：只比代理串的话，第一个请求用几秒建的实例会被后面
-        // 所有不同超时的请求复用，传进来的 timeoutSeconds 等于没生效。
-        if (existing != null && want.equals(plainAppliedEffective)
-                && timeoutSeconds == plainAppliedTimeout) {
-            return existing;
-        }
-        synchronized (AiiHttp.class) {
-            if (plainClient == null || !want.equals(plainAppliedEffective)
-                    || timeoutSeconds != plainAppliedTimeout) {
-                OkHttpClient.Builder builder = new OkHttpClient.Builder()
-                        .connectTimeout(timeoutSeconds, TimeUnit.SECONDS)
-                        .readTimeout(timeoutSeconds, TimeUnit.SECONDS)
-                        // [A/B] 临时去掉，对照是否 IPV4_FIRST 导致阻塞
-                        ;
-                Route route = parseProxy(want);
-                if (route != null) {
-                    builder.proxy(route.proxy);
-                    attachAuth(builder, route);
-                }
-                plainClient = builder.build();
-                plainAppliedEffective = want;
-                plainAppliedTimeout = timeoutSeconds;
-            }
-            return plainClient;
-        }
+    private static OkHttpClient proxiedClient(SiteProfile profile, OkHttpClient like) {
+        Dns dns = profile != null ? new SmartDns(profile) : like.dns();
+        return clientFor(false,
+                (int) (like.connectTimeoutMillis() / 1000),
+                (int) (like.readTimeoutMillis() / 1000),
+                dns, effectiveRoute());
     }
 
     /**
@@ -936,32 +928,6 @@ public final class AiiHttp {
         }
     };
 
-    /** plain 客户端的 HTTP/1.1 变体，用途同上：h2 被掐时的兜底。 */
-    private static volatile OkHttpClient plainHttp1;
-    private static volatile String plainHttp1AppliedEffective = null;
-
-    private static OkHttpClient plainHttp1Client(int timeoutSeconds) {
-        final String want = effectiveProxy();
-        OkHttpClient existing = plainHttp1;
-        if (existing != null && want.equals(plainHttp1AppliedEffective)) return existing;
-        synchronized (AiiHttp.class) {
-            if (plainHttp1 == null || !want.equals(plainHttp1AppliedEffective)) {
-                OkHttpClient.Builder builder = new OkHttpClient.Builder()
-                        .protocols(java.util.Collections.singletonList(okhttp3.Protocol.HTTP_1_1))
-                        .connectTimeout(timeoutSeconds, TimeUnit.SECONDS)
-                        .readTimeout(timeoutSeconds, TimeUnit.SECONDS);
-                Route route = parseProxy(want);
-                if (route != null) {
-                    builder.proxy(route.proxy);
-                    attachAuth(builder, route);
-                }
-                plainHttp1 = builder.build();
-                plainHttp1AppliedEffective = want;
-            }
-            return plainHttp1;
-        }
-    }
-
     // ── 代理的读写与解析 ──────────────────────────────────────────────
 
     private static SharedPreferences netStore() {
@@ -988,17 +954,7 @@ public final class AiiHttp {
      * 不换实例的话旧连接会继续指向已经关掉的端口。
      */
     static void invalidateClients() {
-        synchronized (AiiHttp.class) {
-            client = null;
-            appliedProxy = null;
-            appliedEffective = null;
-            http1Client = null;
-            http1AppliedEffective = null;
-            plainClient = null;
-            plainAppliedEffective = null;
-            plainHttp1 = null;
-            plainHttp1AppliedEffective = null;
-        }
+        CLIENTS.clear();
         // 媒体代理是另一条链路，但它读的是同一个 effectiveProxy()。
         MediaProxy.invalidate();
     }
@@ -1008,88 +964,11 @@ public final class AiiHttp {
         SharedPreferences store = netStore();
         if (store == null) return "存储不可用";
         String clean = value == null ? "" : value.trim();
-        if (clean.length() > 0 && parseProxy(clean) == null) {
-            return "格式看不懂。可以填 host:port、socks5://host:port，带账号密码写成 user:pass@host:port";
-        }
+        ProxyRoute.Parsed parsed = ProxyRoute.parse(clean);
+        if (!parsed.ok()) return parsed.error;
         store.edit().putString(PROXY_KEY, clean).apply();
         invalidateClients();           // 逼下一次请求重建
         return null;
-    }
-
-    /**
-     * 代理串解析的结果：一根管道 + 可选的账号密码。
-     *
-     * 认这些写法（管道的类型看 scheme，不写默认 HTTP）：
-     *   host:port
-     *   socks5://host:port
-     *   user:pass@host:port
-     *   socks5://user:pass@host:port
-     *   http://user:pass@host:port
-     *
-     * 认不出来返回 null，调用方按直连处理。
-     */
-    private static final class Route {
-        final Proxy proxy;
-        final String user;
-        final String pass;
-        Route(Proxy proxy, String user, String pass) {
-            this.proxy = proxy; this.user = user; this.pass = pass;
-        }
-        boolean needsAuth() { return user != null; }
-    }
-
-    private static Route parseProxy(String raw) {
-        if (raw == null) return null;
-        String text = raw.trim();
-        if (text.length() == 0) return null;
-
-        Proxy.Type type = Proxy.Type.HTTP;
-        String lower = text.toLowerCase(java.util.Locale.ROOT);
-        if (lower.startsWith("socks5://") || lower.startsWith("socks://")) {
-            type = Proxy.Type.SOCKS;
-            text = text.substring(text.indexOf("://") + 3);
-        } else if (lower.startsWith("http://")) {
-            text = text.substring(7);
-        } else if (lower.startsWith("https://")) {
-            text = text.substring(8);
-        }
-
-        // 账号密码在 @ 之前。用 lastIndexOf：密码里带 @ 也不怕
-        // （user:p@ss@host:port 要切成 user:p@ss 和 host:port）。
-        String user = null;
-        String pass = "";
-        int at = text.lastIndexOf('@');
-        if (at >= 0) {
-            String credentials = text.substring(0, at);
-            text = text.substring(at + 1);
-            int sep = credentials.indexOf(':');
-            if (sep < 0) {
-                user = credentials;
-            } else {
-                user = credentials.substring(0, sep);
-                pass = credentials.substring(sep + 1);
-            }
-            if (user.length() == 0) return null;
-        }
-
-        int colon = text.lastIndexOf(':');
-        if (colon <= 0 || colon == text.length() - 1) return null;
-        String host = text.substring(0, colon);
-        int port;
-        try {
-            port = Integer.parseInt(text.substring(colon + 1).trim());
-        } catch (NumberFormatException e) {
-            return null;
-        }
-        // host 里不能有斜杠和空白。少了这一条，「://1.2.3.4:1080」这种残片会被
-        // 当成 host 收下（createUnresolved 不做校验），然后在发请求时炸成一句
-        // 看不出所以然的错。宁可在这里拒绝。
-        if (port <= 0 || port > 65535 || host.length() == 0) return null;
-        if (host.indexOf('/') >= 0 || host.indexOf('\\') >= 0) return null;
-        for (int i = 0; i < host.length(); i++) {
-            if (Character.isWhitespace(host.charAt(i))) return null;
-        }
-        return new Route(new Proxy(type, InetSocketAddress.createUnresolved(host, port)), user, pass);
     }
 
     /**
@@ -1107,12 +986,19 @@ public final class AiiHttp {
      * 而这个方法的返回值会进 logcat 附近的调试路径。
      */
     static java.net.Proxy effectiveJavaProxy() {
-        try {
-            Route route = parseProxy(effectiveProxy());
-            return route == null ? null : route.proxy;
-        } catch (Throwable ignored) {
-            return null;
-        }
+        ProxyRoute route = effectiveRoute();
+        return route == null ? null : route.javaProxy();
+    }
+
+    /**
+     * 当前生效的代理路由。**null 表示直连。**
+     *
+     * 这是「代理」在这套代码里的唯一形态：字符串只在 {@link #setProxy} 进、
+     * {@link #proxyRaw} 出的时候出现，中间所有消费方拿的都是这个对象。
+     */
+    static ProxyRoute effectiveRoute() {
+        ProxyRoute.Parsed parsed = ProxyRoute.parse(effectiveProxy());
+        return parsed.route;
     }
 
     /**
@@ -1122,70 +1008,15 @@ public final class AiiHttp {
      * @return null 表示没代理（直连）或挂上了；非 null 是那句认不出来的原串，调用方拿去打日志
      */
     static String attachProxy(OkHttpClient.Builder builder, String proxyText) {
-        if (proxyText == null || proxyText.trim().length() == 0) return null;
-        Route route = parseProxy(proxyText);
-        if (route == null) return proxyText;
-        builder.proxy(route.proxy);
-        attachAuth(builder, route);
+        ProxyRoute.Parsed parsed = ProxyRoute.parse(proxyText);
+        if (parsed.direct()) return null;
+        if (parsed.route == null) return proxyText;   // 认不出来，调用方拿去打日志
+        parsed.route.applyTo(builder);
         return null;
     }
 
-    /** 把凭据挂到客户端上。HTTP 走 proxyAuthenticator，SOCKS 走全局 Authenticator。 */
-    private static void attachAuth(OkHttpClient.Builder builder, final Route route) {
-        if (!route.needsAuth()) return;
-        if (route.proxy.type() == Proxy.Type.HTTP) {
-            builder.proxyAuthenticator(new Authenticator() {
-                @Override public Request authenticate(okhttp3.Route r, Response response) {
-                    if (response.request().header("Proxy-Authorization") != null) return null;
-                    return response.request().newBuilder()
-                            .header("Proxy-Authorization", Credentials.basic(route.user, route.pass))
-                            .build();
-                }
-            });
-        } else {
-            applySocksAuth(route);
-        }
-    }
 
-    /**
-     * 日志用的描述。**不打印账号密码** —— 这行会进 logcat，而凭据是明文的。
-     */
-    private static String describe(Route route) {
-        return route.proxy.type() + " " + route.proxy.address() + (route.needsAuth() ? "（带认证）" : "");
-    }
 
-    /**
-     * SOCKS 代理的认证。
-     *
-     * OkHttp 只给了 HTTP 代理的钩子（proxyAuthenticator），SOCKS 那条路走的是
-     * java.net.Socket 内部，认证要挂全局的 java.net.Authenticator —— 没有别的口子。
-     * 设之前先看 requestorType，只回代理那一路的凭据，别把别的认证也一并接管了。
-     */
-    private static void applySocksAuth(final Route route) {
-        try {
-            java.net.Authenticator.setDefault(new java.net.Authenticator() {
-                @Override protected java.net.PasswordAuthentication getPasswordAuthentication() {
-                    // ⚠ Java 的 SOCKS 实现用的是 RequestorType.SERVER，**不是 PROXY**。
-                    // 这里按直觉写成 `!= PROXY 就 return null` 的话，凭据永远回不去，
-                    // 服务端只会收到空认证，报「SOCKS : authentication failed」——
-                    // 而同一个密码用 curl -x socks5h:// 是完全通的，很容易怀疑到密码头上去。
-                    // 实测日志：type=SERVER proto=SOCKS5 host=64.64.224.121:19108
-                    //
-                    // 判断条件改用「协议 + 目标地址」，比 RequestorType 可靠，
-                    // 也不会顺手把别的认证请求接管了。
-                    if (!"SOCKS5".equalsIgnoreCase(String.valueOf(getRequestingProtocol()))) return null;
-                    java.net.SocketAddress raw = route.proxy.address();
-                    if (!(raw instanceof InetSocketAddress)) return null;
-                    InetSocketAddress address = (InetSocketAddress) raw;
-                    if (!String.valueOf(getRequestingHost()).equals(address.getHostString())) return null;
-                    if (getRequestingPort() != address.getPort()) return null;
-                    return new java.net.PasswordAuthentication(route.user, route.pass.toCharArray());
-                }
-            });
-        } catch (Throwable e) {
-            log("SOCKS 认证设置失败：" + e);
-        }
-    }
 
     /** 请求头模板来自 site-default.json 的 headers，{origin} 换成实际域名。 */
     private static void applyHeaders(Request.Builder builder, SiteProfile profile, String url) {
