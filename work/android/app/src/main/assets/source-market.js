@@ -201,11 +201,13 @@ function spiderSection() {
     const meta = [item.id, 'v' + (item.version || 0), item.source === 'hot' ? '热更' : '内置']
       .filter(Boolean).join(' · ');
     const chip = ok ? '可用' : '不可用';
+    const user = item.source === 'user';
     return `<li class="source-row${ok ? '' : ' is-disabled'}">
       <button type="button" class="source-pick" data-spider-call="${esc(item.id)}" ${ok ? '' : 'disabled'}>
         <span><strong>${esc(item.name || item.id || '未命名')}</strong><small>${esc(meta)}</small></span>
         <em class="${ok ? 'is-ok' : 'is-warn'}">${esc(chip)}</em>
       </button>
+      ${user ? `<button type="button" class="source-drop" data-spider-remove="${esc(item.id)}" aria-label="删除 ${esc(item.name || item.id)}">×</button>` : ''}
       ${ok ? '' : `<p class="settings-form-hint">${esc(item.reason || '加载不了')}</p>`}
     </li>`;
   }).join('');
@@ -219,7 +221,12 @@ function spiderSection() {
       <span class="settings-tail"><button type="button" class="settings-mini" data-spider-refresh="1">刷新</button></span>
     </div>
     ${items.length ? `<ul class="source-list">${rows}</ul>` : ''}
-    <p class="settings-form-hint">${box ? 'ABI ' + box.abi + ' · 源以 js 形式随热更下发，加源不用更新应用' : ''}</p>
+    <form class="password-form settings-form" data-spider-install="1">
+      <input id="spider-url" type="text" inputmode="url" autocomplete="off" autocapitalize="off"
+             spellcheck="false" placeholder="https://…/source.js" aria-label="spider 源地址">
+      <button type="submit">添加源</button>
+    </form>
+    <p class="settings-form-hint">${box ? 'ABI ' + box.abi + ' · 贴一个 js 地址即可，不用更新应用' : ''}</p>
   </section>`;
 }
 
@@ -289,7 +296,46 @@ function renderSourceSettings() {
 /** 写/清一个源的备注。空串 = 清掉，退回自动取的名字。 */
 // spider 的点击与刷新走 document 上的委托：这几行是这个文件自己的一小块，
 // 不值得再往 app.js 那个巨大的点击处理器里塞一条分支。
+document.addEventListener('submit', async event => {
+  const form = event.target.closest('[data-spider-install]');
+  if (!form) return;
+  event.preventDefault();
+  const input = form.querySelector('#spider-url');
+  const url = String(input?.value || '').trim();
+  if (!/^https:\/\//i.test(url)) { toast('地址必须以 https:// 开头'); return; }
+  input.disabled = true;
+  toast('正在下载源…', true);
+  try {
+    const meta = await bridgeCall('spider', { op: 'install', url });
+    toast('已添加 ' + (meta?.name || meta?.id || '源'));
+    input.value = '';
+    state.spiders = null;
+    await loadSpiderSources(true);
+  } catch (error) {
+    toast('添加失败：' + (error.message || error));
+  } finally {
+    input.disabled = false;
+    if (state.route === 'source-settings') renderSourceSettings();
+  }
+});
+
 document.addEventListener('click', async event => {
+  const drop = event.target.closest('[data-spider-remove]');
+  if (drop) {
+    event.preventDefault();
+    const id = drop.getAttribute('data-spider-remove');
+    const accepted = await askConfirmation('删除这个源', '删掉之后它就不再出现在列表里，可以重新添加。', '删除');
+    if (!accepted) return;
+    try {
+      await bridgeCall('spider', { op: 'remove', id });
+      state.spiders = null;
+      await loadSpiderSources(true);
+    } catch (error) {
+      toast('删除失败：' + (error.message || error));
+    }
+    if (state.route === 'source-settings') renderSourceSettings();
+    return;
+  }
   const call = event.target.closest('[data-spider-call]');
   const refresh = event.target.closest('[data-spider-refresh]');
   if (!call && !refresh) return;

@@ -1076,6 +1076,16 @@ public final class MainActivity extends Activity {
                 out.put("abi", SpiderRuntime.ABI);
                 return out;
             }
+            if ("install".equals(op)) {
+                // 贴一个 https 地址就装一个源 —— 这条路走完，「加源不发版」才算真的闭环：
+                // 之前源只能靠热更包下发，而热更包要自己签名发布，普通用户加不了源。
+                return SpiderStore.install(this, jSONObject.optString("url"));
+            }
+            if ("remove".equals(op)) {
+                JSONObject out = new JSONObject();
+                out.put("removed", SpiderStore.remove(this, jSONObject.optString("id")));
+                return out;
+            }
             if ("call".equals(op)) {
                 return SpiderStore.call(this, jSONObject.optString("id"), jSONObject.optString("cap", "home"),
                         jSONObject.optJSONObject("args") == null ? new JSONObject() : jSONObject.optJSONObject("args"),

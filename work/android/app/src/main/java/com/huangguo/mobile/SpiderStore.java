@@ -52,6 +52,18 @@ final class SpiderStore {
     private static final String ASSET_DIR = "spiders";
 
     /**
+     * 用户自己装的源（应用私有目录下的 {@code files/spiders/}）。
+     *
+     * <p>这是「像 TVBox 那样贴一个地址就能加源」的落点：地址指向一个 js 文件，
+     * 下回来校验、落盘，之后就当一个普通源用。优先级最高 —— 用户手动装的版本
+     * 应该盖过热更下发的同名源，否则他改了也没用，排错时会疯。
+     */
+    private static final String INSTALL_DIR = "spiders";
+
+    /** 安装时的下载超时。源文件很小，20 秒足够；再久就是站点或代理出了问题。 */
+    private static final int INSTALL_TIMEOUT_S = 20;
+
+    /**
      * 单份源码的上限 2MB。
      *
      * <p>正常的源是几 KB 到几十 KB；2MB 已经能装下最离谱的站。设上限是为了防
@@ -134,12 +146,145 @@ final class SpiderStore {
         return SpiderRuntime.call(ctx, source, cap, args, timeoutMs);
     }
 
+    /**
+     * 装一个源：贴地址 → 下载 → 校验 → 落盘。**后台线程调用。**
+     *
+     * <p>这就是「像 TVBox 那样加源」的那一步。它只做三件事：
+     *
+     * <ol>
+     *   <li>只认 https —— http 在移动网络里会被运营商插页，下回来的 js 可能是
+     *       别人的广告脚本，而这段代码要以源的身份联网；</li>
+     *   <li>大小、id、requires 三道校验全过才落盘 —— 一个 id 不合法的源装进去，
+     *       列表里会出现一个永远调不动的孤儿；</li>
+     *   <li>落盘是「写临时文件 → rename」—— 直接覆盖写的话，正好在那一刻被调用
+     *       就会读到半截 js，报的错是语法错误，和真正的原因（正在装）毫无关系。</li>
+     * </ol>
+     *
+     * <p><b>信任模型说明在 {@link #installBytes} 上</b>，那是这条链路的入口。
+     *
+     * @return 装好的源的元信息（和 {@link #list} 里那一项同形，source 是 "user"）
+     */
+    static JSONObject install(Context ctx, String url) throws Exception {
+        if (url == null || !url.trim().toLowerCase(java.util.Locale.ROOT).startsWith("https://")) {
+            throw new IOException("只支持 https 地址");
+        }
+        byte[] raw = AiiHttp.getRaw(url.trim(), null, INSTALL_TIMEOUT_S);
+        return installBytes(ctx, url.trim(), raw);
+    }
+
+    /**
+     * 装一个源（已下载好的字节）。和 {@link #install} 分开是为了能单测。
+     *
+     * <p><b>信任模型</b>：装进来的 js 会在一个 CSP 锁死的宿主页里跑，能力只有
+     * {@code net / log / done} 三样，而 {@code net} 只放行它在 {@code hosts} 里
+     * 自己声明的域。所以一个源能碰什么，写在它自己的文件里 —— 和 TVBox 一家人
+     * 一样的模型：<b>边界是「你装了什么」，不是「它能干什么」</b>。壳这侧只保证
+     * 它没有 DOM、没有文件、没有 socket、没有 dex。
+     */
+    static JSONObject installBytes(Context ctx, String url, byte[] raw) throws Exception {
+        return installTo(installDir(ctx), url, raw);
+    }
+
+    /**
+     * 把源写进指定目录。和 Context 解耦是为了能在 JVM 单测里跑 —— 这条链路
+     * 「校验 → 落盘 → 可再删除」，每一步错了都不会崩，只会让用户看到一个
+     * 永远调不动的孤儿源。
+     */
+    static JSONObject installTo(File dir, String url, byte[] raw) throws Exception {
+        if (raw == null || raw.length == 0) throw new IOException("下载回来的内容是空的");
+        if (raw.length > MAX_SOURCE_BYTES) {
+            throw new IOException("源文件太大（" + (raw.length / 1024) + "KB），上限 2MB");
+        }
+        String src = new String(raw, java.nio.charset.StandardCharsets.UTF_8);
+        String fallbackName = guessName(url);
+        Entry e = parse(src, "user", fallbackName);
+        if (!e.ok) {
+            // 元信息读不出来 / ABI 不满足：直接拒绝，别把装不上的东西写进目录。
+            throw new IOException(e.reason);
+        }
+        if (!e.id.matches("[a-z0-9][a-z0-9_-]{0,31}")) {
+            throw new IOException("源 id 只能是小写字母、数字、下划线、连字符（最多 32 字符）：" + e.id);
+        }
+
+        if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("建不了源的目录：" + dir);
+        File target = new File(dir, e.id + ".js");
+        File tmp = new File(dir, e.id + ".js.tmp");
+        java.io.FileOutputStream out = new java.io.FileOutputStream(tmp);
+        try {
+            out.write(raw);
+            out.getFD().sync();
+        } finally {
+            out.close();
+        }
+        if (!tmp.renameTo(target)) {
+            tmp.delete();
+            throw new IOException("写不进去：" + target.getName());
+        }
+        Log.i(TAG, "已安装源 " + e.id + " ← " + url + "（" + raw.length + " 字节）");
+        return new JSONObject()
+                .put("id", e.id)
+                .put("name", e.name)
+                .put("version", e.version)
+                .put("requires", e.requires)
+                .put("source", "user")
+                .put("ok", true)
+                .put("reason", "");
+    }
+
+    /** 删掉一个用户装的源。热更/内置的不能删（它们不归用户管）。 */
+    static boolean remove(Context ctx, String spiderId) throws Exception {
+        return removeFrom(installDir(ctx), spiderId);
+    }
+
+    /** 删一个已安装的源。和 Context 解耦同样是为了单测。 */
+    static boolean removeFrom(File dir, String spiderId) throws Exception {
+        if (spiderId == null || !spiderId.matches("[a-z0-9][a-z0-9_-]{0,31}")) {
+            throw new IOException("源 id 不合法：" + spiderId);
+        }
+        File target = new File(dir, spiderId + ".js");
+        boolean gone = target.isFile() && target.delete();
+        if (gone) Log.i(TAG, "已删除源 " + spiderId);
+        return gone;
+    }
+
+    /** 用户装的源放在应用私有目录：卸载应用就一起没了，不会被别的应用读到。 */
+    private static File installDir(Context ctx) {
+        return new File(ctx.getFilesDir(), INSTALL_DIR);
+    }
+
+    /** 从地址里猜一个文件名，只在 js 里没写 id 时用得上（那种情况其实会被拒）。 */
+    private static String guessName(String url) {
+        try {
+            String path = new java.net.URI(url).getPath();
+            if (path == null) return "spider.js";
+            int slash = path.lastIndexOf('/');
+            String name = slash >= 0 ? path.substring(slash + 1) : path;
+            return name.length() > 0 ? name : "spider.js";
+        } catch (Throwable t) {
+            return "spider.js";
+        }
+    }
+
     // ── 扫描 ──────────────────────────────────────────────────────────
 
     private static List<Entry> scan(Context ctx) {
         List<Entry> out = new ArrayList<Entry>();
         Set<String> seen = new HashSet<String>();
 
+        // ① 用户装的（优先级最高）
+        File installed = installDir(ctx);
+        File[] userFiles = installed.listFiles();
+        if (userFiles != null) {
+            Arrays.sort(userFiles, FILE_BY_NAME);
+            for (File f : userFiles) {
+                Entry e = fromFile(f, "user");
+                if (e == null) continue;
+                out.add(e);
+                seen.add(e.id);
+            }
+        }
+
+        // ② 热更包
         File hotUi = null;
         try {
             hotUi = HotUpdateManager.get(ctx).currentUiDir();
@@ -152,7 +297,7 @@ final class SpiderStore {
             if (files != null) {
                 Arrays.sort(files, FILE_BY_NAME);
                 for (File f : files) {
-                    Entry e = fromFile(f);
+                    Entry e = fromFile(f, "hot");
                     if (e == null) continue;
                     out.add(e);
                     // 同 id 的 assets 版本不再列：生效的是热更那份，列两遍会让
@@ -192,19 +337,19 @@ final class SpiderStore {
         return null;
     }
 
-    private static Entry fromFile(File f) {
+    private static Entry fromFile(File f, String source) {
         if (!f.isFile() || !f.getName().endsWith(".js")) return null;
         if (f.length() > MAX_SOURCE_BYTES) {
-            return rejected(f.getName(), "hot",
+            return rejected(f.getName(), source,
                     "文件太大（" + (f.length() / 1024) + "KB），上限 2MB");
         }
         String src;
         try {
             src = readFully(new FileInputStream(f));
         } catch (Throwable t) {
-            return rejected(f.getName(), "hot", "读不出来：" + t);
+            return rejected(f.getName(), source, "读不出来：" + t);
         }
-        Entry e = parse(src, "hot", f.getName());
+        Entry e = parse(src, source, f.getName());
         e.file = f;
         return e;
     }
