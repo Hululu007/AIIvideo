@@ -1,17 +1,14 @@
 {
-  "versionName": "1.0.22",
-  "tag": "v1.0.22",
-  "versionCode": 10022,
-  "apk": "AIIvideo-v1.0.22-release.apk",
+  "versionName": "1.0.24",
+  "tag": "v1.0.24",
+  "versionCode": 10024,
+  "apk": "AIIvideo-v1.0.24-release.apk",
   "urls": [
-    "https://ghgo.de5.net/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.22/AIIvideo-v1.0.22-release.apk",
-    "https://gh.chjina.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.22/AIIvideo-v1.0.22-release.apk",
-    "https://gh.monlor.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.22/AIIvideo-v1.0.22-release.apk",
-    "https://gh.dpik.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.22/AIIvideo-v1.0.22-release.apk",
-    "https://gh-proxy.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.22/AIIvideo-v1.0.22-release.apk",
-    "https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.22/AIIvideo-v1.0.22-release.apk"
+    "https://gh.dpik.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.24/AIIvideo-v1.0.24-release.apk",
+    "https://gh-proxy.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.24/AIIvideo-v1.0.24-release.apk",
+    "https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.24/AIIvideo-v1.0.24-release.apk"
   ],
-  "sha256": "a21fabfc4e02b72b027a622b7935239db649c2f0856178bfe626489a05dd8959",
-  "size": 63669463,
-  "notes": "播放全部走内置播放器（libVLC）。更新清单放自己的服务器（不走 CDN 缓存），包走 GitHub Releases + 五个镜像，客户端按真实带宽挑最快的。"
+  "sha256": "78b41866b8e4361eaa8d16133b3a8b9735735e09efc1c633cdabb358e8826527",
+  "size": 48946479,
+  "notes": "更新与节点池不再依赖自己的服务器：热更清单、热更包、APK 清单、免费节点池全部搬进仓库，走 gh.dpik.top / gh-proxy.com / raw.githubusercontent 三个候选。修掉热更从来没生效过的 bug（envelope.json 写错了对象）。热更换了新密钥，只对 1.0.24 及以后生效。"
 }
