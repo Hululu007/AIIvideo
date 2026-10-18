@@ -844,10 +844,6 @@ public final class MainActivity extends Activity {
             jSONObject.put("source", contentMode.active());
             return true;
         });
-        this.commands.put("episode", jSONObject -> {
-            Services s = services();
-            return s.repository.episode(jSONObject.optString(Text.ATTR_ID), jSONObject.optInt("episode", 1));
-        });
         this.commands.put("cached", jSONObject -> services().store.cached(jSONObject.optString("key")));
         this.commands.put("detail", jSONObject -> {
             Services s = services();
@@ -895,8 +891,6 @@ public final class MainActivity extends Activity {
             s.account.logout();
             return s.account.profile();
         });
-        this.commands.put("newest", jSONObject -> recommend("newest", jSONObject));
-        this.commands.put("recommend", jSONObject -> recommend("recommend", jSONObject));
         this.commands.put("clear-bookmarks", jSONObject -> {
             final Services s = services();
             s.store.clearBookmarks();
@@ -914,13 +908,6 @@ public final class MainActivity extends Activity {
             }
             return true;
         });
-        this.commands.put("search", jSONObject -> {
-            Services s = services();
-            String strTrim = jSONObject.optString("query").trim();
-            JSONObject jSONObjectSearch = s.repository.search(strTrim);
-            s.store.saveCache("search:" + strTrim, jSONObjectSearch);
-            return jSONObjectSearch;
-        });
         this.commands.put("download-update", jSONObject -> {
             final File fileDownload = this.updates.download(new UpdateManager.Progress() {
                 @Override
@@ -936,22 +923,8 @@ public final class MainActivity extends Activity {
             });
             return true;
         });
-        this.commands.put("tag-list", jSONObject -> {
-            Services s = services();
-            String strOptString2 = jSONObject.optString("slug");
-            int iOptInt2 = jSONObject.optInt("page", 1);
-            JSONObject jSONObjectTagListing = s.repository.tagListing(strOptString2, iOptInt2);
-            s.store.saveCache("tag:" + strOptString2 + ":" + iOptInt2, jSONObjectTagListing);
-            return jSONObjectTagListing;
-        });
         this.commands.put("change-password", jSONObject -> services().account.changePassword(jSONObject.optString("oldPassword"), jSONObject.optString("newPassword")));
         this.commands.put("register", jSONObject -> services().account.register(jSONObject.optString("username"), jSONObject.optString("password")));
-        this.commands.put("home", jSONObject -> {
-            Services s = services();
-            JSONObject jSONObjectHome = s.repository.home();
-            s.store.saveCache("home", jSONObjectHome);
-            return jSONObjectHome;
-        });
         this.commands.put("quit", jSONObject -> {
             runOnUiThread(new Runnable() {
                 @Override
@@ -962,20 +935,6 @@ public final class MainActivity extends Activity {
             return true;
         });
         this.commands.put("sync", jSONObject -> services().account.sync());
-        this.commands.put("tags", jSONObject -> {
-            Services s = services();
-            JSONObject jSONObjectTags = s.repository.tags();
-            s.store.saveCache("tags", jSONObjectTags);
-            return jSONObjectTags;
-        });
-        this.commands.put("category", jSONObject -> {
-            Services s = services();
-            String strOptString3 = jSONObject.optString(Text.ATTR_ID);
-            int iOptInt3 = jSONObject.optInt("page", 1);
-            JSONObject jSONObjectCategory = s.repository.category(strOptString3, iOptInt3);
-            s.store.saveCache("category:" + strOptString3 + ":" + iOptInt3, jSONObjectCategory);
-            return jSONObjectCategory;
-        });
         this.commands.put("cover", jSONObject -> services().repository.coverData(jSONObject.optString("url")));
         this.commands.put("login", jSONObject -> services().account.login(jSONObject.optString("username"), jSONObject.optString("password")));
         this.commands.put("theme", jSONObject -> {
@@ -1066,15 +1025,6 @@ public final class MainActivity extends Activity {
         Services s = services();
         String command = prefix + (args == null ? "" : args.optString(Text.ATTR_ID));
         return UserSource.handle(this, s.repository.profileForControl(), command);
-    }
-
-    /** newest 与 recommend 原来共用 case 10/31，唯一差别就是传给 repository 的布尔值和缓存键前缀。 */
-    private JSONObject recommend(String str, JSONObject jSONObject) throws Exception {
-        Services s = services();
-        int iOptInt = jSONObject.optInt("page", 1);
-        JSONObject jSONObjectRecommend = s.repository.recommend(iOptInt, "newest".equals(str));
-        s.store.saveCache(str + ":" + iOptInt, jSONObjectRecommend);
-        return jSONObjectRecommend;
     }
 
     public void onHotRuntimeReady() {

@@ -18,6 +18,21 @@ import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import org.json.JSONObject;
 
+/**
+ * 当前源的**内容通路**：REST 取 JSON、封面缓存、控制面 profile。
+ *
+ * ── 2026-10-18：删掉八条假接口 ─────────────────────────────────────
+ * 这里原来有 home / category / search / tags / tagListing / episode /
+ * recommend 七个方法，每个都只有一句
+ * {@code throw new UnsupportedOperationException("…已改为纯 REST，抓 HTML 的分支
+ * 已移除")}，再加上 MainActivity 里对应的七条桥指令。它们不是「以后要实现的桩」，
+ * 而是**已经死掉的分支**：前端的内容请求统一走 {@code web.paths} 拼出来的路径
+ * （→ detail 桥 → 这里 → AiiHttp），永远到不了这几条命令。
+ *
+ * 留着它们的代价不是几行代码，而是：任何读代码的人都会以为「内容语义在 Java 里
+ * 还有一半」，于是新加一个源时先来这里找该覆盖哪个方法 —— 而正确答案是
+ * 「去配置里写 paths」。
+ */
 final class SiteRepository {
     private final Context appContext;
     private final File coverDir;
@@ -25,10 +40,6 @@ final class SiteRepository {
 
     private byte[] fetch(String str) throws Exception {
         return AiiHttp.get(str, this.profile);
-    }
-
-    JSONObject category(String str, int i) throws Exception {
-        throw new UnsupportedOperationException("category 已改为纯 REST，抓 HTML 的分支已移除");
     }
 
     /**
@@ -56,30 +67,6 @@ final class SiteRepository {
             str2 = this.profile.origin + str;
         }
         return new JSONObject(new String(fetch(str2), StandardCharsets.UTF_8));
-    }
-
-    JSONObject episode(String str, int i) throws Exception {
-        throw new UnsupportedOperationException("episode 已改为纯 REST，抓 HTML 的分支已移除");
-    }
-
-    JSONObject home() throws Exception {
-        throw new UnsupportedOperationException("home 已改为纯 REST，抓 HTML 的分支已移除");
-    }
-
-    JSONObject recommend(int i, boolean z) throws Exception {
-        throw new UnsupportedOperationException("recommend 已改为纯 REST，抓 HTML 的分支已移除");
-    }
-
-    JSONObject search(String str) throws Exception {
-        throw new UnsupportedOperationException("search 已改为纯 REST，抓 HTML 的分支已移除");
-    }
-
-    JSONObject tagListing(String str, int i) throws Exception {
-        throw new UnsupportedOperationException("tagListing 已改为纯 REST，抓 HTML 的分支已移除");
-    }
-
-    JSONObject tags() throws Exception {
-        throw new UnsupportedOperationException("tags 已改为纯 REST，抓 HTML 的分支已移除");
     }
 
     SiteRepository(Context context) {

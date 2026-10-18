@@ -187,6 +187,15 @@ window.HG_PLAYER = {
   last: () => playerCommand('last').catch(() => null)
 };
 
+// 内容类动作：路径必须来自源的 web.paths。
+//
+// 这条边界以前是模糊的 —— 拿不到路径就回退到 Java 那七条「抓 HTML」的命令
+// （home / category / search / tags / tag-list / episode / recommend），
+// 而它们从转成 REST 那天起就只会抛 UnsupportedOperationException。
+// 命令在 2026-10-18 删掉了，所以这里把「没有路径」当成一个明确的配置错误说出来，
+// 而不是让用户看到一句 unknown action。
+const CONTENT_ACTIONS = new Set(['home', 'category', 'search', 'tags', 'tag-list', 'episode', 'recommend', 'newest']);
+
 function api(action, args = {}) {
   const run = async () => {
     // REST 接口统一走 Java api-json 桥，避免 WebView 自动附带 Origin 请求头。
@@ -199,6 +208,11 @@ function api(action, args = {}) {
         // 会把 2 秒级接口故障拖成 40 秒等待。让对应页面立即进入错误态。
         throw error;
       }
+    }
+    if (CONTENT_ACTIONS.has(action)) {
+      // apiPathFor 返回 null 有两种原因：源没声明这条路径，或者参数不全
+      // （分类 slug 查不到 cate_id、搜索没关键词…）。两种都得让人看懂该改哪儿。
+      throw new Error('这个源没有可用的 ' + action + ' 接口路径：检查 web.paths.' + action + '，或这次请求的参数是否齐全');
     }
     return bridgeCall(action, args);
   };

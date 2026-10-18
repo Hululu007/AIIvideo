@@ -155,6 +155,16 @@ final class AgedmSite implements SiteAdapter {
         web.put("fields", fields);
         config.put("web", web);
 
+        // 播放层出口：AGE 的播放解析和它的播放器资源在这两台机器上。
+        // 这两个域名以前硬编码在 PlaybackHttpBridge 里 —— 换线路就得改 Java 发版。
+        // 声明在源自己的配置里，和其它站点知识待在同一处。
+        JSONObject http = new JSONObject();
+        JSONArray httpHosts = new JSONArray();
+        httpHosts.put("jx.wuzhoupai.com");
+        httpHosts.put("xcdn.khfed.com");
+        http.put("hosts", httpHosts);
+        config.put("http", http);
+
         JSONObject cover = new JSONObject();
         cover.put("mode", "plain");
         // 封面是百度图床的代理地址（gimg0-4.baidu.com/gimg/…?src=真图），
@@ -169,6 +179,26 @@ final class AgedmSite implements SiteAdapter {
         config.put("cover", cover);
 
         return config;
+    }
+
+    /**
+     * 给已保存的老配置补上 {@code http} 块。
+     *
+     * 配置是用户加源那一天生成的快照，之后再也不会重新生成 —— 白名单搬到配置里
+     * 之后，老用户手里那份没有这个块，表现就是这个源的播放层出口全被拒
+     * （报错会说「没有声明播放层出口」，但用户无从下手）。这里纯本地补上，
+     * 不联网、不覆盖用户已经写过的内容。
+     */
+    @Override public void patch(JSONObject config) {
+        if (config == null || config.optJSONObject("http") != null) return;
+        JSONObject http = new JSONObject();
+        JSONArray hosts = new JSONArray();
+        hosts.put("jx.wuzhoupai.com");
+        hosts.put("xcdn.khfed.com");
+        try {
+            http.put("hosts", hosts);
+            config.put("http", http);
+        } catch (Throwable ignored) {}
     }
 
     @Override public byte[] fetch(SiteProfile profile, String path) throws Exception {

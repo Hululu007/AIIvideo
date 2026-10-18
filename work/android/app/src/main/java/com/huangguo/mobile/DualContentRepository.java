@@ -38,10 +38,6 @@ final class DualContentRepository {
         return this.huangguo.profileForControl();
     }
 
-    JSONObject category(String categoryId, int page) throws Exception {
-        return this.huangguo.category(categoryId, page);
-    }
-
     void clearCovers() throws Exception {
         this.huangguo.clearCovers();
     }
@@ -54,32 +50,8 @@ final class DualContentRepository {
         return this.huangguo.detail(id);
     }
 
-    JSONObject episode(String id, int episode) throws Exception {
-        return this.huangguo.episode(id, episode);
-    }
-
-    JSONObject home() throws Exception {
-        return this.huangguo.home();
-    }
-
-    JSONObject recommend(int page, boolean newest) throws Exception {
-        return this.huangguo.recommend(page, newest);
-    }
-
-    JSONObject search(String query) throws Exception {
-        return this.huangguo.search(query);
-    }
-
     /** 续集推荐：黄果源没有这个接口，恒返回空数组（调用方自己兜住）。 */
     JSONArray sequelCandidates(JSONObject detail) throws Exception {
         return new JSONArray();
-    }
-
-    JSONObject tagListing(String slug, int page) throws Exception {
-        return this.huangguo.tagListing(slug, page);
-    }
-
-    JSONObject tags() throws Exception {
-        return this.huangguo.tags();
     }
 }

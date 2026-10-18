@@ -68,6 +68,10 @@ final class SiteProfile {
         // 网络路由跟着源走。这是整个 App 里唯一一处「当前源长什么样」的组装点，
         // 不在这儿装就得在每个适配器里各装一遍 —— 那份名单注定漂。
         NetRoute.configure(jSONObjectMerge.optJSONObject("net"), strReplaceAll);
+        // 播放层出口的主机白名单同理：原来是两行硬编码在 PlaybackHttpBridge 里，
+        // 换个源或换个播放线路就得改 Java。现在由源自己声明（http.hosts），
+        // 位置就在路由旁边 —— 两个都是「这个源能碰哪些域名」，读一处就够。
+        PlaybackHttpBridge.configure(jSONObjectMerge.optJSONObject("http"));
         this.fingerprint = hex(MessageDigest.getInstance("SHA-256").digest(this.rules.toString().getBytes(StandardCharsets.UTF_8)));
     }
 
