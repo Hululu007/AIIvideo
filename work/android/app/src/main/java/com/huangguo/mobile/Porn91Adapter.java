@@ -174,24 +174,24 @@ public final class Porn91Adapter {
      * 由 AiiHttp.get() 在 adapter == "porn91" 时分流过来。
      */
     public static byte[] fetch(String path, SiteProfile profile) throws Exception {
-        String base = base(profile);
+        String base = AdapterIo.base(profile, DEFAULT_HOST);
         JSONObject result;
         if (path.startsWith("/api/reconcile")) {
-            result = reconcile(base, param(path, "ids"));
+            result = reconcile(base, HtmlKit.param(path, "ids"));
         } else if (path.startsWith("/api/home")) {
             result = home(base);
         } else if (path.startsWith("/api/tags")) {
             result = tags(base);
         } else if (path.startsWith("/api/search")) {
-            result = search(base, param(path, "q"), page(path));
+            result = search(base, HtmlKit.param(path, "q"), HtmlKit.page(path));
         } else if (path.startsWith("/api/videos")) {
             // 三个动作共用 /api/videos 前缀，**判据用参数名而不是路径形状**
             // （Hanime1Adapter 在这上面踩过：按「有没有 /play」分流，分类列表
             //  掉进了 detail，videoId() 解出空串，站点回 403）。
-            String cate = param(path, "cate_id");
+            String cate = HtmlKit.param(path, "cate_id");
             if (cate.startsWith("cat:")) cate = cate.substring(4);
             if (cate.length() > 0) {
-                result = listing(base, cate, page(path));
+                result = listing(base, cate, HtmlKit.page(path));
             } else if (path.indexOf("/play") > 0) {
                 result = play(base, videoId(path), episode(path));
             } else {
@@ -206,19 +206,6 @@ public final class Porn91Adapter {
         return envelope.toString().getBytes("UTF-8");
     }
 
-    /**
-     * 站点根。**从 profile.origin 取**，只有它空着才退回 DEFAULT_HOST。
-     *
-     * origin 已经在 SiteProfile 构造时校验过（裸 https、无路径无查询串），
-     * 所以这里不用再校验一遍 —— 多一道只会把「origin 为空」这种合法情形
-     * 误判成错误。
-     */
-    static String base(SiteProfile profile) {
-        String origin = profile == null ? "" : profile.origin;
-        if (origin == null) origin = "";
-        origin = origin.replaceAll("/+$", "");
-        return origin.length() == 0 ? DEFAULT_HOST : origin;
-    }
 
     // ── 各个动作 ──────────────────────────────────────────────────────
 
@@ -294,7 +281,7 @@ public final class Porn91Adapter {
                 Pattern.CASE_INSENSITIVE | Pattern.DOTALL).matcher(html);
         while (m.find()) {
             String code = m.group(1);
-            String label = unescape(stripHtml(m.group(2))).replaceAll("\\s+", " ").trim();
+            String label = HtmlKit.unescape(HtmlKit.stripHtml(m.group(2))).replaceAll("\\s+", " ").trim();
             if (code.length() == 0 || label.length() == 0) continue;
             if (label.length() > 24) continue;                 // 正文里的链接不算
             if (!seen.add(code)) continue;
@@ -332,7 +319,7 @@ public final class Porn91Adapter {
      * 只放那十个实测过的 code 进去。
      */
     private static JSONObject listing(String base, String cate, int page) throws Exception {
-        String url = base + "/v.php?category=" + enc(cate) + "&viewtype=basic&page=" + page;
+        String url = base + "/v.php?category=" + HtmlKit.enc(cate) + "&viewtype=basic&page=" + page;
         String html = get(url);
         JSONArray items = parseCards(html, base);
 
@@ -353,7 +340,7 @@ public final class Porn91Adapter {
         if (keyword == null || keyword.trim().length() == 0) {
             throw new Exception("搜索词为空，不发请求");
         }
-        String url = base + "/search_result.php?search_id=" + enc(keyword.trim())
+        String url = base + "/search_result.php?search_id=" + HtmlKit.enc(keyword.trim())
                 + "&search_type=search_videos&page=" + page;
         String html = get(url);
         JSONArray items = parseCards(html, base);
@@ -482,10 +469,10 @@ public final class Porn91Adapter {
         JSONObject cached = META_CACHE.get(id);
         if (cached != null) return new JSONObject(cached.toString());
 
-        String html = get(base + "/view_video.php?viewkey=" + enc(id));
+        String html = get(base + "/view_video.php?viewkey=" + HtmlKit.enc(id));
 
         String title = firstH4(html);
-        if (title.length() == 0) title = stripHtml(text(html, "<title>", "</title>")).trim();
+        if (title.length() == 0) title = HtmlKit.stripHtml(text(html, "<title>", "</title>")).trim();
         if (title.length() == 0) {
             throw new Exception("详情页里没找到标题（viewkey=" + id
                     + "）。可能：片子已删除、或站点改版。");
@@ -550,7 +537,7 @@ public final class Porn91Adapter {
      *         不需要解析器或嗅探。
      */
     private static JSONObject play(String base, String id, int ignoredQuality) throws Exception {
-        String html = get(base + "/view_video.php?viewkey=" + enc(id));
+        String html = get(base + "/view_video.php?viewkey=" + HtmlKit.enc(id));
 
         String source = playSource(html);
         if (source.length() == 0) {
@@ -590,7 +577,7 @@ public final class Porn91Adapter {
         if (decoded.length() > 0) {
             Matcher m = SOURCE_SRC.matcher(decoded);
             if (m.find()) {
-                String url = normalize(m.group(1));
+                String url = HtmlKit.normalizeUrl(m.group(1));
                 if (url.length() > 0) return url;
             }
         }
@@ -598,7 +585,7 @@ public final class Porn91Adapter {
         String stripped = COMMENT.matcher(html).replaceAll("");
         Matcher m = SOURCE_SRC.matcher(stripped);
         while (m.find()) {
-            String url = normalize(m.group(1));
+            String url = HtmlKit.normalizeUrl(m.group(1));
             if (url.length() > 0 && !url.contains("358999")) return url;
         }
         return "";
@@ -615,39 +602,10 @@ public final class Porn91Adapter {
     static String strencode(String html) {
         Matcher m = STRENCODE_RE.matcher(html);
         if (!m.find()) return "";
-        return percentDecode(m.group(1));
+        return HtmlKit.percentDecode(m.group(1));
     }
 
     /** 只解 %XX，不动 `+`。非法转义原样保留，不抛。 */
-    /**
-     * 百分号解码。**必须按字节收、按 UTF-8 解。**
-     *
-     * 老实现是逐字节 `(char) byte` 拼字符串 —— 对纯 ASCII 没问题，对中文就是
-     * 把一个 UTF-8 字符的三个字节拆成三个 Latin-1 字符（"自" → "è‡ª"）。
-     * 这个串再被 enc() 编码回去，就成了另一串字节，站点按那个串搜，结果 0 条。
-     * 表现是「搜索永远没结果，但首页、详情、播放全正常」—— 最难查的那种。
-     */
-    static String percentDecode(String raw) {
-        if (raw == null || raw.length() == 0) return "";
-        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(raw.length());
-        int i = 0;
-        while (i < raw.length()) {
-            char c = raw.charAt(i);
-            if (c == '%' && i + 2 < raw.length()) {
-                int hi = Character.digit(raw.charAt(i + 1), 16);
-                int lo = Character.digit(raw.charAt(i + 2), 16);
-                if (hi >= 0 && lo >= 0) {
-                    out.write((hi << 4) | lo);
-                    i += 3;
-                    continue;
-                }
-            }
-            byte[] bytes = String.valueOf(c).getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            out.write(bytes, 0, bytes.length);
-            i++;
-        }
-        return new String(out.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
-    }
 
     // ── HTML 解析 ─────────────────────────────────────────────────────
 
@@ -829,7 +787,7 @@ public final class Porn91Adapter {
                 "<h4[^>]*class=[\"'][^\"']*login_register_header[^\"']*[\"'][^>]*>(.*?)</h4>",
                 Pattern.CASE_INSENSITIVE | Pattern.DOTALL).matcher(html);
         if (!m.find()) return "";
-        return unescape(stripHtml(m.group(1))).replaceAll("\\s+", " ").trim();
+        return HtmlKit.unescape(HtmlKit.stripHtml(m.group(1))).replaceAll("\\s+", " ").trim();
     }
 
     /**
@@ -841,7 +799,7 @@ public final class Porn91Adapter {
         Matcher m = Pattern.compile(
                 Pattern.quote(label) + ":\\s*<span[^>]*>([^<]{0,40})</span>",
                 Pattern.CASE_INSENSITIVE).matcher(html);
-        return m.find() ? unescape(m.group(1)).trim() : "";
+        return m.find() ? HtmlKit.unescape(m.group(1)).trim() : "";
     }
 
     /** 列表卡里的 `<span class="info">Views:</span> 1951&nbsp;` */
@@ -850,7 +808,7 @@ public final class Porn91Adapter {
                 Pattern.quote(label) + ":\\s*</span>\\s*([0-9][0-9,&nbsp;\\s]{0,20})",
                 Pattern.CASE_INSENSITIVE).matcher(chunk);
         if (!m.find()) return "";
-        return unescape(m.group(1)).replaceAll("[^0-9]", "");
+        return HtmlKit.unescape(m.group(1)).replaceAll("[^0-9]", "");
     }
 
     /** `<span class="info">Added: </span> <span class="title-yakov">2026-10-17</span>` */
@@ -866,7 +824,7 @@ public final class Porn91Adapter {
         Matcher m = Pattern.compile(
                 "uprofile\\.php\\?UID=[^\"']*\"[^>]*>\\s*<span[^>]*class=[\"'][^\"']*title[^\"']*[\"'][^>]*>([^<]{1,60})</span>",
                 Pattern.CASE_INSENSITIVE).matcher(html);
-        return m.find() ? unescape(m.group(1)).trim() : "";
+        return m.find() ? HtmlKit.unescape(m.group(1)).trim() : "";
     }
 
     /** `<div id=v_desc class="more title" > … </div>` */
@@ -875,8 +833,8 @@ public final class Porn91Adapter {
                 "<div[^>]*id=[\"']?v_desc[\"']?[^>]*>(.*?)</div>",
                 Pattern.CASE_INSENSITIVE | Pattern.DOTALL).matcher(html);
         if (!m.find()) return "";
-        String s = stripHtml(m.group(1));
-        return unescape(s).replaceAll("\\s+", " ").trim();
+        String s = HtmlKit.stripHtml(m.group(1));
+        return HtmlKit.unescape(s).replaceAll("\\s+", " ").trim();
     }
 
     /** 卡片标题：`<span class="video-title title-truncate m-t-5">…</span>` */
@@ -886,7 +844,7 @@ public final class Porn91Adapter {
                 Pattern.CASE_INSENSITIVE | Pattern.DOTALL).matcher(chunk);
         if (!m.find()) return "";
         // 标题里可能带 &#39; / &amp; 这类实体，而且实测有双重编码（&amp;#39;）
-        return unescape(unescape(stripHtml(m.group(1)))).replaceAll("\\s+", " ").trim();
+        return HtmlKit.unescape(HtmlKit.unescape(HtmlKit.stripHtml(m.group(1)))).replaceAll("\\s+", " ").trim();
     }
 
     /** 卡片封面：卡片里第一个 `<img class="img-responsive" src=…>` */
@@ -894,12 +852,12 @@ public final class Porn91Adapter {
         Matcher m = Pattern.compile(
                 "<img[^>]*class=[\"'][^\"']*img-responsive[^\"']*[\"'][^>]*\\bsrc=[\"']([^\"']+)[\"']",
                 Pattern.CASE_INSENSITIVE).matcher(chunk);
-        if (m.find()) return normalize(m.group(1));
+        if (m.find()) return HtmlKit.normalizeUrl(m.group(1));
         // 兜底：任意 img 的 src，但跳过站点自己的图标和广告 gif
         Matcher any = Pattern.compile("<img[^>]*\\bsrc=[\"']([^\"']+)[\"']",
                 Pattern.CASE_INSENSITIVE).matcher(chunk);
         while (any.find()) {
-            String url = normalize(any.group(1));
+            String url = HtmlKit.normalizeUrl(any.group(1));
             if (url.length() == 0) continue;
             if (url.contains("/images/")) continue;       // logo、arrowright.gif
             if (url.contains("fans.91selfie.com")) continue;  // 广告位 gif
@@ -913,24 +871,16 @@ public final class Porn91Adapter {
         Matcher m = Pattern.compile(
                 "class=[\"'][^\"']*\\b" + Pattern.quote(cls) + "\\b[^\"']*[\"'][^>]*>([^<]{0,60})",
                 Pattern.CASE_INSENSITIVE).matcher(chunk);
-        return m.find() ? unescape(m.group(1)).trim() : "";
+        return m.find() ? HtmlKit.unescape(m.group(1)).trim() : "";
     }
 
     /** 取第一个匹配属性名的值（如 poster）。 */
     private static String attr(String html, String name) {
         Matcher m = Pattern.compile("<[a-z]+[^>]*\\b" + Pattern.quote(name) + "=[\"']([^\"']+)[\"']",
                 Pattern.CASE_INSENSITIVE).matcher(html);
-        return m.find() ? normalize(unescape(m.group(1))) : "";
+        return m.find() ? HtmlKit.normalizeUrl(HtmlKit.unescape(m.group(1))) : "";
     }
 
-    private static String normalize(String url) {
-        if (url == null) return "";
-        String s = url.trim();
-        if (s.startsWith("//")) s = "https:" + s;
-        if (s.startsWith("http://")) s = "https://" + s.substring(7);
-        if (!s.startsWith("https://")) return "";
-        return s;
-    }
 
     private static String text(String html, String open, String close) {
         int a = html.indexOf(open);
@@ -939,16 +889,7 @@ public final class Porn91Adapter {
         return b < 0 ? "" : html.substring(a + open.length(), b);
     }
 
-    private static String stripHtml(String s) {
-        return s == null ? "" : s.replaceAll("<[^>]+>", " ");
-    }
 
-    private static String unescape(String s) {
-        if (s == null) return "";
-        return s.replace("&amp;", "&").replace("&quot;", "\"").replace("&#039;", "'")
-                .replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">")
-                .replace("&nbsp;", " ").replace("\\u0026", "&").replace("\\/", "/");
-    }
 
     private static void cache(String id, JSONObject meta) {
         synchronized (META_CACHE) {
@@ -1043,17 +984,7 @@ public final class Porn91Adapter {
 
     // ── 路径参数 ──────────────────────────────────────────────────────
 
-    static String param(String path, String key) {
-        Matcher m = Pattern.compile("[?&]" + Pattern.quote(key) + "=([^&#]*)").matcher(path);
-        if (!m.find()) return "";
-        return percentDecode(m.group(1));
-    }
 
-    static int page(String path) {
-        String p = param(path, "page");
-        try { return p.length() == 0 ? 1 : Math.max(1, Integer.parseInt(p)); }
-        catch (Exception e) { return 1; }
-    }
 
     /** 从 `/api/videos/{id}` 或 `/api/videos/{id}/play` 里取 id。 */
     static String videoId(String path) {
@@ -1066,30 +997,12 @@ public final class Porn91Adapter {
      * 值不参与逻辑（站点一个 viewkey 只给一条 source）。
      */
     static int episode(String path) {
-        String ep = param(path, "ep");
-        if (ep.length() == 0) ep = param(path, "episode");
+        String ep = HtmlKit.param(path, "ep");
+        if (ep.length() == 0) ep = HtmlKit.param(path, "episode");
         try { return ep.length() == 0 ? 0 : Integer.parseInt(ep); }
         catch (Exception e) { return 0; }
     }
 
-    /** 只对 `{` `}` 这些字符做百分号编码，别把 viewkey 的十六进制字母动掉。 */
-    static String enc(String s) {
-        if (s == null) return "";
-        StringBuilder sb = new StringBuilder(s.length());
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-                    || c == '-' || c == '_' || c == '.' || c == '~') {
-                sb.append(c);
-            } else {
-                byte[] bytes = String.valueOf(c).getBytes(java.nio.charset.StandardCharsets.UTF_8);
-                for (byte b : bytes) {
-                    sb.append('%').append(String.format("%02X", b & 0xFF));
-                }
-            }
-        }
-        return sb.toString();
-    }
 
     private static void log(String message) {
         AiiHttp.log(message);

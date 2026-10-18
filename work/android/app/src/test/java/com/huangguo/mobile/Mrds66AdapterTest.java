@@ -317,24 +317,24 @@ public class Mrds66AdapterTest {
 
     // ── ⑦ 小工具 ──────────────────────────────────────────────
 
+    // 这三个原来用反射调 Mrds66Adapter 的私有工具函数。2026-10-18 那些函数
+    // 挪进了 HtmlKit（八个适配器各抄一份，param 三份逐字相同），所以测试
+    // 也跟着挪 —— 行为的所有权归 HtmlKit，用例就该钉在它身上。
+
     @Test
-    public void 百分号解码不动加号() throws Exception {
-        String out = (String) call("percentDecode", new Class<?>[]{String.class},
-                "C%2B%2B%20%E5%90%83%E7%93%9C");
-        assertEquals("C++ 吃瓜", out);
+    public void 百分号解码不动加号() {
+        assertEquals("C++ 吃瓜", HtmlKit.percentDecode("C%2B%2B%20%E5%90%83%E7%93%9C"));
     }
 
     @Test
-    public void 中文路径要编码() throws Exception {
-        String out = (String) call("enc", new Class<?>[]{String.class}, "吃瓜");
-        assertEquals("%E5%90%83%E7%93%9C", out);
+    public void 中文路径要编码() {
+        assertEquals("%E5%90%83%E7%93%9C", HtmlKit.enc("吃瓜"));
     }
 
     @Test
-    public void 双斜杠归一化() throws Exception {
-        String out = (String) call("normalize", new Class<?>[]{String.class},
-                "https://pic.jtzatly.cn//upload_01/x/1.jpeg");
-        assertEquals("https://pic.jtzatly.cn/upload_01/x/1.jpeg", out);
+    public void 双斜杠归一化() {
+        assertEquals("https://pic.jtzatly.cn/upload_01/x/1.jpeg",
+                HtmlKit.normalizeUrl("https://pic.jtzatly.cn//upload_01/x/1.jpeg"));
     }
 
     @Test

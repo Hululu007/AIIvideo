@@ -13,26 +13,30 @@ import org.junit.Test;
  */
 public class Porn91SiteTest {
 
+    // 注：percentDecode / enc 的用例打在 HtmlKit 上 —— 2026-10-18 这两个函数
+    // 从各适配器收进了 HtmlKit（三份逐字相同的实现）。行为的所有权变了，
+    // 用例跟着走。
+
     /**
      * 回归：逐字节 `(char) byte` 拼出来的中文是 Latin-1 乱码，
      * 再编码回去就变成另一串字节，站点按那串搜 = 0 条。
      */
     @Test
     public void 百分号解码按UTF8还原中文() {
-        assertEquals("自拍", Porn91Adapter.percentDecode("%E8%87%AA%E6%8B%8D"));
-        assertEquals("自拍 视频", Porn91Adapter.percentDecode("%E8%87%AA%E6%8B%8D%20%E8%A7%86%E9%A2%91"));
-        assertEquals("中文asdf", Porn91Adapter.percentDecode("%E4%B8%AD%E6%96%87asdf"));
-        assertEquals("plain", Porn91Adapter.percentDecode("plain"));
-        assertEquals("", Porn91Adapter.percentDecode(""));
-        assertEquals("", Porn91Adapter.percentDecode(null));
+        assertEquals("自拍", HtmlKit.percentDecode("%E8%87%AA%E6%8B%8D"));
+        assertEquals("自拍 视频", HtmlKit.percentDecode("%E8%87%AA%E6%8B%8D%20%E8%A7%86%E9%A2%91"));
+        assertEquals("中文asdf", HtmlKit.percentDecode("%E4%B8%AD%E6%96%87asdf"));
+        assertEquals("plain", HtmlKit.percentDecode("plain"));
+        assertEquals("", HtmlKit.percentDecode(""));
+        assertEquals("", HtmlKit.percentDecode(null));
     }
 
     /** 编码器也验一遍：中文、空格、符号都要变成 %XX，不能被吃掉。 */
     @Test
     public void 编码器不加号只出百分号() {
-        assertEquals("%E8%87%AA%E6%8B%8D", Porn91Adapter.enc("自拍"));
-        assertEquals("a%20b", Porn91Adapter.enc("a b"));
-        assertEquals("abc-._~", Porn91Adapter.enc("abc-._~"));
+        assertEquals("%E8%87%AA%E6%8B%8D", HtmlKit.enc("自拍"));
+        assertEquals("a%20b", HtmlKit.enc("a b"));
+        assertEquals("abc-._~", HtmlKit.enc("abc-._~"));
     }
 
     /** 编码 → 解码必须回到原文，这是搜索链路的前提。 */
@@ -40,7 +44,7 @@ public class Porn91SiteTest {
     public void 编码解码往返() {
         String[] words = { "自拍", "中文 音声", "a b c", "日本/無修正", "100%纯" };
         for (String word : words) {
-            assertEquals(word, Porn91Adapter.percentDecode(Porn91Adapter.enc(word)));
+            assertEquals(word, HtmlKit.percentDecode(HtmlKit.enc(word)));
         }
     }
 

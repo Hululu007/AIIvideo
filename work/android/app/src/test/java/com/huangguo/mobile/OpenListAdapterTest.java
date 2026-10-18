@@ -75,17 +75,17 @@ public class OpenListAdapterTest {
     /** 查询串：cate_id 是 encodeURIComponent 过的路径，必须解回来。 */
     @Test
     public void 查询串解析() {
-        assertEquals("/asmr2", OpenListAdapter.param("cate_id=%2Fasmr2&page=2", "cate_id"));
-        assertEquals("/asmr2/MOMOKA。", OpenListAdapter.param("x=1&cate_id=%2Fasmr2%2FMOMOKA%E3%80%82", "cate_id"));
-        assertEquals("", OpenListAdapter.param("x=1", "cate_id"));
-        assertEquals("", OpenListAdapter.param(null, "cate_id"));
+        assertEquals("/asmr2", HtmlKit.param("cate_id=%2Fasmr2&page=2", "cate_id"));
+        assertEquals("/asmr2/MOMOKA。", HtmlKit.param("x=1&cate_id=%2Fasmr2%2FMOMOKA%E3%80%82", "cate_id"));
+        assertEquals("", HtmlKit.param("x=1", "cate_id"));
+        assertEquals("", HtmlKit.param(null, "cate_id"));
         // 整条动作路径也要能取（真实调用点传的是 path，不是 query）
-        assertEquals("/asmr2", OpenListAdapter.param("/api/videos?cate_id=%2Fasmr2&page=2", "cate_id"));
-        assertEquals("MOMOKA", OpenListAdapter.param("/api/search?q=MOMOKA&page=1", "q"));
-        assertEquals("2", OpenListAdapter.param("/api/videos/L2Zvbw/play?ep=2", "ep"));
-        assertEquals(2, OpenListAdapter.page("cate_id=x&page=2"));
-        assertEquals(1, OpenListAdapter.page("cate_id=x"));
-        assertEquals(1, OpenListAdapter.page("page=abc"));
+        assertEquals("/asmr2", HtmlKit.param("/api/videos?cate_id=%2Fasmr2&page=2", "cate_id"));
+        assertEquals("MOMOKA", HtmlKit.param("/api/search?q=MOMOKA&page=1", "q"));
+        assertEquals("2", HtmlKit.param("/api/videos/L2Zvbw/play?ep=2", "ep"));
+        assertEquals(2, HtmlKit.page("cate_id=x&page=2"));
+        assertEquals(1, HtmlKit.page("cate_id=x"));
+        assertEquals(1, HtmlKit.page("page=abc"));
     }
 
     /** 站点根：只认 https，路径一律丢掉（用户可能粘的是某一层目录）。 */

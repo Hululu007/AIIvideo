@@ -235,24 +235,16 @@ final class MissavSite implements SiteAdapter {
         JSONArray fArr = arr("episodeNumber");
         JSONArray fSrc = new JSONArray();
         fSrc.put("source"); fSrc.put("playUrl"); fSrc.put("video_url");
-        // ── shapes：翻页字段挂在哪根枝上 ─────────────────────────────────
+        // ── shapes：这里现在空了，是有意的 ────────────────────────────
         //
-        // app.js 的 nextPageOf 是：
-        //     const page  = Number(shapeValue(raw,'list','page','pagination.page')) || 1;
-        //     const pages = Number(shapeValue(raw,'list','pages','pagination.pages')) || 0;
-        //     return page < pages ? page + 1 : null;
+        // 原来这里配了一份 `shapes.list = {page:"page", pages:"pages"}`，
+        // 唯一原因是这个适配器把分页平铺在顶层，而前端 nextPageOf() 读的是
+        // `pagination.page/pages`。两边形状不一致，只能靠配置把路径指过去 ——
+        // 而配错或忘配的下场是「每个分类只有第一页」，不报错。
         //
-        // 没配 shapes 时它退回 `pagination.page` / `pagination.pages` 那套老形状，
-        // 而我们是平铺的 `page` / `pages` —— 读不到 → pages=0 → nextPage 恒为
-        // null → 每个分类页都只有第一页 12 部，滑到底写「已经到底了」。
-        // 这就是「每个的数量都太少了」的全部原因（2026-10-18 真机）。
-        JSONObject listShape = new JSONObject();
-        listShape.put("items", "items");
-        listShape.put("page", "page");
-        listShape.put("pages", "pages");
-        JSONObject shapes = new JSONObject();
-        shapes.put("list", listShape);
-        web.put("shapes", shapes);
+        // 2026-10-18 把响应形状收进了 AdapterShape（一份实现，所有适配器共用），
+        // 于是这份配置不再需要。留着它会变成第二种真相：形状改了配置没改，
+        // 或者配置改了指到不存在的路径，两种都静默失效。
 
         JSONObject fields = new JSONObject();
         fields.put("id", arr("id"));

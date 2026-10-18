@@ -47,19 +47,19 @@ final class MissavAdapter {
     private static final int FEATURED_LIMIT = 8;
 
     static byte[] fetch(String path, SiteProfile profile) throws Exception {
-        String base = base(profile);
+        String base = AdapterIo.base(profile, "https://missav.live");
         JSONObject result;
 
         if (path.startsWith("/api/home")) {
             result = home(base);
         } else if (path.startsWith("/api/genres")) {
-            result = genres(base, page(path));
+            result = genres(base, HtmlKit.page(path));
         } else if (path.startsWith("/api/reconcile")) {
-            result = reconcile(param(path, "ids"));
+            result = reconcile(HtmlKit.param(path, "ids"));
         } else if (path.startsWith("/api/search")) {
-            result = search(base, param(path, "q"), page(path));
+            result = search(base, HtmlKit.param(path, "q"), HtmlKit.page(path));
         } else if (path.startsWith("/api/category")) {
-            result = category(base, param(path, "slug"), page(path));
+            result = category(base, HtmlKit.param(path, "slug"), HtmlKit.page(path));
         } else if (path.startsWith("/api/detail")) {
             result = detail(base, idFrom(path));
         } else if (path.startsWith("/api/play")) {
@@ -120,28 +120,19 @@ final class MissavAdapter {
                     + " 像挑战页=" + SiteFetchWebView.looksLikeChallenge(html));
         }
 
-        JSONObject out = new JSONObject();
-        out.put("items", items);
-        out.put("page", no);
-        // ── pages 而不是 hasMore ────────────────────────────────────────
-        // 前端 adapters.js 的 nextPageOf 只读 page 和 pages：
-        //     return page < pages ? page + 1 : null;
-        // 之前只给了 hasMore，pages 取不到 → 0 → nextPage 恒为 null → 界面直接
-        // 写「已经到底了」，滑到底也不会加载第二页。这就是「每个分类的作品都
-        // 太少」的全部原因（2026-10-18 真机）。
-        //
-        // 站点没给总页数，用「这页满不满」推：满页说明后面还有。
+        // 形状收口到 AdapterShape：前端 nextPageOf 只读 pagination.page/pages。
+        // 站点没给总页数，用「这页满不满」推 —— 满页说明后面还有。
+        // 这条以前是本适配器自己拼的，拼法和其他站不一样，只能再配一份
+        // web.shapes.list 把路径指过去；形状统一之后那份配置删掉了。
         boolean full = items.length() >= MissavSitePages.PAGE_SIZE;
-        out.put("pages", full ? no + 1 : no);
-        out.put("hasMore", full);
-        return out;
+        return AdapterShape.listing(items, no, full ? no + 1 : no);
     }
 
     private static JSONObject search(String base, String keyword, int page) throws Exception {
         int no = page < 1 ? 1 : page;
         JSONArray items;
         try {
-            items = MissavParser.parseList(get(base + "/cn/search?q=" + enc(keyword) + "&page=" + no));
+            items = MissavParser.parseList(get(base + "/cn/search?q=" + HtmlKit.enc(keyword) + "&page=" + no));
             remember(items);
         } catch (Exception e) {
             // 搜索接口挂了不该让搜索页整体报错 —— 空结果比一个错误提示好用，
@@ -149,11 +140,8 @@ final class MissavAdapter {
             log("missav 搜索失败（q=" + keyword + "）：" + e.getMessage());
             items = new JSONArray();
         }
-        JSONObject out = new JSONObject();
-        out.put("items", items);
-        out.put("page", no);
-        out.put("hasMore", items.length() >= MissavSitePages.PAGE_SIZE);
-        return out;
+        boolean full = items.length() >= MissavSitePages.PAGE_SIZE;
+        return AdapterShape.listing(items, no, full ? no + 1 : no);
     }
 
     /**
@@ -254,13 +242,13 @@ final class MissavAdapter {
 
     private static JSONObject detail(String base, String id) throws Exception {
         if (id.length() == 0) throw new Exception("missav 详情缺少 id");
-        JSONObject detail = MissavParser.parseDetail(get(base + "/cn/" + enc(id)));
+        JSONObject detail = MissavParser.parseDetail(get(base + "/cn/" + HtmlKit.enc(id)));
         if (detail == null || detail.optString("id", "").length() == 0) {
             throw new Exception("详情页解析不出影片（id=" + id + "）。站点可能改版了。");
         }
         // 详情顺带把播放地址解出来存着 —— 播放那次请求就是再拉一遍同一个页面，
         // 而拉一遍要过盾（1.5~4 秒），能从详情省一次是一次。
-        detail.put("play", MissavParser.parsePlay(get(base + "/cn/" + enc(id))));
+        detail.put("play", MissavParser.parsePlay(get(base + "/cn/" + HtmlKit.enc(id))));
 
         // ── episodes：单集站也必须给 ─────────────────────────────────────
         //
@@ -286,7 +274,7 @@ final class MissavAdapter {
 
     private static JSONObject play(String base, String id) throws Exception {
         if (id.length() == 0) throw new Exception("missav 播放缺少 id");
-        JSONObject play = MissavParser.parsePlay(get(base + "/cn/" + enc(id)));
+        JSONObject play = MissavParser.parsePlay(get(base + "/cn/" + HtmlKit.enc(id)));
         if (play.optString("playUrl", "").length() == 0) {
             throw new Exception("这一部没解析出播放地址（id=" + id + "）。"
                     + "片源下架，或者站点改了播放器那一段。");
@@ -404,8 +392,8 @@ final class MissavAdapter {
             int sep = rest.indexOf('/');
             String dmId = sep > 0 ? rest.substring(0, sep) : rest;
             String name = sep > 0 ? rest.substring(sep + 1) : "";
-            path.append('/').append(enc(dmId)).append("/cn/genres");
-            if (name.length() > 0) path.append('/').append(enc(name));
+            path.append('/').append(HtmlKit.enc(dmId)).append("/cn/genres");
+            if (name.length() > 0) path.append('/').append(HtmlKit.enc(name));
         } else if (slash > 0 && head.matches("dm\\d+")) {
             // ── 普通分类：dm597/fc2 → /dm597/cn/fc2 ─────────────────────
             //
@@ -414,12 +402,12 @@ final class MissavAdapter {
             // 站点回的是 404 内容页，parseList 一张卡都认不出来，症状是
             // 「已显示 0 部作品」。证据：首页导航里每个二级分类都是这个形状
             // （dm150/cn/gachinco、dm597/cn/fc2、dm42/cn/tokyohot …）。
-            path.append('/').append(enc(head)).append("/cn/")
-                    .append(enc(s.substring(slash + 1)));
+            path.append('/').append(HtmlKit.enc(head)).append("/cn/")
+                    .append(HtmlKit.enc(s.substring(slash + 1)));
         } else {
             // ── 固定导航：/cn/new、/cn/release ───────────────────────────
             // 站点这两种写法都认（/cn/new 和 /dm539/cn/new 等价），用短的那个。
-            path.append("/cn/").append(enc(s));
+            path.append("/cn/").append(HtmlKit.enc(s));
         }
         if (page > 1) path.append("?page=").append(page);
         return base + path.toString();
@@ -429,13 +417,6 @@ final class MissavAdapter {
         return SiteFetchWebView.fetchPage(url);
     }
 
-    /** 站点根。从 profile.origin 取，只有它空着才退回默认域名。 */
-    static String base(SiteProfile profile) {
-        String origin = profile == null ? "" : profile.origin;
-        if (origin == null) origin = "";
-        origin = origin.replaceAll("/+$", "");
-        return origin.length() == 0 ? "https://missav.live" : origin;
-    }
 
     // ── 参数 ──────────────────────────────────────────────────────────
 
@@ -453,45 +434,8 @@ final class MissavAdapter {
         }
     }
 
-    private static String param(String query, String key) {
-        int q = query.indexOf('?');
-        String qs = q >= 0 ? query.substring(q + 1) : "";
-        String[] pairs = qs.split("&");
-        for (int i = 0; i < pairs.length; i++) {
-            int eq = pairs[i].indexOf('=');
-            if (eq < 0) continue;
-            if (!key.equals(pairs[i].substring(0, eq))) continue;
-            try {
-                return java.net.URLDecoder.decode(pairs[i].substring(eq + 1), "UTF-8");
-            } catch (Exception e) {
-                return "";
-            }
-        }
-        return "";
-    }
 
-    private static int page(String path) {
-        try {
-            return Integer.parseInt(param(path, "page"));
-        } catch (Exception e) {
-            return 1;
-        }
-    }
 
-    /**
-     * URL 编码。
-     *
-     * 走 {@code java.net.URLEncoder} 会把空格编成 {@code +} —— 而站点是 PHP，
-     * 路径段里的 {@code +} 不被当空格解释。所以空格单独替换回 {@code %20}。
-     * （这个坑很老但每站都要各自确认一次：分类名里带空格的不少。）
-     */
-    private static String enc(String value) {
-        try {
-            return java.net.URLEncoder.encode(value, "UTF-8").replace("+", "%20");
-        } catch (Exception e) {
-            return value;
-        }
-    }
 
     /** 日志里的地址：去掉 query，太长就截中间。 */
     private static String shortUrl(String url) {

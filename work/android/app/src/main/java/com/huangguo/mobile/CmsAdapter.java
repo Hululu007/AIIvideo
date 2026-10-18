@@ -79,16 +79,16 @@ public final class CmsAdapter {
         } else if (path.startsWith("/api/tags")) {
             result = tags(base);
         } else if (path.startsWith("/api/search")) {
-            result = search(base, param(path, "q"), page(path), profile);
+            result = search(base, HtmlKit.param(path, "q"), HtmlKit.page(path), profile);
         } else if (path.startsWith("/api/videos")) {
             if (path.indexOf("/play") > 0) {
                 result = play(base, videoId(path), episode(path), profile);
             } else if (path.indexOf("/api/videos/") == 0) {
                 result = detail(base, videoId(path), profile);
             } else if (path.indexOf("sort=new") > 0) {
-                result = listing(base, "", page(path), pageSize(path), profile);
+                result = listing(base, "", HtmlKit.page(path), pageSize(path), profile);
             } else {
-                result = listing(base, param(path, "cate_id"), page(path), pageSize(path), profile);
+                result = listing(base, HtmlKit.param(path, "cate_id"), HtmlKit.page(path), pageSize(path), profile);
             }
         } else {
             throw new Exception("CMS 适配器不认识的路径：" + path);
@@ -136,7 +136,7 @@ public final class CmsAdapter {
             empty.put("pagination", pagination(null, 1));
             return empty;
         }
-        JSONObject raw = call(base, "ac=detail&wd=" + enc(keyword) + "&pg=" + page);
+        JSONObject raw = call(base, "ac=detail&wd=" + HtmlKit.enc(keyword) + "&pg=" + page);
         JSONObject out = new JSONObject();
         out.put("items", toVideos(profile, raw.optJSONArray("list")));
         out.put("pagination", pagination(raw, page));
@@ -145,7 +145,7 @@ public final class CmsAdapter {
 
     /** 详情。顺带把 vod_play_url 拆成剧集列表，缓存起来给 play() 用。 */
     private static JSONObject detail(String base, String id, SiteProfile profile) throws Exception {
-        JSONObject raw = call(base, "ac=detail&ids=" + enc(id));
+        JSONObject raw = call(base, "ac=detail&ids=" + HtmlKit.enc(id));
         JSONArray list = raw.optJSONArray("list");
         JSONObject item = (list != null && list.length() > 0) ? list.optJSONObject(0) : null;
         if (item == null) throw new Exception("CMS 里找不到这个 id：" + id);
@@ -455,26 +455,10 @@ public final class CmsAdapter {
 
     // ── 小工具 ────────────────────────────────────────────────────────
 
-    private static String param(String path, String key) {
-        int q = path.indexOf('?');
-        if (q < 0) return "";
-        String[] pairs = path.substring(q + 1).split("&");
-        for (int i = 0; i < pairs.length; i++) {
-            int eq = pairs[i].indexOf('=');
-            if (eq < 0) continue;
-            if (!key.equals(pairs[i].substring(0, eq))) continue;
-            try { return java.net.URLDecoder.decode(pairs[i].substring(eq + 1), "UTF-8"); }
-            catch (Exception e) { return ""; }
-        }
-        return "";
-    }
 
-    private static int page(String path) {
-        return intOf(param(path, "page"), 1);
-    }
 
     private static int pageSize(String path) {
-        return intOf(param(path, "size"), 20);
+        return intOf(HtmlKit.param(path, "size"), 20);
     }
 
     private static String videoId(String path) {
@@ -489,16 +473,13 @@ public final class CmsAdapter {
     }
 
     private static int episode(String path) {
-        return intOf(param(path, "ep"), 1);
+        return intOf(HtmlKit.param(path, "ep"), 1);
     }
 
     private static int intOf(String value, int fallback) {
         try { return Integer.parseInt(value.trim()); } catch (Exception e) { return fallback; }
     }
 
-    private static String enc(String value) {
-        try { return java.net.URLEncoder.encode(value, "UTF-8"); } catch (Exception e) { return value; }
-    }
 
     /** 去掉 CMS 简介里的 HTML 标签 —— 实测 vod_content 是 `<p>…</p>`。 */
     private static String stripHtml(String html) {

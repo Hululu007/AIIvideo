@@ -74,14 +74,14 @@ public final class AgedmAdapter {
         } else if (path.startsWith("/api/tags")) {
             result = tags();
         } else if (path.startsWith("/api/search")) {
-            result = search(base, param(path, "q"), page(path));
+            result = search(base, HtmlKit.param(path, "q"), HtmlKit.page(path));
         } else if (path.startsWith("/api/videos")) {
             if (path.indexOf("/play") > 0) {
                 result = play(profile, videoId(path), episode(path));
             } else if (path.indexOf("/api/videos/") == 0) {
                 result = detail(base, videoId(path));
             } else {
-                result = listing(base, param(path, "cate_id"), param(path, "order"), page(path));
+                result = listing(base, HtmlKit.param(path, "cate_id"), HtmlKit.param(path, "order"), HtmlKit.page(path));
             }
         } else {
             throw new Exception("AGE动漫 适配器不认识的路径：" + path);
@@ -136,7 +136,7 @@ public final class AgedmAdapter {
         StringBuilder q = new StringBuilder("genre=all&letter=all&year=all&season=all"
                 + "&status=all&resource=all&region=all&order=" + sort);
         if (label != null && label.length() > 0 && !"all".equals(label)) {
-            q.append("&label=").append(enc(label));
+            q.append("&label=").append(HtmlKit.enc(label));
         } else {
             q.append("&label=all");
         }
@@ -154,7 +154,7 @@ public final class AgedmAdapter {
             empty.put("pagination", pagination(null, 1));
             return empty;
         }
-        JSONObject raw = get(base + "/v2/search?query=" + enc(keyword) + "&page=" + page);
+        JSONObject raw = get(base + "/v2/search?query=" + HtmlKit.enc(keyword) + "&page=" + page);
         JSONObject payload = raw.optJSONObject("data");
         if (payload == null) payload = raw;                  // 万一哪天信封没了也别崩
         JSONObject out = new JSONObject();
@@ -171,7 +171,7 @@ public final class AgedmAdapter {
 
     /** 详情。剧集要从 video.playlists 里挑一条线路拆出来。 */
     private static JSONObject detail(String base, String id) throws Exception {
-        JSONObject raw = get(base + "/v2/detail/" + enc(id));
+        JSONObject raw = get(base + "/v2/detail/" + HtmlKit.enc(id));
         JSONObject video = raw.optJSONObject("video");
         if (video == null) throw new Exception("AGE动漫 里找不到这个 id：" + id);
 
@@ -387,7 +387,7 @@ public final class AgedmAdapter {
         String want = normalize(title);
         if (want.length() == 0) throw new Exception("没有标题，没法去采集站匹配");
 
-        String url = cms + (cms.indexOf('?') >= 0 ? "&" : "?") + "ac=detail&wd=" + enc(title);
+        String url = cms + (cms.indexOf('?') >= 0 ? "&" : "?") + "ac=detail&wd=" + HtmlKit.enc(title);
         JSONObject raw = get(url);
         JSONArray list = raw.optJSONArray("list");
         if (list == null || list.length() == 0) {
@@ -512,31 +512,10 @@ public final class AgedmAdapter {
         }
     }
 
-    private static String param(String path, String key) {
-        int q = path.indexOf('?');
-        if (q < 0) return "";
-        String[] pairs = path.substring(q + 1).split("&");
-        for (int i = 0; i < pairs.length; i++) {
-            int eq = pairs[i].indexOf('=');
-            if (eq < 0) continue;
-            if (key.equals(pairs[i].substring(0, eq))) {
-                try {
-                    return java.net.URLDecoder.decode(pairs[i].substring(eq + 1), "UTF-8");
-                } catch (Exception e) {
-                    return pairs[i].substring(eq + 1);
-                }
-            }
-        }
-        return "";
-    }
 
-    private static int page(String path) {
-        try { return Math.max(1, Integer.parseInt(param(path, "page"))); }
-        catch (Exception e) { return 1; }
-    }
 
     private static int episode(String path) {
-        try { return Math.max(1, Integer.parseInt(param(path, "ep"))); }
+        try { return Math.max(1, Integer.parseInt(HtmlKit.param(path, "ep"))); }
         catch (Exception e) { return 1; }
     }
 
@@ -550,10 +529,6 @@ public final class AgedmAdapter {
         return q >= 0 ? rest.substring(0, q) : rest;
     }
 
-    private static String enc(String value) {
-        try { return java.net.URLEncoder.encode(value == null ? "" : value, "UTF-8"); }
-        catch (Exception e) { return value == null ? "" : value; }
-    }
 
     private static String head(String text, int max) {
         if (text == null) return "";

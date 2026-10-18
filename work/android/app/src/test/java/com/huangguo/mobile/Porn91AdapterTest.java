@@ -182,14 +182,11 @@ public class Porn91AdapterTest {
      * 看起来像账号问题，其实是这里。
      */
     @Test
-    public void percentDecodeKeepsPlusIntact() throws Exception {
-        String decoded = (String) call("percentDecode", new Class<?>[]{String.class},
-                "%3c%73%6f%75%72%63%65%20%73%72%63%3d%27a%2bb%2Fc%27%3e");
-        assertEquals("<source src='a+b/c'>", decoded);
-
-        // 非法转义不抛，原样留着
-        String raw = (String) call("percentDecode", new Class<?>[]{String.class}, "100%zz");
-        assertEquals("100%zz", raw);
+    public void percentDecodeKeepsPlusIntact() {
+        // 函数已收进 HtmlKit（三份逐字相同的实现），用例跟着挪
+        assertEquals("<source src='a+b/c'>",
+                HtmlKit.percentDecode("%3c%73%6f%75%72%63%65%20%73%72%63%3d%27a%2bb%2Fc%27%3e"));
+        assertEquals("100%zz", HtmlKit.percentDecode("100%zz"));
     }
 
     /** strencode 要能从真实页面里抠出整段百分号编码。 */
@@ -317,9 +314,9 @@ public class Porn91AdapterTest {
                 call("videoId", new Class<?>[]{String.class}, "/api/videos/51dc03e8e27a694f2fc7"));
         assertEquals("1555330457",
                 call("videoId", new Class<?>[]{String.class}, "/api/videos/1555330457/play?ep=1"));
-        assertEquals(3, call("page", new Class<?>[]{String.class}, "/api/videos?cate_id=ori&page=3"));
-        assertEquals(1, call("page", new Class<?>[]{String.class}, "/api/videos?cate_id=ori"));
-        assertEquals("ori", call("param", new Class<?>[]{String.class, String.class},
+        assertEquals(3, HtmlKit.page("/api/videos?cate_id=ori&page=3"));
+        assertEquals(1, HtmlKit.page("/api/videos?cate_id=ori"));
+        assertEquals("ori", HtmlKit.param(
                 "/api/videos?cate_id=ori&page=2", "cate_id"));
     }
 
@@ -351,11 +348,11 @@ public class Porn91AdapterTest {
     /** 中文搜索词要百分号编码，否则站点收到的是乱码。 */
     @Test
     public void encHandlesChinese() throws Exception {
-        String encoded = (String) call("enc", new Class<?>[]{String.class}, "东京");
+        String encoded = HtmlKit.enc("东京");
         assertTrue("中文应当被编码成 %XX，实际 " + encoded, encoded.startsWith("%"));
         assertFalse(encoded.contains("东"));
         // ASCII 不动
-        assertEquals("abc-123_x.y", call("enc", new Class<?>[]{String.class}, "abc-123_x.y"));
+        assertEquals("abc-123_x.y", HtmlKit.enc("abc-123_x.y"));
     }
 
     // ── ⑧ 游客标记 ga：没有它详情页每次换一部片 ──────────────────────

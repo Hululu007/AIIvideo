@@ -121,7 +121,7 @@ final class OpenListAdapter {
     // ── 路由 ──────────────────────────────────────────────────────────
 
     static byte[] fetch(String path, SiteProfile profile) throws Exception {
-        String base = base(profile);
+        String base = AdapterIo.base(profile, DEFAULT_HOST);
         JSONObject result;
         // 顺序不能换：/api/videos 下面三个动作靠**参数名**分流，不靠路径形状。
         if (path.startsWith("/api/home")) {
@@ -129,20 +129,20 @@ final class OpenListAdapter {
         } else if (path.startsWith("/api/tags")) {
             result = tags(base);
         } else if (path.startsWith("/api/search")) {
-            result = search(base, param(path, "q"), page(path));
+            result = search(base, HtmlKit.param(path, "q"), HtmlKit.page(path));
         } else if (path.startsWith("/api/videos")) {
             // id 在**路径段**上（/api/videos/{id}/play），不在查询串里 ——
-            // 一开始按 param("id") 取，取到的永远是空串，详情页标题就成了空。
+            // 一开始按 HtmlKit.param("id") 取，取到的永远是空串，详情页标题就成了空。
             String rest = path.substring("/api/videos".length());
             int mark = rest.indexOf('?');
             String seg = mark >= 0 ? rest.substring(0, mark) : rest;
             String query = mark >= 0 ? rest.substring(mark + 1) : "";
-            String cate = param(query, "cate_id");
+            String cate = HtmlKit.param(query, "cate_id");
             if (cate.length() > 0) {
-                result = listing(base, cate, page(query));
+                result = listing(base, cate, HtmlKit.page(query));
             } else if (seg.endsWith("/play")) {
                 result = play(base, decodeId(seg.substring(1, seg.length() - "/play".length())),
-                        param(query, "ep"));
+                        HtmlKit.param(query, "ep"));
             } else {
                 result = detail(base, decodeId(seg.replaceFirst("^/", "")));
             }
@@ -154,12 +154,6 @@ final class OpenListAdapter {
         return envelope.toString().getBytes(StandardCharsets.UTF_8);
     }
 
-    static String base(SiteProfile profile) {
-        String origin = profile == null ? "" : profile.origin;
-        if (origin == null) origin = "";
-        origin = origin.replaceAll("/+$", "");
-        return origin.length() == 0 ? DEFAULT_HOST : origin;
-    }
 
     // ── 三个动作 ──────────────────────────────────────────────────────
 
@@ -642,38 +636,5 @@ final class OpenListAdapter {
         return leaf(parent);
     }
 
-    /**
-     * 取一个查询参数。
-     *
-     * 入参可能是**整条动作路径**（`/api/videos?cate_id=…`），也可能只是查询串
-     * （`cate_id=…`）—— 先砍掉问号前面那截。不砍的话第一个键会带着路径前缀，
-     * 永远匹配不上，表现是「分类页、搜索页都返回全站」这种不报错的错。
-     */
-    static String param(String query, String key) {
-        if (query == null || query.length() == 0) return "";
-        int mark = query.indexOf('?');
-        String q = mark >= 0 ? query.substring(mark + 1) : query;
-        if (q.length() == 0) return "";
-        String[] pairs = q.split("&");
-        for (int i = 0; i < pairs.length; i++) {
-            int eq = pairs[i].indexOf('=');
-            if (eq < 0) continue;
-            if (!key.equals(pairs[i].substring(0, eq))) continue;
-            try {
-                return java.net.URLDecoder.decode(pairs[i].substring(eq + 1), "UTF-8");
-            } catch (Exception e) {
-                return "";
-            }
-        }
-        return "";
-    }
 
-    static int page(String path) {
-        String raw = param(path, "page");
-        try {
-            return Math.max(1, Integer.parseInt(raw.trim()));
-        } catch (Exception e) {
-            return 1;
-        }
-    }
 }

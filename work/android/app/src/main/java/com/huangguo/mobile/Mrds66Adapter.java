@@ -171,24 +171,24 @@ public final class Mrds66Adapter {
      * 由 AiiHttp.get() 在 adapter == "mrds66" 时分流过来。
      */
     public static byte[] fetch(String path, SiteProfile profile) throws Exception {
-        String base = base(profile);
+        String base = AdapterIo.base(profile, DEFAULT_HOST);
         JSONObject result;
         // 顺序不能换：/api/tags/{slug} 是 /api/tags 的长形式，前缀判断必须先精确后模糊。
         if (path.startsWith("/api/home")) {
             result = home(base);
         } else if (path.startsWith("/api/tags/")) {
-            result = tagList(base, tagSlug(path), page(path));
+            result = tagList(base, tagSlug(path), HtmlKit.page(path));
         } else if (path.startsWith("/api/tags")) {
             result = tags();
         } else if (path.startsWith("/api/search")) {
-            result = search(base, param(path, "q"), page(path));
+            result = search(base, HtmlKit.param(path, "q"), HtmlKit.page(path));
         } else if (path.startsWith("/api/videos")) {
             // 三个动作共用 /api/videos 前缀，**判据用参数名而不是路径形状**
             // （Hanime1Adapter 在这上面踩过：按「有没有 /play」分流，分类列表
             //  掉进了 detail，videoId() 解出空串）。
-            String cate = param(path, "cate_id");
+            String cate = HtmlKit.param(path, "cate_id");
             if (cate.length() > 0) {
-                result = listing(base, cate, page(path));
+                result = listing(base, cate, HtmlKit.page(path));
             } else if (path.indexOf("/play") > 0) {
                 result = play(base, videoId(path));
             } else {
@@ -210,12 +210,6 @@ public final class Mrds66Adapter {
      * 所以这里不用再校验一遍 —— 多一道只会把「origin 为空」这种合法情形
      * 误判成错误。
      */
-    static String base(SiteProfile profile) {
-        String origin = profile == null ? "" : profile.origin;
-        if (origin == null) origin = "";
-        origin = origin.replaceAll("/+$", "");
-        return origin.length() == 0 ? DEFAULT_HOST : origin;
-    }
 
     // ── 各个动作 ──────────────────────────────────────────────────────
 
@@ -230,7 +224,7 @@ public final class Mrds66Adapter {
      * 一倍，换来的还是同一批内容。去重靠 id，保证两行不重影。
      */
     private static JSONObject home(String base) throws Exception {
-        JSONArray all = parseCards(get(base + "/"), base);
+        JSONArray all = parseCards(AdapterIo.get(base + "/"), base);
 
         JSONArray featured = new JSONArray();
         JSONArray latest = new JSONArray();
@@ -295,7 +289,7 @@ public final class Mrds66Adapter {
      * 所以校验放在配置侧：只放实测过的那 20 个进去。
      */
     private static JSONObject listing(String base, String cate, int page) throws Exception {
-        String html = get(pageUrl(base + "/category/" + enc(cate) + "/", page));
+        String html = AdapterIo.get(pageUrl(base + "/category/" + HtmlKit.enc(cate) + "/", page));
         JSONArray items = parseCards(html, base);
 
         JSONObject out = new JSONObject();
@@ -318,7 +312,7 @@ public final class Mrds66Adapter {
         if (keyword == null || keyword.trim().length() == 0) {
             throw new Exception("搜索词为空，不发请求");
         }
-        String html = get(pageUrl(base + "/search/" + enc(keyword.trim()) + "/", page));
+        String html = AdapterIo.get(pageUrl(base + "/search/" + HtmlKit.enc(keyword.trim()) + "/", page));
         JSONArray items = parseCards(html, base);
 
         JSONObject out = new JSONObject();
@@ -336,7 +330,7 @@ public final class Mrds66Adapter {
      */
     private static JSONObject tagList(String base, String slug, int page) throws Exception {
         if (slug == null || slug.length() == 0) throw new Exception("标签为空，不发请求");
-        String html = get(pageUrl(base + "/tag/" + enc(slug) + "/", page));
+        String html = AdapterIo.get(pageUrl(base + "/tag/" + HtmlKit.enc(slug) + "/", page));
         JSONArray items = parseCards(html, base);
 
         JSONObject out = new JSONObject();
@@ -364,7 +358,7 @@ public final class Mrds66Adapter {
         JSONObject cached = META_CACHE.get(id);
         if (cached != null) return new JSONObject(cached.toString());
 
-        String html = get(base + "/archives/" + enc(id) + "/");
+        String html = AdapterIo.get(base + "/archives/" + HtmlKit.enc(id) + "/");
 
         String title = metaContent(html, "headline");
         if (title.length() == 0) title = h1Title(html);
@@ -424,7 +418,7 @@ public final class Mrds66Adapter {
      * @return source 是 m3u8 直链，libVLC 的 HLS 播放器直接吃（AES-128 由它解）。
      */
     private static JSONObject play(String base, String id) throws Exception {
-        String html = get(base + "/archives/" + enc(id) + "/");
+        String html = AdapterIo.get(base + "/archives/" + HtmlKit.enc(id) + "/");
         JSONObject config = playerConfig(html);
         if (config == null) {
             throw new Exception("这个页面里没有播放器配置（id=" + id
@@ -478,7 +472,7 @@ public final class Mrds66Adapter {
         String raw = m.group(1);
         if (raw == null || raw.length() == 0) return null;
         try {
-            return new JSONObject(unescape(raw));
+            return new JSONObject(HtmlKit.unescape(raw));
         } catch (Exception e) {
             log("dplayer 的 data-config 不是合法 JSON：" + e);
             return null;
@@ -578,8 +572,8 @@ public final class Mrds66Adapter {
         String inner = m.group(1);
         // 角标在 <div class="wrap"> 里，整段剥掉
         inner = WRAP_BADGE_RE.matcher(inner).replaceAll(" ");
-        String s = stripHtml(inner);
-        return unescape(s).replaceAll("\\s+", " ").trim();
+        String s = HtmlKit.stripHtml(inner);
+        return HtmlKit.unescape(s).replaceAll("\\s+", " ").trim();
     }
 
     /**
@@ -595,7 +589,7 @@ public final class Mrds66Adapter {
     static String cardCover(String chunk) {
         Matcher m = BANNER_RE.matcher(chunk);
         if (!m.find()) return "";
-        return normalize(m.group(1));
+        return HtmlKit.normalizeUrl(m.group(1));
     }
 
     /** 卡片日期：`<span itemprop="datePublished" content="2026-10-11T19:58:00+00:00">` */
@@ -612,14 +606,14 @@ public final class Mrds66Adapter {
     static String cardCategory(String chunk) {
         Matcher m = CARD_CATE_RE.matcher(chunk);
         if (!m.find()) return "";
-        return unescape(stripHtml(m.group(1))).replaceAll("\\s+", " ").trim();
+        return HtmlKit.unescape(HtmlKit.stripHtml(m.group(1))).replaceAll("\\s+", " ").trim();
     }
 
     /** `<h1 class="post-title" itemprop="name headline">…</h1>` */
     static String h1Title(String html) {
         Matcher m = H1_RE.matcher(html);
         if (!m.find()) return "";
-        return unescape(stripHtml(m.group(1))).replaceAll("\\s+", " ").trim();
+        return HtmlKit.unescape(HtmlKit.stripHtml(m.group(1))).replaceAll("\\s+", " ").trim();
     }
 
     /** `<meta itemprop="headline" content="…">`，属性顺序不固定，所以两个方向都试。 */
@@ -630,7 +624,7 @@ public final class Mrds66Adapter {
         if (!m.find()) return "";
         Matcher c = Pattern.compile("content=[\"']([^\"']*)[\"']", Pattern.CASE_INSENSITIVE)
                 .matcher(m.group(0));
-        return c.find() ? unescape(c.group(1)).trim() : "";
+        return c.find() ? HtmlKit.unescape(c.group(1)).trim() : "";
     }
 
     /**
@@ -662,8 +656,8 @@ public final class Mrds66Adapter {
         seg = COMMENT_RE.matcher(seg).replaceAll(" ");
         seg = LINK_RE.matcher(seg).replaceAll(" ");
 
-        String text = stripHtml(seg).replaceAll("\\s+", " ").trim();
-        text = unescape(text);
+        String text = HtmlKit.stripHtml(seg).replaceAll("\\s+", " ").trim();
+        text = HtmlKit.unescape(text);
         if (text.length() > 300) text = text.substring(0, 300) + "…";
         return text;
     }
@@ -682,7 +676,7 @@ public final class Mrds66Adapter {
         while (m.find() && out.length() < 12) {
             String raw = m.group(1);
             if (raw == null || raw.length() == 0) continue;
-            String name = percentDecode(raw);
+            String name = HtmlKit.percentDecode(raw);
             if (name.length() == 0 || !seen.add(name)) continue;
             out.put(name);
         }
@@ -701,7 +695,7 @@ public final class Mrds66Adapter {
         Matcher m = NEAR_RE.matcher(html);
         while (m.find() && out.length() < RELATED_LIMIT) {
             String id = m.group(1);
-            String title = unescape(stripHtml(m.group(2))).replaceAll("\\s+", " ").trim();
+            String title = HtmlKit.unescape(HtmlKit.stripHtml(m.group(2))).replaceAll("\\s+", " ").trim();
             if (id == null || id.length() == 0) continue;
             if (selfId != null && selfId.equals(id)) continue;
             if (!seen.add(id)) continue;
@@ -825,17 +819,7 @@ public final class Mrds66Adapter {
 
     // ── 路径参数 ──────────────────────────────────────────────────────
 
-    static String param(String path, String key) {
-        Matcher m = Pattern.compile("[?&]" + Pattern.quote(key) + "=([^&#]*)").matcher(path);
-        if (!m.find()) return "";
-        return percentDecode(m.group(1));
-    }
 
-    static int page(String path) {
-        String p = param(path, "page");
-        try { return p.length() == 0 ? 1 : Math.max(1, Integer.parseInt(p)); }
-        catch (Exception e) { return 1; }
-    }
 
     /** 从 `/api/videos/{id}` 或 `/api/videos/{id}/play` 里取 id。 */
     static String videoId(String path) {
@@ -846,7 +830,7 @@ public final class Mrds66Adapter {
     /** 从 `/api/tags/{slug}?page=N` 里取标签词。 */
     static String tagSlug(String path) {
         Matcher m = Pattern.compile("/api/tags/([^/?#]+)").matcher(path);
-        return m.find() ? percentDecode(m.group(1)) : "";
+        return m.find() ? HtmlKit.percentDecode(m.group(1)) : "";
     }
 
     /**
@@ -877,44 +861,12 @@ public final class Mrds66Adapter {
      * 首页 200 是最坏的那种情况：探针过、配置生成得出来、App 看起来是好的，
      * 点进任何一个分类或详情才 403。用 Dalvik 或安卓 Chrome 的 UA，上面四条全 200。
      */
-    private static String get(String url) throws Exception {
-        byte[] body = AiiHttp.getRaw(url, SiteCfg.browserHeaders(), TIMEOUT);
-        return new String(body, "UTF-8");
-    }
 
     /** 双斜杠归一化：`https://pic.jtzatly.cn//upload_01/…` → `…/upload_01/…`。 */
-    static String normalize(String url) {
-        if (url == null) return "";
-        String s = url.trim();
-        int scheme = s.indexOf("://");
-        if (scheme < 0) return s;
-        int pathStart = scheme + 3;
-        // 域名之后那一段可能是一串斜杠
-        int i = pathStart;
-        while (i < s.length() && s.charAt(i) != '/') i++;
-        if (i >= s.length()) return s;
-        int j = i;
-        while (j < s.length() && s.charAt(j) == '/') j++;
-        return s.substring(0, i) + "/" + s.substring(j);
-    }
 
     /** 剥标签。不处理实体 —— 调用方各自 unescape。 */
-    static String stripHtml(String html) {
-        if (html == null) return "";
-        return html.replaceAll("<[^>]*>", " ");
-    }
 
     /** 常见 HTML 实体。够用就好：这几个是 Typecho 模板真正会吐出来的。 */
-    static String unescape(String s) {
-        if (s == null) return "";
-        return s.replace("&quot;", "\"")
-                .replace("&#39;", "'")
-                .replace("&apos;", "'")
-                .replace("&lt;", "<")
-                .replace("&gt;", ">")
-                .replace("&nbsp;", " ")
-                .replace("&amp;", "&");
-    }
 
     /**
      * 只解 %XX，不动 `+`。
@@ -923,63 +875,8 @@ public final class Mrds66Adapter {
      * **不用 URLDecoder.decode()** —— 那个会把 `+` 解成空格，而标签词里
      * 出现 `+` 的概率不为零（比如「C++」），解错了就查不到。
      */
-    static String percentDecode(String raw) {
-        if (raw == null || raw.length() == 0) return "";
-        // ★ 必须按**字节**攒，不能按 char 拼。
-        //
-        // 上一版是 `sb.append((char) ((hi << 4) | lo))` —— 对 ASCII 没事，对中文
-        // 直接坏掉：`%E5%90%83` 是 UTF-8 的三个字节，逐个当 char 追加等于把
-        // 一个字符拆成三个 U+00E5/U+0090/U+0083，解出来是「å]ç」这种乱码。
-        // 标签名和搜索词全是中文，所以这条路一走就全废 —— 单测当场抓到。
-        //
-        // 现在：`%XX` 解成字节进缓冲，碰见非转义的字符先把缓冲冲成 UTF-8 串；
-        // 末尾再冲一次。**仍然不动 `+`** —— 它在这个站上是合法字符，
-        // 不是空格（见上面 percentDecode 的说明）。
-        java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream(raw.length());
-        StringBuilder sb = new StringBuilder(raw.length());
-        int i = 0;
-        while (i < raw.length()) {
-            char c = raw.charAt(i);
-            if (c == '%' && i + 2 < raw.length()) {
-                int hi = Character.digit(raw.charAt(i + 1), 16);
-                int lo = Character.digit(raw.charAt(i + 2), 16);
-                if (hi >= 0 && lo >= 0) {
-                    buf.write((hi << 4) | lo);
-                    i += 3;
-                    continue;
-                }
-            }
-            if (buf.size() > 0) {
-                sb.append(new String(buf.toByteArray(), java.nio.charset.StandardCharsets.UTF_8));
-                buf.reset();
-            }
-            sb.append(c);
-            i++;
-        }
-        if (buf.size() > 0) {
-            sb.append(new String(buf.toByteArray(), java.nio.charset.StandardCharsets.UTF_8));
-        }
-        return sb.toString();
-    }
 
     /** 只对非安全字符做百分号编码，别把中文原样塞进 URL。 */
-    static String enc(String s) {
-        if (s == null) return "";
-        StringBuilder sb = new StringBuilder(s.length());
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-                    || c == '-' || c == '_' || c == '.' || c == '~') {
-                sb.append(c);
-            } else {
-                byte[] bytes = String.valueOf(c).getBytes(java.nio.charset.StandardCharsets.UTF_8);
-                for (byte b : bytes) {
-                    sb.append('%').append(String.format("%02X", b & 0xFF));
-                }
-            }
-        }
-        return sb.toString();
-    }
 
     /** 详情元数据缓存。满了清空 —— 这个站一页 30 条，16 条够回看，不做 LRU 那套。 */
     private static void cache(String id, JSONObject meta) {

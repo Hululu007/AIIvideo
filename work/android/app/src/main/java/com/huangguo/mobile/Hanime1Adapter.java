@@ -159,7 +159,7 @@ public final class Hanime1Adapter {
         } else if (path.startsWith("/api/tags")) {
             result = tags();
         } else if (path.startsWith("/api/search")) {
-            result = search(param(path, "q"), page(path));
+            result = search(HtmlKit.param(path, "q"), HtmlKit.page(path));
         } else if (path.startsWith("/api/videos")) {
             // ── 三个动作共用 /api/videos 前缀，顺序不能换（2026-10-17 真机踩到）──
             //
@@ -181,12 +181,12 @@ public final class Hanime1Adapter {
             // 2026-10-17 加：240 个细标签走**另一条参数**。站点那边 genre= 和
             // tags[]= 是两回事（前者是 10 个大方向，后者是标签面板上那些多选框），
             // 所以这里按参数名分流，而不是按路径 —— 两条路共用 /api/videos。
-            String tag = param(path, "tag");
-            String cate = param(path, "cate_id");
+            String tag = HtmlKit.param(path, "tag");
+            String cate = HtmlKit.param(path, "cate_id");
             if (tag.length() > 0) {
-                result = listingByTag(tag, param(path, "genre"), page(path));
+                result = listingByTag(tag, HtmlKit.param(path, "genre"), HtmlKit.page(path));
             } else if (cate.length() > 0) {
-                result = listingByGenre(cate, page(path));
+                result = listingByGenre(cate, HtmlKit.page(path));
             } else if (path.indexOf("/play") > 0) {
                 result = play(videoId(path), episode(path));
             } else {
@@ -215,7 +215,7 @@ public final class Hanime1Adapter {
      * 去重靠 id：同一个作品可能在多个区里重复出现，不去重首页会看到重影。
      */
     private static JSONObject home() throws Exception {
-        String html = get(HOST + "/");
+        String html = AdapterIo.get(HOST + "/");
         JSONArray all = parseCards(html, HOST + "/");
 
         JSONArray featured = new JSONArray();
@@ -252,11 +252,11 @@ public final class Hanime1Adapter {
     private static JSONObject search(String keyword, int page) throws Exception {
         String url;
         if (keyword != null && keyword.length() > 0) {
-            url = HOST + "/search?query=" + enc(keyword) + "&page=" + page;
+            url = HOST + "/search?query=" + HtmlKit.enc(keyword) + "&page=" + page;
         } else {
-            url = HOST + "/search?sort=" + enc("最新上傳") + "&page=" + page;
+            url = HOST + "/search?sort=" + HtmlKit.enc("最新上傳") + "&page=" + page;
         }
-        String html = get(url);
+        String html = AdapterIo.get(url);
         JSONArray items = parseCards(html, HOST + "/");
 
         JSONObject out = new JSONObject();
@@ -273,8 +273,8 @@ public final class Hanime1Adapter {
      *    两条路在站点那边是不同的参数（genre= vs tags[]=），别混。
      */
     public static JSONObject listingByGenre(String genre, int page) throws Exception {
-        String url = HOST + "/search?genre=" + enc(genre) + "&page=" + page;
-        String html = get(url);
+        String url = HOST + "/search?genre=" + HtmlKit.enc(genre) + "&page=" + page;
+        String html = AdapterIo.get(url);
         JSONArray items = parseCards(html, HOST + "/");
         JSONObject out = new JSONObject();
         out.put("items", items);
@@ -308,10 +308,10 @@ public final class Hanime1Adapter {
      */
     public static JSONObject listingByTag(String tag, String seed, int page) throws Exception {
         String genre = (seed == null || seed.length() == 0) ? GENRES[0] : seed;
-        String url = HOST + "/search?genre=" + enc(genre)
-                + "&tags%5B%5D=" + enc(tag)
+        String url = HOST + "/search?genre=" + HtmlKit.enc(genre)
+                + "&tags%5B%5D=" + HtmlKit.enc(tag)
                 + "&page=" + page;
-        String html = get(url);
+        String html = AdapterIo.get(url);
         JSONArray items = parseCards(html, HOST + "/");
         JSONObject out = new JSONObject();
         out.put("items", items);
@@ -329,11 +329,11 @@ public final class Hanime1Adapter {
         JSONObject cached = META_CACHE.get(id);
         if (cached != null) return new JSONObject(cached.toString());
 
-        String html = get(HOST + "/watch?v=" + enc(id));
+        String html = AdapterIo.get(HOST + "/watch?v=" + HtmlKit.enc(id));
 
         String ogTitle = meta(html, "property", "og:title");
         String title = stripSuffix(ogTitle, " - Hanime1.me");
-        if (title.length() == 0) title = stripHtml(text(html, "<title>", "</title>"));
+        if (title.length() == 0) title = HtmlKit.stripTags(text(html, "<title>", "</title>"));
 
         JSONObject out = new JSONObject();
         out.put("id", id);
@@ -377,7 +377,7 @@ public final class Hanime1Adapter {
      * episodes 是可以复用的，play 不行。
      */
     private static JSONObject play(String id, int quality) throws Exception {
-        String html = get(HOST + "/watch?v=" + enc(id));
+        String html = AdapterIo.get(HOST + "/watch?v=" + HtmlKit.enc(id));
         JSONArray sources = parseSources(html);
         if (sources.length() == 0) {
             throw new Exception("这个页面里没有可播的 <source>（id=" + id
@@ -654,7 +654,7 @@ public final class Hanime1Adapter {
     private static JSONObject tags() throws Exception {
         JSONArray groups = new JSONArray();
         try {
-            String html = get(HOST + "/search?genre=" + enc(GENRES[0]));
+            String html = AdapterIo.get(HOST + "/search?genre=" + HtmlKit.enc(GENRES[0]));
             JSONArray sectionGroups = parseTagPanel(html);
             if (sectionGroups.length() > 0) {
                 for (int i = 0; i < sectionGroups.length(); i++) groups.put(sectionGroups.optJSONObject(i));
@@ -784,31 +784,18 @@ public final class Hanime1Adapter {
 
     // ── 小工具 ────────────────────────────────────────────────────────
 
-    /**
-     * 一次 GET。**不带 Referer** —— 站点自己声明了
-     * `<meta name="referrer" content="no-referrer">`，我们跟着来就行。
-     * 实测带了也不拦，但没必要跟站点的声明反着做。
-     *
-     * 走 getRaw：朴素客户端、不继承我们站点的 headers 模板、不套 DoH。
-     * Content-Type 实测是 text/html; charset=UTF-8，但**不能按声明解**——
-     * 页面里有大量日文和繁体，按 UTF-8 读才对（getRaw 给的是原始字节）。
-     */
-    private static String get(String url) throws Exception {
-        byte[] body = AiiHttp.getRaw(url, TIMEOUT);
-        return new String(body, "UTF-8");
-    }
 
     /** 拿 <meta property="og:title" content="…"> 这类。attr 是 "property" 或 "name"。 */
     private static String meta(String html, String attr, String key) {
         Pattern p = Pattern.compile("<meta[^>]*" + attr + "=[\"']" + Pattern.quote(key)
                 + "[\"'][^>]*content=[\"']([^\"']*)[\"']", Pattern.CASE_INSENSITIVE);
         Matcher m = p.matcher(html);
-        if (m.find()) return unescape(m.group(1));
+        if (m.find()) return HtmlKit.unescape(m.group(1));
         // content 在前、属性在后的写法
         Pattern p2 = Pattern.compile("<meta[^>]*content=[\"']([^\"']*)[\"'][^>]*" + attr + "=[\"']"
                 + Pattern.quote(key) + "[\"']", Pattern.CASE_INSENSITIVE);
         Matcher m2 = p2.matcher(html);
-        return m2.find() ? unescape(m2.group(1)) : "";
+        return m2.find() ? HtmlKit.unescape(m2.group(1)) : "";
     }
 
     /** 取 `class="xxx"` 那个元素里的文本。够用就行，不做完整 DOM。 */
@@ -816,7 +803,7 @@ public final class Hanime1Adapter {
         Pattern p = Pattern.compile("class=[\"'][^\"']*\\b" + Pattern.quote(cls)
                 + "\\b[^\"']*[\"'][^>]*>([^<]{0,300})", Pattern.CASE_INSENSITIVE);
         Matcher m = p.matcher(chunk);
-        return m.find() ? unescape(m.group(1)).trim() : "";
+        return m.find() ? HtmlKit.unescape(m.group(1)).trim() : "";
     }
 
     /** 卡片里第一个 img 的 src（含懒加载的 data-src）。 */
@@ -835,13 +822,13 @@ public final class Hanime1Adapter {
     private static String attrOfImg(String chunk, String name) {
         Matcher m = Pattern.compile("<img[^>]*\\b" + Pattern.quote(name) + "=[\"']([^\"']*)[\"']",
                 Pattern.CASE_INSENSITIVE).matcher(chunk);
-        return m.find() ? unescape(m.group(1)) : "";
+        return m.find() ? HtmlKit.unescape(m.group(1)) : "";
     }
 
     private static String attr(String chunk, String name) {
         Matcher m = Pattern.compile("<[a-z]+[^>]*\\b" + Pattern.quote(name) + "=[\"']([^\"']*)[\"']",
                 Pattern.CASE_INSENSITIVE).matcher(chunk);
-        return m.find() ? unescape(m.group(1)) : "";
+        return m.find() ? HtmlKit.unescape(m.group(1)) : "";
     }
 
     /** 列表页那句 `thumb_up 98%`。取出来当 score 用。 */
@@ -855,7 +842,7 @@ public final class Hanime1Adapter {
     private static String uploaderOf(String chunk) {
         Matcher m = Pattern.compile("class=[\"']subtitle[\"'][^>]*>\\s*<a[^>]*>([^<]{1,80})</a>",
                 Pattern.CASE_INSENSITIVE).matcher(chunk);
-        return m.find() ? unescape(m.group(1)).trim() : "";
+        return m.find() ? HtmlKit.unescape(m.group(1)).trim() : "";
     }
 
     private static String text(String html, String open, String close) {
@@ -865,9 +852,6 @@ public final class Hanime1Adapter {
         return b < 0 ? "" : html.substring(a + open.length(), b);
     }
 
-    private static String stripHtml(String s) {
-        return s == null ? "" : s.replaceAll("<[^>]+>", "").trim();
-    }
 
     private static String stripSuffix(String s, String suffix) {
         if (s == null) return "";
@@ -881,12 +865,6 @@ public final class Hanime1Adapter {
         return s.startsWith(prefix) ? s.substring(prefix.length()).trim() : s;
     }
 
-    private static String unescape(String s) {
-        if (s == null) return "";
-        return s.replace("&amp;", "&").replace("&quot;", "\"").replace("&#039;", "'")
-                .replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">")
-                .replace("&nbsp;", " ").replace("\\u0026", "&").replace("\\/", "/");
-    }
 
     /** 详情缓存的 LRU。超量就丢掉最早的一批——不追求精确 LRU，够用。 */
     private static void cache(String id, JSONObject meta) {
@@ -930,18 +908,7 @@ public final class Hanime1Adapter {
 
     // ── 路径参数 ──────────────────────────────────────────────────────
 
-    static String param(String path, String key) {
-        Matcher m = Pattern.compile("[?&]" + Pattern.quote(key) + "=([^&#]*)").matcher(path);
-        if (!m.find()) return "";
-        try { return java.net.URLDecoder.decode(m.group(1), "UTF-8"); }
-        catch (Exception e) { return m.group(1); }
-    }
 
-    static int page(String path) {
-        String p = param(path, "page");
-        try { return p.length() == 0 ? 1 : Math.max(1, Integer.parseInt(p)); }
-        catch (Exception e) { return 1; }
-    }
 
     /** 从 `/api/videos/{id}` 或 `/api/videos/{id}/play` 里取 id。 */
     static String videoId(String path) {
@@ -951,16 +918,12 @@ public final class Hanime1Adapter {
 
     /** 借 {episode} 表示画质档位：480 / 720 / 1080。缺省 0 = 用 720。 */
     static int episode(String path) {
-        String ep = param(path, "ep");
-        if (ep.length() == 0) ep = param(path, "episode");
+        String ep = HtmlKit.param(path, "ep");
+        if (ep.length() == 0) ep = HtmlKit.param(path, "episode");
         try { return ep.length() == 0 ? 0 : Integer.parseInt(ep); }
         catch (Exception e) { return 0; }
     }
 
-    static String enc(String s) {
-        try { return java.net.URLEncoder.encode(s == null ? "" : s, "UTF-8"); }
-        catch (Exception e) { return s == null ? "" : s; }
-    }
 
     /** 日志走 AiiHttp 的 tag，和别的 HTTP 记录在一条流里，方便对照。 */
     private static void log(String message) {
@@ -970,7 +933,7 @@ public final class Hanime1Adapter {
     /** 去掉标签里可能带的空白和 HTML 实体。 */
     private static String cleanText(String raw) {
         if (raw == null) return "";
-        String s = unescape(raw).replaceAll("<[^>]+>", "");
+        String s = HtmlKit.unescape(raw).replaceAll("<[^>]+>", "");
         return s.replaceAll("[\\s\u3000]+", "").trim().isEmpty() ? "" : s.trim();
     }
 
