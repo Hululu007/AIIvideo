@@ -41,7 +41,13 @@ import org.json.JSONObject;
 final class HotUpdateManager {
     static final int BRIDGE_VERSION = 1;
     private static final long BUNDLED_UI_REVISION = 15;
-    static final String INDEX = Endpoints.HOT_INDEX;
+    /**
+     * 热更清单的候选地址。2026-10-18 起全部指向 GitHub 仓库的 hot/ 目录，
+     * 不再依赖自己的服务器 —— 理由见 Endpoints.HOT_RAW 的注释。
+     *
+     * 这个常量只剩「给日志和对拍用」的意义，真正取值走 Endpoints.hotIndexUrls()。
+     */
+    static final String INDEX = Endpoints.hotIndexUrls().get(0);
 
     /** 一个资源包最多多少个条目。防「几万个空文件」撑爆目录遍历。 */
     private static final int MAX_ENTRIES = 512;
@@ -164,6 +170,10 @@ final class HotUpdateManager {
         long jOptLong;
         boolean z;
         JSONObject jSONObjectState = state();
+        // 热更这条路一直是「静默工作」的：成功没日志、失败也没日志，出问题只能
+        // 靠猜。这四行是刻意留的 —— 用户报「UI 没更新」时，一条 logcat 就能看出
+        // 是没拉到、被 blocked、还是加载时抛了异常。
+        android.util.Log.d("AIIvideo", "[hot] session state=" + jSONObjectState);
         // smali 里所有逃出的 Exception 最终都走 :catch_3 -> IllegalStateException，
         // 所以这个方法没有 throws。jadx 把最后的正常路径 load(jOptLong, z) 放到了
         // catch 链外面，导致 javac 认为它未被捕获。
@@ -183,7 +193,8 @@ final class HotUpdateManager {
                             load(jOptLong, true);
                             jSONObjectState.put("previous", jOptLong2).put("active", jOptLong).put("pending", 0).put("trial", jOptLong);
                             save(jSONObjectState);
-                        } catch (Exception unused) {
+                        } catch (Exception e) {
+                            android.util.Log.w("AIIvideo", "[hot] 新版本 " + jOptLong + " 加载失败，标记 blocked", e);
                             jSONObjectState.put("blocked", jOptLong).put("pending", 0);
                             save(jSONObjectState);
                             return load(jOptLong2, false);
@@ -192,11 +203,13 @@ final class HotUpdateManager {
                     if (jSONObjectState.optLong("trial") != jOptLong || jOptLong == 0) {
                         z = false;
                     }
-                } catch (Exception unused2) {
+                } catch (Exception e) {
+                    android.util.Log.w("AIIvideo", "[hot] 会话初始化失败，回滚到 active", e);
                     rollbackState(jSONObjectState, Math.max(jSONObjectState.optLong("active"), jSONObjectState.optLong("pending")));
                     return load(jSONObjectState.optLong("active"), false);
                 }
-            } catch (Exception unused3) {
+            } catch (Exception e) {
+                android.util.Log.e("AIIvideo", "[hot] 连 active 都加载不了，退回内置", e);
                 save(new JSONObject().put("blocked", jSONObjectState.optLong("active")));
                 return load(0L, false);
             }
@@ -273,8 +286,9 @@ final class HotUpdateManager {
             }
             if (z || z2 || jCurrentTimeMillis - this.preferences.getLong("lastCheck", 0L) >= 1800000) {
                 this.preferences.edit().putLong("lastCheck", jCurrentTimeMillis).putInt("lastApkVersionCode", i).apply();
-                byte[] bArrDownload = download(INDEX, 262144);
-                JSONObject jSONObjectVerifyEnvelope = verifyEnvelope(bArrDownload);
+                Envelope best = fetchBestEnvelope();
+                byte[] bArrDownload = best.raw;
+                JSONObject jSONObjectVerifyEnvelope = best.payload;
                 requireCompatible(jSONObjectVerifyEnvelope);
                 long j = jSONObjectVerifyEnvelope.getLong("revision");
                 synchronized (this) {
@@ -282,7 +296,7 @@ final class HotUpdateManager {
                     if (j <= Math.max(Math.max(jSONObjectState.optLong("active"), jSONObjectState.optLong("pending")), jSONObjectState.optLong("blocked"))) {
                         jSONObjectPut = status().put("checking", false);
                     } else {
-                        stage(bArrDownload, download(jSONObjectVerifyEnvelope.getString("url"), 12582912));
+                        stage(bArrDownload, downloadFirst(Endpoints.mirrorsOf(jSONObjectVerifyEnvelope.getString("url")), 12582912));
                         jSONObjectPut = status().put("checking", false);
                     }
                 }
@@ -354,7 +368,7 @@ final class HotUpdateManager {
         staging.mkdirs();
 
         try {
-            unpack(payload, staging, envelope, state, revision);
+            unpack(payload, envelopeBytes, staging, envelope, state, revision);
         } catch (Exception e) {
             // 任何失败都把半成品目录清掉，别在盘上留个不完整包
             delete(staging);
@@ -363,7 +377,7 @@ final class HotUpdateManager {
     }
 
     /** 解包主体。抽出来是为了让 stage() 的失败清理只有一个出口。 */
-    private void unpack(byte[] payload, File staging, JSONObject envelope, JSONObject state, long revision) throws Exception {
+    private void unpack(byte[] payload, byte[] envelopeBytes, File staging, JSONObject envelope, JSONObject state, long revision) throws Exception {
         HashSet<String> seen = new HashSet<>();
         int entryCount = 0;
         long totalBytes = 0;
@@ -420,8 +434,16 @@ final class HotUpdateManager {
             throw new IOException("界面包缺少入口文件");
         }
 
+        // envelope.json 存的是**签名信封原文**，不是资源包。
+        //
+        // 这里原来写的是 payload（= zip 字节），而 metadata() 又拿这个文件去
+        // verifyEnvelope() —— 对一堆 zip 字节做 JSONObject 解析，必然抛异常。
+        // 后果不是「热更失败」，是 beginSession 每次都走 catch：新版本被标成
+        // blocked，active 也被清掉，最后 load(0) 回内置。表现是「热更发布了、
+        // 下载了、提示了下次启动生效，但重启之后永远是内置版本」，而且一条
+        // 错误日志都不打（2026-10-18 实测踩到，加日志才看出来）。
         try (FileOutputStream out = new FileOutputStream(new File(staging, "envelope.json"))) {
-            out.write(payload);
+            out.write(envelopeBytes);
         }
 
         delete(directory(revision));
@@ -602,6 +624,71 @@ final class HotUpdateManager {
             }
         }
         throw new IOException("更新跳转次数超限");
+    }
+
+    /** 一份通过验签的信封，连同它的原始字节（stage 需要原文再验一次）。 */
+    private static final class Envelope {
+        final byte[] raw;
+        final JSONObject payload;
+
+        Envelope(byte[] bArr, JSONObject jSONObject) {
+            this.raw = bArr;
+            this.payload = jSONObject;
+        }
+    }
+
+    /**
+     * 依次尝试一组地址，返回第一份拿到的内容。
+     *
+     * 用在下发热更包：信封里给的地址是 GitHub 的，国内直连基本超时，所以
+     * 前面插了镜像。任何一个成功就停，全失败才把最后一个错误抛出去 ——
+     * 报错要保留原因，不然用户只看到「更新失败」四个字，没法判断是网断了
+     * 还是包坏了。
+     */
+    private static byte[] downloadFirst(java.util.List<String> list, int i) throws Exception {
+        Exception exc = null;
+        for (int j = 0; j < list.size(); j++) {
+            try {
+                return download(list.get(j), i);
+            } catch (Exception e) {
+                exc = e;
+            }
+        }
+        throw exc == null ? new IOException("没有可用的更新地址") : exc;
+    }
+
+    /**
+     * 把清单的所有候选都拉一遍，取 revision 最大的那份。
+     *
+     * ── 为什么不「第一个成功就用」──
+     * raw.githubusercontent 和几个镜像前面都有 CDN 缓存（实测大约 5 分钟）。
+     * 刚发布时完全可能 A 镜像还吐着上一版、B 镜像已经拿到新版。如果按顺序
+     * 取第一个，就会一直读到旧的那份，表现是「发布了但客户端永远不更新」，
+     * 而且下个 30 分钟周期可能又读到同一个旧镜像，卡死在那儿。
+     *
+     * 三份清单加起来不到 2KB，全拉一遍取最新，代价可以忽略。
+     *
+     * 全部失败时抛最后一个错误；任何一份验签不过也算失败（不能因为它是
+     * 「最后一份能下载的」就放行）。
+     */
+    private Envelope fetchBestEnvelope() throws Exception {
+        Envelope best = null;
+        Exception exc = null;
+        java.util.List<String> list = Endpoints.hotIndexUrls();
+        for (int i = 0; i < list.size(); i++) {
+            try {
+                byte[] bArrDownload = download(list.get(i), 262144);
+                JSONObject jSONObjectVerifyEnvelope = verifyEnvelope(bArrDownload);
+                if (best == null
+                        || jSONObjectVerifyEnvelope.getLong("revision") > best.payload.getLong("revision")) {
+                    best = new Envelope(bArrDownload, jSONObjectVerifyEnvelope);
+                }
+            } catch (Throwable th) {
+                exc = th instanceof Exception ? (Exception) th : new Exception(th);
+            }
+        }
+        if (best != null) return best;
+        throw exc == null ? new IOException("没有可用的热更清单") : exc;
     }
 
     /*
