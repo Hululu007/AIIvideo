@@ -14,6 +14,12 @@ REQUIRED = [
     "assets/site-default.json",
     "assets/site-web.js",
     "assets/hot-update-public.pem",
+    # app.js 拆出来的分片。少一个不会编译失败 —— index.html 里那条 <script src>
+    # 指向不存在的文件只在运行时 404，页面照常起来，坏的是某个二级页面里的一整块。
+    # 所以这三条必须钉在这里，让 check-apk 在出包时就把它拦下来。
+    "assets/app-update.js",
+    "assets/source-market.js",
+    "assets/proxy-panel.js",
 ]
 
 
@@ -44,6 +50,19 @@ def main():
     for req in REQUIRED:
         if req not in names:
             problems.append(f"缺 {req}")
+
+    # index 里每一条 <script src> 都得真的在包里。
+    #
+    # 这是拆 app.js 之后最容易犯的错：新写一个分片、在 app.html 里挂上、忘了
+    # 把它加进 REQUIRED —— 或者反过来。两种都会编译通过、启动正常，坏的是某个
+    # 二级页面里的一整块（点进「网络代理」白屏，控制台 ReferenceError）。
+    # 这里直接读包里那份 app.html，把 src 抽出来逐个对账，一次把两种情况都堵住。
+    import re
+    html = z.read("assets/app.html").decode("utf-8", "replace")
+    for src in re.findall(r'<script[^>]+src="([^"]+)"', html):
+        if not src.startswith(("http:", "https:", "//")):
+            if "assets/" + src not in names:
+                problems.append(f"app.html 引用了不存在的 assets/{src}")
 
     if problems:
         for p in problems:
