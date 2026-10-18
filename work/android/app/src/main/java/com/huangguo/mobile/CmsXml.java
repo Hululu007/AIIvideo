@@ -23,8 +23,13 @@ import java.util.regex.Pattern;
  *   class[].type_id / type_name   <class><ty id="…">…</ty>
  *
  * **所以这个类只做一件事：把 XML 翻译成 JSON 那套形状。**
- * 翻译完丢给 CmsAdapter，后面的映射、分集拆解、播放地址提取全部复用，
- * 不用写第二遍。这是把「两种接口」的差异收敛到一个点上的做法。
+ * 它是「同一个 CMS 的两种接口」的差异收敛点 —— XML 转成 JSON 之后，读它的代码
+ * 不必再写第二套字段解析。
+ *
+ * ⚠️ 2026-10-19：以前读这份 JSON 的是 CmsAdapter（Java 适配器体系的一员），
+ *    那套已经整块拆掉。现在唯一的调用点是 `SourceConfig.fetch()`：XML 接口地址
+ *    仍能拉下来、翻译成 JSON，但下游没有谁再把「CMS 的 list/class 形状」变成一份
+ *    源配置 —— 加源只认本身就是配置的 JSON。这个悬空消费方已单独报给 lead。
  *
  * ── 两个实测出来的坑 ──────────────────────────────────────────────
  *
@@ -37,8 +42,7 @@ import java.util.regex.Pattern;
  *      <dd flag="liangzi">第01集$https://v.lzcdn27.com/share/47fa1e27…#…
  *      <dd flag="lzm3u8">第01集$https://v.lzcdn27.com/20261009/…/index.m3u8#…
  *    第一条是 `/share/` 分享页（要第三方解析），第二条才是直链。
- *    所以这里把多条线路按 `$$$` 拼起来（跟 JSON 那套一致），
- *    由 CmsAdapter.splitPlayUrl 去挑一条能直接播的。
+ *    所以这里把多条线路按 `$$$` 拼起来（跟 JSON 那套一致），谁是直链由读它的人挑。
  */
 final class CmsXml {
 

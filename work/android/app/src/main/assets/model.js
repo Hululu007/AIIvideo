@@ -173,29 +173,65 @@
 
   // ── Play ─────────────────────────────────────────────────────────
   //
-  // spider 给的是 {url, alts:[{line,url}]}：url 是「默认播这一条」，alts 是全部线路。
-  // 前端要的是 {url, lines}。两条容易错的地方：
+  // spider 给的是 {url, alts:[{line,url}], reason, note}：url 是「默认播这一条」，
+  // alts 是全部线路。前端要的是 {url, lines}，外加一句「能不能播、为什么」。
+  //
+  // 三件事容易错：
   //   ① url 必须先落在 lines 里 —— 否则播放器拿到的地址和线路列表对不上，
-  //      用户切一下线路再切回来就换了源。不在就补到最前面。
+  //      用户切一下线路再切回来就换了源。
   //   ② lines 空但 url 有值（spider 只给了一条），也要给出一条默认线路。
+  //   ③ **降级不是失败**。agedm 的 url:'' 是刻意的：age_ 密文要在站点自己的
+  //      wasm 里解，spider 跑不了。它把密文标记放进 alts、把原因放进 reason。
+  //      这一层要是把 alts 滤掉、或者把密文扶正成 url，上层就只剩一句
+  //      「格式不支持」，和「这个源压根没实现 play」长得一模一样。
   function play(payload) {
     var data = payload || {};
+    var reason = str(data.reason);
+    var note = str(data.note);
     var url = str(data.url);
     var list = [];
     arr(data.alts).forEach(function (raw, index) {
       var one = line(raw);
+      // 只滤掉「url 是空」的条目。**不按协议过滤** —— agedm 降级的线路是
+      // `agedm-wasm:xxx` 的密文标记，前端那段 wasm 解析器认的就是这个前缀
+      // （app.js 的 hgNativeResolve）。按 http 开头筛等于把它唯一剩下的线索扔掉。
       if (!one.url) return;
       if (!str(raw && raw.line)) one.line = 'LINE' + (index + 1);
       list.push(one);
     });
-    if (!url && list.length > 0) url = list[0].url;
-    if (list.length === 0) {
+
+    // 源明确说了「播不了、原因是 X」时，不把第一条线路扶正成 url。
+    // 把密文当播放地址交出去，播放器报的是格式错，用户看不出真正原因。
+    //
+    // 这条规则等于给源提了个要求：reason 和 url 互斥（给了 reason 就是没有直链）。
+    // 万一以后有源既给 reason、alts 里又真有一条 https 直链、url 还留空，
+    // 现在的输出是 declined + 一条列在 lines 里但不会被自动播的线路。
+    // 那天要改成「url 空时优先从 lines 里挑第一条 http(s) 扶正，reason 降级成附注」，
+    // 同时确认 agedm 那种全加密的仍判 declined。见 docs/2026-10-19-spider模型与转换.md。
+    if (!url && !reason && list.length > 0) url = list[0].url;
+    if (list.length === 0 && !reason) {
       list = [{ line: 'default', name: '默认线路', url: url }];
     } else if (url) {
       var found = list.some(function (one) { return one.url === url; });
       if (!found) list.unshift({ line: 'default', name: '默认线路', url: url });
     }
-    return { url: url, lines: list, episodeNumber: num(data.episodeNumber) };
+
+    // state 是给上层的判断位，别处不要再自己推一遍：
+    //   ready    —— 有 http(s) 直链，可以直接播
+    //   declined —— 源认得出这一集，但明确说播不了（典型 reason='encrypted'）
+    //   empty    —— 源什么都没给：没地址也没解释（「没实现」落在这一档）
+    var state = 'empty';
+    if (/^https?:\/\//i.test(url)) state = 'ready';
+    else if (reason) state = 'declined';
+
+    return {
+      url: url,
+      lines: list,
+      episodeNumber: num(data.episodeNumber),
+      state: state,
+      reason: reason,
+      note: note
+    };
   }
 
   // ── 分派 ─────────────────────────────────────────────────────────

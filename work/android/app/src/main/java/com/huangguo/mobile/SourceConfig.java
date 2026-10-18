@@ -58,9 +58,9 @@ final class SourceConfig {
      *   名字     会被人改，而且同一个站可以有两个名字（源列表里就同时有
      *            agedm-decl 和 www.agedm.io）。用名字的话，改一次名历史全断。
      *   配置地址 更稳，但同一个站的两份配置地址天然不同 —— 而那两份**确实不是
-     *            同一个源**：agedm-decl 是旧的零代码配置，没有 adapter，
-     *            `/api/videos/{id}` 落到普通路径上根本解不出 id；www.agedm.io
-     *            走 agedm 适配器，翻到 api.agedm.io/v2/detail/。分开是对的。
+     *            同一个源**：一份把 `/api/videos/{id}` 落到服务端路径上，另一份
+     *            同名的 id 落到别处（历史上是适配器翻到 api.agedm.io/v2/detail/）。
+     *            分开是对的。
      *
      * 只有「id 往哪儿翻」决定 id 空间。翻到同一个地方 = 同一个空间 = 历史该互通；
      * 翻到不同地方 = 硬混就是张冠李戴（静默播错片子，比报错糟得多）。
@@ -71,12 +71,6 @@ final class SourceConfig {
      */
     static String identity(JSONObject config) {
         if (config == null) return "";
-        // 每站「id 翻到哪儿」的规矩归适配器自己，这里只管问 + 兜底。
-        SiteAdapter impl = Adapters.byId(config.optString("adapter", "").trim());
-        if (impl != null) {
-            String space = impl.identity(config);
-            if (space != null && space.length() > 0) return space;
-        }
 
         // spider 源（只有 web.spider、没有 origin/paths）：id 空间就是 spider 的 id。
         // 不加这一段会掉到最下面那条 cfg| 分支 —— 手工写在本地的 spider 配置没有
@@ -579,36 +573,24 @@ final class SourceConfig {
         }
     }
     /**
-     * 拉一个地址，认出它是什么，规范化成一份配置。
+     * 拉一个地址，认出它是不是一份源配置，规范化成 JSON。
      *
-     * 用户不需要知道「适配器」是什么 —— 贴上去能识别就行。识别不出来时给一句
-     * 人话，别让他对着一个沉默的输入框猜。
+     * **2026-10-19：不再「猜站点」。** 这里原来有两轮识别循环 —— 按 URL 认（AGE动漫 /
+     * hanime1 / mrds66 那批 HTML 站），按响应形状认（苹果CMS 的接口）。那套能力的
+     * 载体是每个站一个 Java 适配器，适配器体系已经整块拆掉，站点知识搬进 spider
+     * （JS，热更下发）。所以现在只认「本身就是一份配置」的东西：用户贴的是一份
+     * .json，或者一个能返回这种 JSON 的地址。
      *
-     * 认五种：
-     *   {origin|web}         我们自己的 JSON 配置      → adapter 缺省（rest）
-     *   {code,list,class}    苹果CMS 接口             → adapter=cms，从 class[] 生成 categories
-     *   {sources[]}          源市场清单               → 不是源，见 UserSource.MARKET_LIST
-     *   {urls[]}             TVBox 多仓               → 二期
-     *   {sites[]}            TVBox 单仓               → 二期
+     * 还认的几种：
+     *   {origin|web}         我们自己的 JSON 配置      → 直接就是结果
+     *   XML 接口              fetch() 里由 CmsXml 转成同形 JSON（见那边的注）
+     *   {sources[]}           源市场清单               → 不是源，见 UserSource.MARKET_LIST
+     *   {urls[]}              TVBox 多仓               → 二期
+     *   {sites[]}             TVBox 单仓               → 二期
      */
     static JSONObject load(String url) throws Exception {
-        // 第一轮：按地址认，**认在 fetch 之前**。AGE动漫 / hanime1 / mrds66 给的
-        // 都是 HTML，先 fetch 一次只会拿到几十万字节的页面，然后报「认不出这是什么
-        // 配置」。谁负责认、认完怎么生成配置，全在各自那个 SiteAdapter 里。
-        for (int i = 0; i < Adapters.ALL.size(); i++) {
-            SiteAdapter adapter = Adapters.ALL.get(i);
-            if (adapter.matchesUrl(url)) return adapter.probe(url);
-        }
-
         JSONObject fetched = fetch(url);
         if (fetched == null) throw new IOException("响应为空");
-
-        // 第二轮：按响应形状认。苹果CMS 没有固定域名，只能看字段 —— 两次探测、
-        // XML 补层级那些活也在 CmsSite 里，这里只负责转交。
-        for (int i = 0; i < Adapters.ALL.size(); i++) {
-            SiteAdapter adapter = Adapters.ALL.get(i);
-            if (adapter.matchesBody(fetched)) return adapter.probe(url, fetched);
-        }
 
         // 源市场清单（{sources:[{name,url,desc}]}）。它不是一份源，是一份源**目录** ——
         // 前端收到这个标记就把里面的源列出来让用户勾，而不是自己再猜一遍。
@@ -628,7 +610,7 @@ final class SourceConfig {
         if (fetched.has("origin") || fetched.has("web")) {
             return fetched;
         }
-        throw new IOException("认不出这是什么配置 —— 既不像我们自己的 JSON，也不像苹果CMS 接口");
+        throw new IOException("认不出这是什么配置 —— 它既没有 origin，也没有 web 块");
     }
 
     static boolean isAction(String name) {

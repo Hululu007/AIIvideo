@@ -228,6 +228,31 @@ function checkNoUndefined(label, shape) {
     played.lines);
   checkNoUndefined('play', played);
 
+  // ---- play · 降级（agedm 的 age_ 密文）：这是 play 里最容易做错的一档 ----
+  //
+  // 源给的形状是 url:'' + alts[agedm-wasm:…] + reason:'encrypted' + note。
+  // 三种错法都会让用户看到一句错的报错：把 alts 滤掉（说「没有可用线路」）、
+  // 把密文扶正成 url（播放器报格式不支持）、把 reason/note 丢掉（什么都说不出来）。
+  const declinedRaw = {
+    url: '',
+    alts: [{ line: 'xigua', url: 'agedm-wasm:abc123' }],
+    reason: 'encrypted',
+    note: '这一集的地址在站点侧是加密的'
+  };
+  const declined = HGModel.play(declinedRaw);
+  check('play·降级 · alts 里的非 http url 保留',
+    () => declined.lines.length === 1 && declined.lines[0].url === 'agedm-wasm:abc123', declined.lines);
+  check('play·降级 · url 保持空串（密文不扶正）', () => declined.url === '', declined.url);
+  check('play·降级 · state === declined', () => declined.state === 'declined', declined.state);
+  check('play·降级 · reason 原样带出', () => declined.reason === 'encrypted', declined.reason);
+  check('play·降级 · note 原样带出', () => declined.note === declinedRaw.note, declined.note);
+  checkNoUndefined('play·降级', declined);
+
+  // 和「源没实现 play」区分开：空 payload 是 empty，不是 declined。
+  const empty = HGModel.play({});
+  check('play·空 · state === empty', () => empty.state === 'empty', empty.state);
+  check('play·空 · 没有 reason', () => empty.reason === '', empty.reason);
+
   // ---- 反例：未知能力名必须抛 ----
   let threw = false;
   try { HGModel.fromBridge({}, 'nope'); } catch (error) { threw = true; }

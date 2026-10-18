@@ -735,8 +735,8 @@ final class SiteFetchWebView {
                     // 代理挂上了、JS 也在跑，就是过不去。表现是 awaitPass 20 秒超时
                     // 连 html[lang] 都等不到（挑战页根本没渲染）。
                     //
-                    // 换成不带 wv 的 Chrome 移动版 UA（和 SiteCfg.browserHeaders
-                    // 同一族），挑战把它当普通 Chrome 处理，正常放行。
+                    // 换成不带 wv 的 Chrome 移动版 UA，挑战把它当普通 Chrome 处理，
+                    // 正常放行。
                     s.setUserAgentString(
                             "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36"
                                     + " (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36");

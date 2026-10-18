@@ -359,20 +359,6 @@ public final class UserSource {
 
 
 
-    // ── 下载 ──────────────────────────────────────────────────────────
-
-
-
-    /** 把名单拼成「a / b / c」。报错文案用。 */
-    private static String join(java.util.List<String> items) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < items.size(); i++) {
-            if (i > 0) sb.append(" / ");
-            sb.append(items.get(i));
-        }
-        return sb.toString();
-    }
-
     // ── 校验 ──────────────────────────────────────────────────────────
 
     /**
@@ -384,26 +370,10 @@ public final class UserSource {
     public static String validate(JSONObject config) {
         if (config == null) return "配置为空";
 
-        // CMS 那类没有 origin，校验规则完全不同：只要一个 https 的 api 地址。
-        // 认得的适配器只有 cms / agedm / 单站 HTML 型 三种。别的值不当适配器看 ——
-        // 会掉进下面 REST 那套校验里，缺什么报什么。那是对的（未知适配器本来就
-        // 该被挡），但报「缺少 origin」容易让人以为是地址填错了，所以这里先点名。
-        //
-        // ⚠️ 第三种适配器的实现类**不在仓库里**（见 .gitignore）：它的目标是成人
-        //    内容站，代码和内容一起排除了。这行白名单留着是为了让**本地那份配置
-        //    仍然能通过校验** —— 只有 adapter 名，不含任何站点信息。
-        //    没有那个类的话，走到这一步的源会在 fetch 时分流失败，报「找不到符号」
-        //    是编译期的事，运行时它就是一个认不出内容的源。
-        // 适配器名单与必填项都问注册表要 —— 这里原本是第四份手抄的名单，
-        // 已经漂过一次（porn91 有实现、有分流，却不在名单里，源根本加不进来）。
-        String adapter = config.optString("adapter", "");
-        if (adapter.length() > 0) {
-            SiteAdapter impl = Adapters.byId(adapter);
-            if (impl == null) {
-                return "不认识的适配器：" + adapter + "（" + join(Adapters.ids()) + "）";
-            }
-            return impl.check(config);
-        }
+        // 老配置里可能还带着 "adapter": "agedm" 这种键。它在 2026-10-19 之后是
+        // **惰性的**：没有适配器体系了，这个键读都不读 —— 留着只是为了存量配置
+        // 能原样通过校验、原样存盘（配置里有未知键本来就不算错）。真正决定内容
+        // 从哪来的只有 web.spider。
 
         // web 块先看：origin 那几条校验要不要做，取决于 paths.home 长什么样。
         JSONObject web = config.optJSONObject("web");
@@ -431,18 +401,14 @@ public final class UserSource {
         // 任何一条不过都会走到「站点必须是 HTTPS 域名」那个分支。
         //
         // 但 origin 是**可以留空**的（2026-10-16 起）：它的唯一作用是拼在 paths 前面，
-        // 而 **paths 里可以直接写 https 绝对地址**。两个用途：
-        //   · 接口开在别的域名上（AGE动漫 的 api.agedm.io 和页面 m.agedm.io 不是一个域）
-        //   · 写适配器时（苹果CMS 就是这样：origin 空，/api/... 原样交给适配器）
+        // 而 **paths 里可以直接写 https 绝对地址**。用途是接口开在别的域名上
+        // （AGE动漫 的 api.agedm.io 和页面 m.agedm.io 不是一个域）。
         // 留空的前提是 home 得是绝对地址，否则首页不知道去哪取 —— 这条必须查，
         // 漏了就是「App 起来但首页永远空白」，用户完全不知道哪里错了。
         String origin = config.optString("origin", "").trim();
-        // 有适配器就豁免：适配器自己拼 URL（agedm 用 api、cms 用 api），
-        // paths 那张表它根本不看 —— agedm.json 就是 origin 空 + 相对路径 + adapter。
-        boolean hasAdapter = config.optString("adapter", "").trim().length() > 0;
-        // spider 源同样豁免「没有 origin 就得有一串绝对地址」：它一条路径都不拼，
+        // spider 源豁免「没有 origin 就得有一串绝对地址」：它一条路径都不拼，
         // 那个前提（home 是绝对地址、detail 也是）对它不存在。
-        if (origin.length() == 0 && !hasAdapter && !spiderSource) {
+        if (origin.length() == 0 && !spiderSource) {
             if (!home.startsWith("https://")) {
                 return "缺少 origin（站点入口地址）；要么补上，要么把 web.paths.home 写成 https 绝对地址";
             }
@@ -464,10 +430,12 @@ public final class UserSource {
             // （点任何一部片子都要），它必须被显式覆盖成绝对地址。
             String detail = paths.optString("detail", "").trim();
             if (!detail.startsWith("https://")) {
-                return "没有 origin 也没有适配器时，web.paths.detail 必须写成 https 绝对地址"
+                return "没有 origin 也没有 spider 时，web.paths.detail 必须写成 https 绝对地址"
                         + "（现在是：" + (detail.length() == 0 ? "没写，会回落到默认的相对路径" : detail) + "）";
             }
-            // 其余写了的一并查掉。前缀 @ 的是适配器简写（@labels / @playlists），跳过。
+            // 其余写了的一并查掉。前缀 @ 的是适配器时代的老简写（@labels /
+            // @playlists），存量配置里可能还留着 —— 它本来就不是地址，跳过不报错，
+            // 别让一份只读的老配置在这里被新校验拦住。
             java.util.Iterator<String> pathNames = paths.keys();
             while (pathNames.hasNext()) {
                 String key = pathNames.next();

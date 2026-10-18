@@ -182,6 +182,29 @@ function tvboxSection() {
 // 点一下跑 home，只报卡片数。阶段 1 的目标是证明这条链路通了，不是做播放器；
 // 等模型定稿（阶段 2）再把结果接进真正的渲染路径。
 
+// ── 加源入口的分流（阶段 2）────────────────────────────────────────
+//
+// 一个输入框，两条路。后缀决定装什么：
+//
+//   …/x.js    → spider 源码。bridgeCall('spider', {op:'install'})，进运行时清单。
+//               **不切换内容源** —— 源码和「哪个源生效」是两件事，装完还要贴它的
+//               json 配置（那份配置里写着 web.spider: 'x'）才真的用上。
+//   …/x.json  → 源配置。走 sourceCommand('use')，切换并重启。
+//   没有后缀  → 按配置处理。老用户粘的本来就是这种地址，那条路一直是配置。
+//
+// 为什么不让用户自己选入口：这是加源唯一的门，多一个下拉框就多一次「我该点哪个」。
+function sourceKindOf(url) {
+  const clean = String(url || '').trim().replace(/[?#].*$/, '').toLowerCase();
+  return /\.js$/.test(clean) ? 'spider' : 'config';
+}
+
+/** 装 spider 源码，返回 {id,name,version}；失败把原因抛给调用方。 */
+async function installSpiderSource(url) {
+  const meta = await bridgeCall('spider', { op: 'install', url });
+  state.spiders = null;          // 清单变了，下次渲染重新读
+  return meta || {};
+}
+
 async function loadSpiderSources(force = false) {
   if (state.spiders && !force) return state.spiders;
   try {
@@ -278,14 +301,15 @@ function renderSourceSettings() {
     <section class="settings-card" aria-label="添加源">
       <div class="settings-row is-static">
         <span class="settings-icon">${icon('market')}</span>
-        <span class="settings-body"><strong>添加一个源</strong><small>地址必须以 https:// 开头</small></span>
+        <span class="settings-body"><strong>添加一个源</strong><small>贴 .json 配置或 .js 源码，按后缀自动分流</small></span>
       </div>
       <form id="source-form" class="password-form settings-form">
-        <input id="source-value" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://example.com/source.json" aria-label="源地址">
+        <input id="source-value" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://…/source.json 或 …/source.js" aria-label="源地址">
         <input id="source-alias" type="text" maxlength="40" autocomplete="off" placeholder="备注（可留空），比如「量子」" aria-label="备注">
         <p id="source-error" class="auth-error" role="alert" hidden></p>
         <button type="submit">添加并切换</button>
       </form>
+      <p class="settings-form-hint">.json 是源配置（切换并重启）；.js 是 spider 源码（装进运行时，不切换源）。</p>
     </section>
 
     ${tvboxSection()}
@@ -306,10 +330,9 @@ document.addEventListener('submit', async event => {
   input.disabled = true;
   toast('正在下载源…', true);
   try {
-    const meta = await bridgeCall('spider', { op: 'install', url });
-    toast('已添加 ' + (meta?.name || meta?.id || '源'));
+    const meta = await installSpiderSource(url);
+    toast('已装源码 ' + (meta?.name || meta?.id || '源') + '；还要贴它的 json 配置才会生效');
     input.value = '';
-    state.spiders = null;
     await loadSpiderSources(true);
   } catch (error) {
     toast('添加失败：' + (error.message || error));

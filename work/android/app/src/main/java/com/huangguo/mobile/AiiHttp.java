@@ -242,25 +242,12 @@ public final class AiiHttp {
     /**
      * 取回 url 的全部响应体。
      * 签名与改造前的 SiteRepository.fetch 对齐，异常语义也一样（抛 Exception）。
+     *
+     * 2026-10-19：适配器分流那一段（{@code /api/...} 交给各站自己的 Java 实现）
+     * 整段撤掉。现在剩下的两种源是：手写 REST 配置（origin + paths，直接拼地址）
+     * 与 spider 源（前端经 spider 桥取内容，根本不经过这里）。
      */
     public static byte[] get(String url, SiteProfile profile) throws Exception {
-        // 按适配器分流。cms 那类源的地址是「CMS 接口」，不是「origin + 路径」，
-        // 走不了下面的解析/DoH 那一套 —— 由适配器自己拼 URL、自己映射形状。
-        // 它返回的必须是**我们内部的 JSON 形状**，这样前端的 adapters.js 不用改。
-        //
-        // 只接 /api/ 开头的 —— 那是我们内部的动作词汇表，交给适配器翻译。
-        // 别的 URL（比如封面图的绝对地址，SiteRepository.coverData 会带着它走到
-        // 这里）必须走正常的取字节那条路，不然适配器会以「不认识的路径」拒掉，
-        // 表现是封面全部加载失败。
-        //
-        // origin 归一化也收到 Adapters.actionPath 里 —— 原来是每个适配器一段
-        // stripOrigin 兜底，三份一模一样的代码。那条洞是机制本身的，不是某个站的。
-        SiteAdapter adapter = Adapters.of(profile);
-        if (adapter != null) {
-            String actionPath = Adapters.actionPath(url, profile);
-            if (actionPath != null) return adapter.fetch(profile, actionPath);
-        }
-
         // 每次请求都记下目标主机。SiteProfile 的 origin 到底有没有被用户配置换掉，
         // 看这一行比往 smali 里插探针可靠 —— 探针写错会把整个类搞成 VerifyError，
         // 而且探针本身没验证过，输出不能当证据。
@@ -347,6 +334,22 @@ public final class AiiHttp {
      */
     static byte[] getRaw(String url, java.util.Map<String, String> headers, int timeoutSeconds,
                          SiteProfile profile) throws Exception {
+        return getRaw(url, headers, timeoutSeconds, profile, null);
+    }
+
+    /**
+     * 走源路由的带自定义头 GET，**额外把 {@code Set-Cookie} 收进 {@code cookieOut}**。
+     *
+     * <p>三参版本原样保留成一行转发（行为不变），真正干活的是这里：多出来的只有
+     * 那个 {@code cookieOut}，路由、超时、h2→h1 降级一个字没动。
+     *
+     * <p>为什么必须走这条而不是 {@code getRaw(url, headers, timeout, cookieOut)}：
+     * 后者问的是全局代理设置，不懂「当前源声明哪些域该走代理」。spider 的
+     * {@code net} 在两个重载之间选，选错就是「能拿到 cookie 的那次请求走了错误的
+     * 路由」——91porn 这种站每次请求都要带标记，那次请求挂了等于整页都挂了。
+     */
+    static byte[] getRaw(String url, java.util.Map<String, String> headers, int timeoutSeconds,
+                         SiteProfile profile, java.util.Map<String, String> cookieOut) throws Exception {
         log("GET " + hostOfUrl(url) + pathOfUrl(url));
         OkHttpClient http = client(profile);
         if (timeoutSeconds > 0) {
@@ -361,7 +364,7 @@ public final class AiiHttp {
         // h2 被中途掐断就降级 h1 重试一次 —— 和 fetchUncached 同一条规矩。
         // 出口节点抖的时候实测就是这个形态：18 秒后 Connection reset，重试才过。
         try {
-            return getWith(http, url, headers, profile);
+            return getWith(http, url, headers, profile, cookieOut);
         } catch (IOException e) {
             if (!isStreamBreak(e)) throw e;
             log("HTTP/2 被重置，降级 HTTP/1.1 重试 " + pathOfUrl(url));
@@ -372,12 +375,23 @@ public final class AiiHttp {
             if (http.proxy() != null) h1.proxy(http.proxy());
             if (http.proxyAuthenticator() != null) h1.proxyAuthenticator(http.proxyAuthenticator());
             h1.protocols(java.util.Collections.singletonList(okhttp3.Protocol.HTTP_1_1));
-            return getWith(h1.build(), url, headers, profile);
+            return getWith(h1.build(), url, headers, profile, cookieOut);
         }
     }
 
     private static byte[] getWith(OkHttpClient http, String url,
                                   java.util.Map<String, String> headers, SiteProfile profile) throws Exception {
+        return getWith(http, url, headers, profile, null);
+    }
+
+    /**
+     * 同上，外加把 {@code Set-Cookie} 收进 {@code cookieOut}（null 就是不要）。
+     *
+     * <p>四参版本原样保留成一行转发，行为不变；真正干活的在这里。加 {@code cookieOut}
+     * 只多了一句 {@link #harvestCookies}，请求的构造、分流、状态码判据全部照旧。
+     */
+    private static byte[] getWith(OkHttpClient http, String url, java.util.Map<String, String> headers,
+                                  SiteProfile profile, java.util.Map<String, String> cookieOut) throws Exception {
         Request.Builder builder = new Request.Builder().url(url);
         applyHeaders(builder, profile, url);
         if (headers != null) {
@@ -390,10 +404,11 @@ public final class AiiHttp {
         if (NetRoute.directOnly(hostOfUrl(url))) {
             OkHttpClient.Builder bypass = new OkHttpClient.Builder()
                     .connectTimeout(http.connectTimeoutMillis(), TimeUnit.MILLISECONDS)
-                    .readTimeout(http.readTimeoutMillis(), TimeUnit.MILLISECONDS);
-            if (http.dispatcher() != null && http.dns() instanceof SmartDns) {
-                bypass.dns(http.dns());
-            }
+                    .readTimeout(http.readTimeoutMillis(), TimeUnit.MILLISECONDS)
+                    // 和 rawWith 共用同一个决策函数：SmartDns 优先，其次 IPv4First。
+                    // 以前这里是 `http.dispatcher() != null && ...`，而 dispatcher 永远
+                    // 非 null —— 那个条件等于没写，读的人会以为这里还有第二种情况。
+                    .dns(dnsFor(http, profile));
             http = bypass.build();
         } else if (NetRoute.mustProxy(hostOfUrl(url)) && http.proxy() == null) {
             // 自洽性兜底：路由说要走代理，可这个 client 身上没有代理。
@@ -404,6 +419,7 @@ public final class AiiHttp {
         }
         Response response = http.newCall(builder.build()).execute();
         try {
+            harvestCookies(response, cookieOut);
             int code = response.code();
             if (code < 200 || code >= 300) throw new IOException("HTTP " + code + " @ " + url);
             ResponseBody body = response.body();
@@ -526,22 +542,15 @@ public final class AiiHttp {
      * 预热要取的那一坨。
      *
      * 不能直接把 /api/home 丢给 fetchUncached —— 那是个**内部路径**，不是 URL，
-     * 而且 CMS 源的地址根本不在 origin 上。所以这里把 get() 的分流重走一遍：
-     *   · cms：路径本身就是适配器的入参，交给它
-     *   · rest：origin + 路径 拼成完整地址
+     * 所以这里拼成完整地址再取：
+     *   · rest：origin + 路径
+     *   · spider 源没有 origin，下面那条闸会直接拒（前端根本不走预热这条路）
      */
     private static byte[] prefetchBody(SiteProfile profile) throws Exception {
         String path = warmPath(profile);
-        // 适配器源：路径就是内部动作路径，交给适配器自己去抓页面/调接口。
-        //
         // ⚠️ **只预热首页。** 有些站的播放地址带一次性签名、会过期，预热出来的
         //    地址等用户真去点的时候可能已经废了 —— 那种地址必须实时取。
         //    首页没有这个问题（它只是元数据），预热是安全的。
-        SiteAdapter adapter = Adapters.of(profile);
-        if (adapter != null) {
-            String actionPath = Adapters.actionPath(path, profile);
-            if (actionPath != null) return adapter.fetch(profile, actionPath);
-        }
         // 绝对地址直接用，相对路径才拼 origin —— 和 SiteRepository.detail 那条规矩一致。
         if (path.startsWith("https://")) return fetchUncached(path, profile);
         String origin = profile == null ? null : profile.origin;
@@ -666,18 +675,40 @@ public final class AiiHttp {
     }
 
     private static byte[] rawWith(OkHttpClient http, Request request, String url) throws Exception {
-        return rawWith(http, request, url, null);
+        return rawWith(http, request, url, null, null);
     }
 
     /**
      * 同上，外加把响应里的 `Set-Cookie` 收进 `cookieOut`（键=名字，值=值）。
      *
      * 有的站「游客标记」只在响应头里下发，正文里一个字节都没有 —— 91porn 的 `ga`
-     * 就是这样：没有它，同一个 viewkey 每次请求换一部片（见 Porn91Adapter 的
-     * 「游客标记」那段）。这类站没别的拿法，只能从响应头剥。
+     * 就是这样：没有它，同一个 viewkey 每次请求换一部片（这套「游客标记」原来写在
+     * 已删除的 Porn91Adapter 里，现在归 spider 自己处理）。这类站没别的拿法，
+     * 只能从响应头剥。
      */
     private static byte[] rawWith(OkHttpClient http, Request request, String url,
                                   java.util.Map<String, String> cookieOut) throws Exception {
+        return rawWith(http, request, url, cookieOut, null);
+    }
+
+    /**
+     * 真正干活的那个 {@code rawWith}：自定义头之外，再带上两个跟「路由」有关的输入。
+     *
+     * <ul>
+     *   <li>{@code cookieOut} 收 {@code Set-Cookie}（见上一段）。</li>
+     *   <li>{@code profile} <b>当前源配置</b>，只为一件事存在：{@code mustProxy} 兜底时
+     *       要拿它建 {@link SmartDns}。传 null 就等于「这次请求不知道源声明了什么」，
+     *       兜底会退回 {@code like.dns()} —— 见 {@link #dnsFor}。</li>
+     * </ul>
+     *
+     * <p><b>为什么 profile 是参数而不是静态字段</b>：{@code AiiHttp} 是给整个 App 用的，
+     * 同时可能有两个源在跑（主内容 + 播放解析）。路由恰好是最不该有第二份真相的东西 ——
+     * 一个静态 {@code currentProfile} 会让「A 源的请求用上 B 源的 hosts 钉死」变成
+     * 一个只在并发下复现的 bug，而症状是「偶尔连到错的 IP」，日志上看不出来。
+     */
+    private static byte[] rawWith(OkHttpClient http, Request request, String url,
+                                  java.util.Map<String, String> cookieOut,
+                                  SiteProfile profile) throws Exception {
         // 分流：直连表里的域名把代理摘掉。传进来的 client 可能已经挂着
         // effectiveProxy（plainClient 是按代理串缓存的，不能改），所以命中时
         // 现拼一个不带代理的 client —— 这类请求都是接口级、量不大，多 new 一次
@@ -686,29 +717,48 @@ public final class AiiHttp {
             OkHttpClient.Builder bypass = new OkHttpClient.Builder()
                     .connectTimeout(http.connectTimeoutMillis(), TimeUnit.MILLISECONDS)
                     .readTimeout(http.readTimeoutMillis(), TimeUnit.MILLISECONDS)
-                    .dns(IPV4_FIRST);
+                    // 别把传进来 client 的 DNS 扔掉 —— 它可能是 SmartDns（DoH + 配置里
+                    // 钉死的地址）。见 dnsFor 的说明。
+                    .dns(dnsFor(http, profile));
             http = bypass.build();
         } else if (NetRoute.mustProxy(hostOfUrl(url)) && http.proxy() == null) {
-            http = proxiedClient(null, http);      // 同 getWith 那条兜底
+            // 同 getWith 那条兜底。**profile 必须往下传**：传给 proxiedClient 的是 null
+            // 的话，它退回 like.dns()，而 POST 用的 plainClient 是 OkHttp 默认 DNS ——
+            // 于是「源声明这个域要走代理」的 POST 既没有 SmartDns 也没有源的 hosts 钉死。
+            http = proxiedClient(profile, http);
         }
         Response response = http.newCall(request).execute();
         try {
-            if (cookieOut != null) {
-                for (String line : response.headers("Set-Cookie")) {
-                    int eq = line.indexOf('=');
-                    if (eq <= 0) continue;
-                    String name = line.substring(0, eq).trim();
-                    String rest = line.substring(eq + 1);
-                    int semi = rest.indexOf(';');
-                    String value = (semi >= 0 ? rest.substring(0, semi) : rest).trim();
-                    if (name.length() > 0) cookieOut.put(name, value);
-                }
-            }
+            harvestCookies(response, cookieOut);
             if (!response.isSuccessful()) throw new IOException("HTTP " + response.code() + " @ " + url);
             ResponseBody body = response.body();
             return body == null ? new byte[0] : body.bytes();
         } finally {
             response.close();
+        }
+    }
+
+    /**
+     * 把响应里的 {@code Set-Cookie} 收进 {@code cookieOut}（键=名字，值=值，不含属性段）。
+     *
+     * <p>从 {@link #rawWith} 里搬出来的：GET 和 POST 都需要这段，而它的边界条件
+     * （没有等号的行、名字为空的行）值得只写一遍。搬的时候<strong>逻辑一个字没动</strong>
+     * —— 顺序、trim、取第一个分号前的那截，全都和原来那条内联循环一样：
+     * 同名的多条 {@code Set-Cookie} 后者覆盖前者，{@code Path} / {@code Max-Age}
+     * 这些属性一律不要（调用方拼请求头时只认 {@code name=value}）。
+     *
+     * @param cookieOut 为 null 就什么都不做（不需要 cookie 的调用方不用为此付出代价）
+     */
+    private static void harvestCookies(Response response, java.util.Map<String, String> cookieOut) {
+        if (cookieOut == null || response == null) return;
+        for (String line : response.headers("Set-Cookie")) {
+            int eq = line.indexOf('=');
+            if (eq <= 0) continue;
+            String name = line.substring(0, eq).trim();
+            String rest = line.substring(eq + 1);
+            int semi = rest.indexOf(';');
+            String value = (semi >= 0 ? rest.substring(0, semi) : rest).trim();
+            if (name.length() > 0) cookieOut.put(name, value);
         }
     }
 
@@ -824,6 +874,52 @@ public final class AiiHttp {
     }
 
     /**
+     * 表单体的朴素 POST，**外加把响应的 `Set-Cookie` 收进 `cookieOut`**。
+     *
+     * 与四参那个重载行为完全一致（同样的表单 MediaType、同样的 h2→h1 降级），
+     * 只多回一份 cookie。给「POST 一次就能拿到游客标记」的站用 —— 91porn 那种
+     * 首次不带标记的 GET 会回一份<strong>随机内容</strong>，白白多跑一次请求；
+     * 换成 POST 拿标记就不用为了 headers 再取一遍正文。
+     */
+    public static byte[] postFormRaw(String url, String formBody,
+                                     java.util.Map<String, String> headers, int timeoutSeconds,
+                                     java.util.Map<String, String> cookieOut) throws Exception {
+        return postFormRaw(url, formBody, headers, timeoutSeconds, cookieOut, null);
+    }
+
+    /**
+     * 表单体的朴素 POST，**带上当前源配置**（{@code profile}），外加 cookie 回传。
+     *
+     * <p>{@code profile} 只在一处起作用：请求命中「源声明要走代理」而手里的 client
+     * 没有代理时，兜底建 client 需要它才能挂上 {@link SmartDns}（DoH + 配置里钉死的
+     * 地址）。传 null 不是错误，只是退回普通 DNS —— 但 spider 的 POST 全部在这条路上
+     * （OpenList 三个接口都是 POST），所以源声明的东西必须能传进来。
+     *
+     * <p>不另加「只有 profile 没有 cookieOut」的重载：cookie 是可选的，多一个 null
+     * 参数比多一个重载好读，也避免调用点因为参数个数不同而悄悄选了另一条路。
+     */
+    public static byte[] postFormRaw(String url, String formBody,
+                                     java.util.Map<String, String> headers, int timeoutSeconds,
+                                     java.util.Map<String, String> cookieOut, SiteProfile profile) throws Exception {
+        okhttp3.RequestBody payload = okhttp3.RequestBody.create(
+                formBody == null ? "" : formBody,
+                okhttp3.MediaType.parse("application/x-www-form-urlencoded; charset=UTF-8"));
+        Request.Builder builder = new Request.Builder().url(url).post(payload).header("Accept-Encoding", "identity");
+        if (headers != null) {
+            for (java.util.Map.Entry<String, String> e : headers.entrySet()) builder.header(e.getKey(), e.getValue());
+        }
+        log("POST " + hostOfUrl(url) + pathOfUrl(url));
+        Request request = builder.build();
+        try {
+            return rawWith(plainClient(timeoutSeconds), request, url, cookieOut, profile);
+        } catch (IOException e) {
+            if (!isStreamBreak(e)) throw e;
+            log("HTTP/2 被重置，降级 HTTP/1.1 重试 " + pathOfUrl(url));
+            return rawWith(plainHttp1Client(timeoutSeconds), request, url, cookieOut, profile);
+        }
+    }
+
+    /**
      * 带 Range 的朴素 GET。用来验直链：音频动辄几十 MB，只要前 1KB 判断格式。
      */
     public static byte[] getRawRange(String url, long from, long to,
@@ -862,6 +958,49 @@ public final class AiiHttp {
             if (!isStreamBreak(e)) throw e;
             log("HTTP/2 被重置，降级 HTTP/1.1 重试 " + pathOfUrl(url));
             return rawWith(plainHttp1Client(timeoutSeconds), request, url);
+        }
+    }
+
+    /**
+     * JSON 体的朴素 POST，**外加把响应的 `Set-Cookie` 收进 `cookieOut`**。
+     *
+     * 与四参那个重载行为完全一致（同样的 `application/json` MediaType、同样的
+     * h2→h1 降级），只多回一份 cookie。AList/OpenList 的接口本身不带 cookie，
+     * 但同一条链路上偶尔会有前置的鉴权/限流网关往里塞标记，统一走这条口径
+     * 能给 spider 侧省掉「POST 拿不到 cookie」这个特例。
+     */
+    public static byte[] postJsonRaw(String url, String json,
+                                     java.util.Map<String, String> headers, int timeoutSeconds,
+                                     java.util.Map<String, String> cookieOut) throws Exception {
+        return postJsonRaw(url, json, headers, timeoutSeconds, cookieOut, null);
+    }
+
+    /**
+     * JSON 体的朴素 POST，**带上当前源配置**（{@code profile}），外加 cookie 回传。
+     *
+     * <p>理由和 {@code postFormRaw} 的六参版本一样：{@code profile} 决定兜底 client
+     * 挂哪个 DNS。OpenList 的 {@code /api/fs/list}、{@code /api/fs/get}、
+     * {@code /api/fs/search} 全是这条路径，而这些站的地址恰恰可能需要 DoH 解析。
+     */
+    public static byte[] postJsonRaw(String url, String json,
+                                     java.util.Map<String, String> headers, int timeoutSeconds,
+                                     java.util.Map<String, String> cookieOut, SiteProfile profile) throws Exception {
+        okhttp3.RequestBody payload = okhttp3.RequestBody.create(
+                json == null ? "{}" : json,
+                okhttp3.MediaType.parse("application/json; charset=UTF-8"));
+        Request.Builder builder = new Request.Builder().url(url).post(payload)
+                .header("Accept-Encoding", "identity");
+        if (headers != null) {
+            for (java.util.Map.Entry<String, String> e : headers.entrySet()) builder.header(e.getKey(), e.getValue());
+        }
+        log("POST " + hostOfUrl(url) + pathOfUrl(url));
+        Request request = builder.build();
+        try {
+            return rawWith(plainClient(timeoutSeconds), request, url, cookieOut, profile);
+        } catch (IOException e) {
+            if (!isStreamBreak(e)) throw e;
+            log("HTTP/2 被重置，降级 HTTP/1.1 重试 " + pathOfUrl(url));
+            return rawWith(plainHttp1Client(timeoutSeconds), request, url, cookieOut, profile);
         }
     }
 
@@ -1024,6 +1163,57 @@ public final class AiiHttp {
             return v4.isEmpty() ? all : v4;
         }
     };
+
+    /**
+     * 「直连表命中、要现拼一个不带代理的 client」时，那个新 client 该用哪个 DNS。
+     *
+     * <p>两条分支（{@link #rawWith} 和 {@link #getWith}）以前各写各的，于是长出了
+     * 两种毛病：
+     * <ul>
+     *   <li>{@code rawWith} 无条件 {@code .dns(IPV4_FIRST)} —— 把传进来 client 的
+     *       {@link SmartDns}（DoH + 配置里钉死的地址）盖掉了。GET/POST 全族都走这条，
+     *       所以「直连表里的域名突然解析不出配置钉死的那个 IP」随时可能发生，
+     *       而症状是「这个站有时候能连有时候不能」，看起来像站点抽风。</li>
+     *   <li>{@code getWith} 只在 {@code instanceof SmartDns} 时才保留，否则连
+     *       {@code IPV4_FIRST} 都不给，等于新 client 回到 OkHttp 默认 DNS。</li>
+     * </ul>
+     *
+     * <p>决策就一条，按优先级：
+     * <ol>
+     *   <li>手里的是 {@link SmartDns} → <b>原样保留</b>。它已经包含 DoH、配置钉死的
+     *       地址，比任何外层包装都更懂这个源。</li>
+     *   <li>手里传了 {@code profile} 而 client 身上却不是 SmartDns → 现建一个
+     *       {@link SmartDns}。这就是 POST 那条路上原来的洞：{@code plainClient} 的 DNS
+     *       是 OkHttp 默认的，源声明的钉死地址从来没生效过。</li>
+     *   <li>其它情况 → {@link #IPV4_FIRST}。<b>不能省</b>：IPv6 单栈网络上 OkHttp 不会
+     *       Happy Eyeballs 降级，拿到 AAAA 就一路连到超时（见 IPV4_FIRST 那段实测）。</li>
+     * </ol>
+     *
+     * <p>包级可见是为了单测：这个函数不碰网络也不改状态，输入输出都是引用比较。
+     */
+    static Dns dnsFor(OkHttpClient http, SiteProfile profile) {
+        Dns current = http == null ? null : http.dns();
+        if (current instanceof SmartDns) return current;
+        // profile 给了就按源的解析规则来 —— DoH 和 hosts 钉死都挂在这上面。
+        if (profile != null) return smartDnsFor(profile);
+        // 连 profile 都没有（老调用方 / 探针）才退回 IPv4 优先。不是默认值，是兜底。
+        return IPV4_FIRST;
+    }
+
+    /**
+     * 造一个 {@link SmartDns}。**唯一目的是让包外能拿到这个类型的实例** ——
+     * {@code SmartDns} 是私有嵌套类，而 {@link #dnsFor} 的判据是
+     * {@code instanceof SmartDns}，单测不造一个真的就没法断言「保留」那条路径。
+     *
+     * <p>不把 {@code SmartDns} 改成包级可见：它的 {@code lookup} 会走 DoH 和磁盘缓存，
+     * 是个有副作用的实现类，暴露出去等于邀请别处直接 new。一个工厂方法足够。
+     *
+     * <p>构造本身不碰网络也不碰 SharedPreferences —— profile 只是存着，
+     * 真正的解析发生在 {@code lookup} 里。
+     */
+    static Dns smartDnsFor(SiteProfile profile) {
+        return new SmartDns(profile);
+    }
 
     // ── 代理的读写与解析 ──────────────────────────────────────────────
 

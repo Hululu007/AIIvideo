@@ -1,0 +1,25 @@
+{
+  "_note": "苹果CMS 族。一个配置覆盖所有跑苹果CMS 的站 —— 换站只需改 web.cmsApi（配置里的候选域要同步进 spider 的 hosts）。分类 id 从响应里的 class[] 现读，不用写死在配置里。",
+  "web": {
+    "spider": "cms",
+    "firstPageSize": 20,
+    "pageSize": 20,
+    "api": "https://api.apibdzy.com/api.php/provide/vod",
+    "spiderArgs": ["api"],
+    "_cmsNote": "换站改 web.api 这一行（spiderArgs 会把它传给 cms.js 的 args.api）。XML 接口（/at/xml/）也能填在这里 —— cms.js 会把 XML 翻成 JSON 再解析，但注意那类源的列表响应里没有封面，首页卡片会退回标题首字占位图。",
+    "ui": {
+      "tabs": [{ "key": "all", "label": "影视库", "icon": "grid" }],
+      "categoryIds": { "all": [] },
+      "categoryLabels": { "all": [] },
+      "categoryTitles": { "all": "影视库" },
+      "popularTags": [],
+      "publicPopularTags": [],
+      "tagGroups": [["cms", "全部分类"]]
+    }
+  },
+  "cover": {
+    "mode": "plain",
+    "allowedHosts": ["img.bdzyimg1.com"],
+    "hostRewrites": {}
+  }
+}

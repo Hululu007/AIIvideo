@@ -1,0 +1,77 @@
+{
+  "_note": "每日大赛（mrds66）。封面在图床上、而且是 AES 密文，所以 cover 必须是 aes-cbc —— 写 plain 的话首页全是灰底。IV 和内置模板差一个字符（94 vs 63），别混用。",
+  "web": {
+    "spider": "mrds66",
+    "firstPageSize": 30,
+    "pageSize": 30,
+    "categories": {
+      "mrds": "mrds",
+      "ztds": "ztds",
+      "rstt": "rstt",
+      "xazd": "xazd",
+      "blyp": "blyp",
+      "fctg": "fctg",
+      "mhds": "mhds",
+      "lqdp": "lqdp",
+      "jdsj": "jdsj",
+      "mxwh": "mxwh",
+      "smdh": "smdh",
+      "dypd": "dypd",
+      "mtds": "mtds",
+      "ysds": "ysds",
+      "czds": "czds",
+      "hjds": "hjds",
+      "tgds": "tgds",
+      "omjp": "omjp",
+      "qwcs": "qwcs",
+      "aijc": "aijc"
+    },
+    "ui": {
+      "tabs": [
+        { "key": "mrds", "label": "每日大赛", "icon": "film" },
+        { "key": "rstt", "label": "热搜吃瓜", "icon": "sparkle" },
+        { "key": "aijc", "label": "AI剧场", "icon": "star" },
+        { "key": "dypd", "label": "影视国漫", "icon": "tv" },
+        { "key": "more", "label": "更多", "icon": "grid" }
+      ],
+      "categoryIds": {
+        "mrds": ["mrds"],
+        "rstt": ["rstt"],
+        "aijc": ["aijc"],
+        "dypd": ["dypd"],
+        "more": ["ztds", "xazd", "blyp", "fctg", "mhds", "lqdp", "jdsj", "mxwh", "smdh", "mtds", "ysds", "czds", "hjds", "tgds", "omjp", "qwcs"]
+      },
+      "categoryLabels": {
+        "mrds": ["每日大赛"],
+        "rstt": ["热搜吃瓜"],
+        "aijc": ["AI剧场"],
+        "dypd": ["影视国漫"],
+        "more": ["主题大赛", "校园学生", "必撸大赛", "反差泄密", "网红黑料", "猎奇重口", "AV看片", "明星大赛", "动漫之家", "cos写真", "声控ASMR", "寸止挑战", "混剪PMV", "原创投稿", "欧美精品", "全网参赛"]
+      },
+      "categoryTitles": {
+        "mrds": "每日大赛",
+        "rstt": "热搜吃瓜",
+        "aijc": "AI剧场",
+        "dypd": "影视国漫",
+        "more": "更多分类"
+      },
+      "popularTags": [
+        ["mrds", "每日大赛"],
+        ["mhds", "网红黑料"],
+        ["fctg", "反差泄密"],
+        ["mtds", "cos写真"]
+      ],
+      "publicPopularTags": [],
+      "tagGroups": [["mrds", "分类"]]
+    }
+  },
+  "cover": {
+    "mode": "aes-cbc",
+    "transformation": "AES/CBC/PKCS5Padding",
+    "key": "f5d965df75336270",
+    "iv": "97b60394abc2fbe1",
+    "keyEncoding": "text",
+    "allowedHosts": ["pic.jtzatly.cn"],
+    "hostRewrites": {}
+  }
+}

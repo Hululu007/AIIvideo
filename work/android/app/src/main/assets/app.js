@@ -203,51 +203,160 @@ const CONTENT_ACTIONS = new Set(['home', 'category', 'search', 'tags', 'tag-list
 // （路径 or spider），不该两种都走一遍再挑一个。
 const SPIDER_CAP = { home: 'home', category: 'category', search: 'search', detail: 'detail' };
 
+// 内容动作里 spider 接不住的那几个。列在这儿不是为了「以后补」，是为了**报错**：
+// 它们一旦落回 shape.apiPathFor()，会拼出一个 /api 路径，而 Java 侧那套适配器
+// 分流这一轮结束就删。到那时请求打到不存在的地址，报错是「接口响应缺少 data」——
+// 从现象完全看不出是这个源没实现这个能力。
+const SPIDER_MISSING = new Set(['tags', 'tag-list', 'recommend', 'newest']);
+const SPIDER_SUPPORTS = '首页 / 分类 / 搜索 / 详情 / 播放';
+
 function spiderIdOf() {
   const site = window.HG_SITE || {};
   return String(site.spider || '').trim();
 }
 
-/** 内部动作名 → 模型里的结构化参数。spider 只认 ref/keyword/slug/page。 */
+/** 内部动作名 → spider 能力名。episode 是「要第 n 集的地址」，对应 play。 */
+function spiderCapFor(action) {
+  if (action === 'episode') return 'play';
+  return SPIDER_CAP[action] || '';
+}
+
+/**
+ * 第 n 集在 spider 里的 ref。
+ *
+ * 转换层把 episodes[].ref 原样留了下来（那是站点自己的标识：yhdm 的 `ep1`、
+ * cms 的 `1`、missav 的整个 id），这里就该用它 —— 不再自己拼 `id:epN`。
+ * 三条规则：
+ *   · ref 和 id 相同（missav 是单集，ref 就是它自己）→ 只给 id。拼成
+ *     `id:id` 会让它把整个串当 id 去请求，直接 404。
+ *   · ref 不同 → `id:ref`。所有源的 play 都用 splitRef 拆冒号，这是通行写法。
+ *   · 拿不到详情（深链直接进播放器、或详情还没回来）→ `id:ep{n}`，
+ *     拆出来 id 是对的，集号退化成 1~n 里能识别的那个。
+ */
+function spiderEpisodeRef(rawId, no) {
+  const id = String(rawId || '');
+  const detail = state.detail;
+  const sameVideo = detail && String(detail.id || '') === id;
+  const eps = sameVideo ? asArray(detail.episodes) : [];
+  const hit = eps.find(one => Number(one.number || one.episodeNumber) === no) || eps[no - 1];
+  const ref = hit && hit.ref ? String(hit.ref) : '';
+  if (ref && ref === id) return ref;
+  if (ref) return id + ':' + ref;
+  return id + ':ep' + no;
+}
+
+/**
+ * 内部动作名 → 模型里的结构化参数。spider 只认 ref/keyword/slug/page/ep/line。
+ *
+ * ── 为什么还要透传配置项 ──────────────────────────────────────────────
+ * 有的源需要**自己的**配置才知道往哪打：苹果CMS 没有固定域名（一个类覆盖几千个站），
+ * 接口地址只能由源配置给（`web.api`）。而 spider 拿不到配置 —— 它只有一个 args。
+ *
+ * 所以约定 `web.spiderArgs`：一个键名数组，列出的键从合并后的 web 块原样抄进 args。
+ *
+ *   "web": { "spider": "cms", "api": "https://…/api.php/provide/vod",
+ *            "spiderArgs": ["api"] }
+ *
+ * 为什么是「源声明要哪些」而不是「把整个 web 块塞进去」：
+ *   · web 块里有 ui / categories / fields / paths，动辄几十 KB，每次都跨桥传一遍
+ *     是白花掉的序列化成本，而且 spider 里也没有一个键叫 ui；
+ *   · 显式声明等于一份可读的依赖清单 —— 看配置就知道这个源依赖哪几个字段。
+ *
+ * 这一条是 2026-10-19 拆完适配器才暴露的：`cms.js` 从 `args.api` 读接口地址，
+ * 而这里从来没传过，于是「配置里写 web.api」是死的，但表面上看不出问题 ——
+ * 源会用兜底域名跑，用户以为自己的配置生效了。
+ */
 function spiderArgsFor(action, args) {
   const page = Number(args.page) || 1;
-  if (action === 'home') return {};
-  if (action === 'category') return { slug: args.id || args.slug || '', page };
-  if (action === 'search') return { keyword: args.query || '', page };
-  if (action === 'detail') return { ref: String(args.id || '') };
-  // episode 是「要第 n 集的地址」，模型里对应 play：ref 里带集号（spider 自己解析）
-  if (action === 'episode') return { ref: String(args.id || '') + ':ep' + (args.episode || 1) };
-  return args;
+  const base = (() => {
+    if (action === 'home') return {};
+    if (action === 'category') return { slug: args.id || args.slug || '', page };
+    if (action === 'search') return { keyword: args.query || '', page };
+    if (action === 'detail') return { ref: String(args.id || '') };
+    if (action === 'episode') {
+      const no = Number(args.episode) || 1;
+      return { ref: spiderEpisodeRef(args.id, no), ep: no, line: String(args.line || '') };
+    }
+    return args;
+  })();
+  const declared = (window.HG_SITE && window.HG_SITE.spiderArgs) || [];
+  if (!Array.isArray(declared) || declared.length === 0) return base;
+  const out = Object.assign({}, base);
+  declared.forEach((key) => {
+    // 只抄声明过的、且真有值的键。空值不抄 —— 让 spider 的缺省生效，
+    // 比传一个空串过去让它自己判空更不容易出错。
+    if (typeof key !== 'string' || !key) return;
+    const value = window.HG_SITE[key];
+    if (value === undefined || value === null || value === '') return;
+    out[key] = value;
+  });
+  return out;
 }
 
 async function spiderApi(action, args) {
   const id = spiderIdOf();
   if (!id) throw new Error('这个源没有声明 web.spider');
-  const cap = action === 'episode' ? 'play' : SPIDER_CAP[action];
-  if (!cap) throw new Error('spider 源还不支持 ' + action + '（阶段 2 只做 home/category/search/detail/play）');
+  const cap = spiderCapFor(action);
+  if (!cap) throw new Error('这个 spider 源暂不支持「' + action + '」（当前支持 ' + SPIDER_SUPPORTS + '）');
   const model = window.HGModel;
   if (!model) throw new Error('模型层没加载：model.js 不在页面里');
+  const spiderArgs = spiderArgsFor(action, args);
   // 一行进/出日志。阶段 2 第一次真机播放时，播放器拿到地址却没有任何网络动作 ——
   // 有 home/detail 的日志、没有 play 的，说不清是「没走这条」还是「走了但命中缓存」。
   // 这条日志就是为了让那种情况一眼可辨：进这一行 = 走了 spider。
-  console.log('[spider-api] ' + action + ' → cap=' + cap + ' args=' + JSON.stringify(spiderArgsFor(action, args)));
+  console.log('[spider-api] ' + action + ' → cap=' + cap + ' args=' + JSON.stringify(spiderArgs));
   const payload = await bridgeCall('spider', {
-    op: 'call', id, cap, args: spiderArgsFor(action, args), timeoutMs: 45000
+    op: 'call', id, cap, args: spiderArgs, timeoutMs: 45000
   });
   const out = model.fromBridge(payload, cap);
-  if (action === 'episode') {
-    // 内置播放器的桥要 {source|url, lines}，两边都给，省得它去猜。
-    const url = out.url || '';
-    return { source: url, url, lines: out.lines || [] };
-  }
+  if (action === 'episode') return episodeShapeOf(out);
   return out;
+}
+
+/**
+ * play 的三种结局，翻成内置播放器能用的样子。
+ *
+ * 播放器只认「一个地址」，所以「地址为空」这件事必须在这儿翻译成人话，
+ * 否则两种情况会糊成同一条报错：
+ *
+ *   ready    → 直链。agedm-wasm: 标记照旧留在 lines 里（老路径还认它）。
+ *   declined → 源说了播不了（agedm 的 age_ 密文）。url 空是它刻意的，但 alts 里的
+ *              `agedm-wasm:` 标记必须递上去 —— app.js 的 hgNativeResolve 那段
+ *              wasm 解析器就靠它工作，提前判失败等于把本来能播的那批也关掉。
+ *   empty    → 源什么都没给。这时候才抛，而且文案和 declined 分开写。
+ */
+function episodeShapeOf(out) {
+  const lines = asArray(out.lines);
+  const state = String(out.state || '');
+  if (state === 'empty') {
+    throw new Error('这个源没有给出这一集的播放地址（既没有直链，也没说明原因）');
+  }
+  const marker = lines.map(one => String(one.url || ''))
+    .find(url => url.indexOf('agedm-wasm:') === 0) || '';
+  // declined 时 url 是空串，把密文标记当成「交给 wasm 解析器的线索」，不是地址。
+  const source = String(out.url || '') || marker;
+  return {
+    source,
+    url: source,
+    lines,
+    state,
+    reason: String(out.reason || ''),
+    note: String(out.note || '')
+  };
 }
 
 function api(action, args = {}) {
   const run = async () => {
     // 源声明了 spider 就整条内容通路都走它，不再碰 /api 路径。
-    if (spiderIdOf() && (SPIDER_CAP[action] || action === 'episode')) {
-      return spiderApi(action, args);
+    // 这里的分支是**穷举**的：能接的进 spiderApi，接不住的内容动作直接抛，
+    // 剩下的（account / library / theme / 热更…）不是内容动作，照旧走 Java 桥。
+    // 所以「spider 源 + 内容动作」永远走不到下面 apiPathFor 那一行。
+    if (spiderIdOf()) {
+      if (spiderCapFor(action)) return spiderApi(action, args);
+      if (SPIDER_MISSING.has(action)) {
+        throw new Error('这个 spider 源暂不支持「' + action + '」（当前支持 ' + SPIDER_SUPPORTS + '）');
+      }
+      return bridgeCall(action, args);
     }
     // REST 接口统一走 Java api-json 桥，避免 WebView 自动附带 Origin 请求头。
     if (shape.apiPathFor(action, args)) {
@@ -924,6 +1033,16 @@ function applyFixes(items) {
   return touched;
 }
 async function reconcileCards(items, onPatched) {
+  // spider 源不校正，直接返回。
+  //
+  // 两件事：ABI 里没有 reconcile 这个能力（硬调只会抛「未知的能力名」）；
+  // 更重要的是它压根不需要 —— 那套「网格页 id 重复、拿详情页盖一遍」的补丁是
+  // 抓 HTML 时代的产物（91porn 一页 40 张卡里 12 个重复 viewkey）。spider 的
+  // 卡片是它自己从详情页里取的 id，一上来就是真的。
+  //
+  // Java 版当年实现它是「不需要校正但必须应答，否则日志比正常请求还密」；
+  // spider 版没有这个应答，所以干脆不问。让源去实现一个空壳才是错的方向。
+  if (spiderIdOf()) return;
   const list = asArray(items).filter(item => item && item.id);
   if (!list.length) return;
   // 已经校正过的 id 立刻套一遍（不花请求，也不等网络）
@@ -2623,6 +2742,35 @@ document.addEventListener('submit', async event => {
     if (!input || !button) return;
     const url = input.value.trim();
     const alias = String(aliasInput?.value || '').trim();
+    // 一个入口两条路，按后缀分流（规则和理由都在 source-market.js 的 sourceKindOf）。
+    // .js 装的是 spider 源码，它不切换源 —— 所以这一步不出重启，只回一句「还差配置」。
+    const kind = sourceKindOf(url);
+    if (!/^https:\/\//i.test(url)) {
+      if (error) { error.textContent = '地址必须以 https:// 开头'; error.hidden = false; }
+      return;
+    }
+    if (kind === 'spider') {
+      button.disabled = true;
+      button.textContent = '正在安装源码…';
+      let hint = '';
+      try {
+        const meta = await installSpiderSource(url);
+        const name = meta?.name || meta?.id || '源';
+        hint = '已装源码 ' + name + '。它不会自己切换 —— 再贴这份源对应的 .json 配置（里面写着 web.spider）才会用上。';
+        input.value = '';
+        toast('已装 spider 源码 ' + name, true);
+        await loadSpiderSources(true);
+      } catch (problem) {
+        hint = '安装失败：' + (problem.message || problem);
+      }
+      if (state.route === 'source-settings') renderSourceSettings();
+      // 重画之后必须重新取节点：上面那个 `error` 已经随着旧 DOM 一起被换掉了。
+      const fresh = document.getElementById('source-error');
+      if (fresh) { fresh.textContent = hint; fresh.hidden = false; }
+      const freshButton = document.querySelector('#source-form button[type="submit"]');
+      if (freshButton) { freshButton.disabled = false; freshButton.textContent = '添加并切换'; }
+      return;
+    }
     button.disabled = true;
     button.textContent = '正在拉取…';
     if (error) error.hidden = true;

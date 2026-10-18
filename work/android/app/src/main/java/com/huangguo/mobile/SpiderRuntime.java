@@ -273,8 +273,13 @@ final class SpiderRuntime {
     /**
      * {@code net} 的实现。只放行 https + 当前 spider 自报的 hosts。
      *
-     * <p>入参 {@code {url, method, headers, body, charset}}。{@code charset} 可选，
-     * 默认 utf-8：既用来解响应体，也用来编码表单里的非 ASCII（老站 GBK 靠它）。
+     * <p>入参 {@code {url, method, headers, body, charset, format, keep}}。四个可选项：
+     * <ul>
+     *   <li>{@code charset} 缺省 utf-8：既用来解响应体，也用来编码表单里的非 ASCII
+     *       （老站 GBK 靠它）。</li>
+     *   <li>{@code format} 只在 POST 上有意义，缺省 {@code form}。</li>
+     *   <li>{@code keep} 要回传的 cookie 名字，缺省空（不回传）。</li>
+     * </ul>
      *
      * <p>跑在 bridge 线程上，会阻塞到 {@link AiiHttp} 返回 —— 这是同步语义该有的样子：
      * 页面里的 {@code ctx.call('net', …)} 就在等这一份 body。
@@ -325,6 +330,17 @@ final class SpiderRuntime {
         // 一律按 UTF-8 解就是整页乱码，而且 spider 侧没有补救手段。所以把解码字符集
         // 交给源自己声明，默认仍是 utf-8。
 
+        // format 在这一行就解析，**在发请求之前**：认不出来的值必须当场报错，
+        // 不能等请求发出去、拿回一句「path 不能为空」再去猜。GET 上它没有意义，
+        // 传了也接受（源可以用一套参数拼两种枚举），但不影响走哪条分支。
+        final boolean jsonFormat = "json".equals(parseFormat(args.optString("format", "")));
+        // keep 同理，解析完是一张空表就是「不回传」，不区分「没传」和「传了空数组」。
+        final String[] keep = parseKeep(args.opt("keep"));
+        // cookie 的落点。keep 为空时**保持 null** —— 那样 AiiHttp 那条路一个
+        // Set-Cookie 都不读，也不用为用不上的东西建一张表。
+        final Map<String, String> cookieJar = keep.length == 0
+                ? null : new LinkedHashMap<String, String>();
+
         try {
             java.nio.charset.Charset charset = charsetOf(args.optString("charset", ""));
             byte[] raw;
@@ -338,9 +354,20 @@ final class SpiderRuntime {
                 IOException last = null;
                 for (int attempt = 0; attempt < 2 && raw == null; attempt++) {
                     try {
-                        raw = prof == null
-                                ? AiiHttp.getRaw(url, headers, NET_TIMEOUT_S)
-                                : AiiHttp.getRaw(url, headers, NET_TIMEOUT_S, prof);
+                        // 有 cookieOut 就走带 Map 的那个重载（AiiHttp.getRaw 的四参
+                        // 版本，行为和三参完全一致，只是顺手把 Set-Cookie 收进来）。
+                        // 没有 profile 的那条路（源配置取不到）没有 cookie 重载，
+                        // 退回三参 —— 那种情况下宁可拿不到 cookie，也不能因为
+                        // 「想拿 cookie」去碰一条没验证过的路由。
+                        if (cookieJar != null && prof != null) {
+                            raw = AiiHttp.getRaw(url, headers, NET_TIMEOUT_S, prof, cookieJar);
+                        } else if (cookieJar != null) {
+                            raw = AiiHttp.getRaw(url, headers, NET_TIMEOUT_S, cookieJar);
+                        } else {
+                            raw = prof == null
+                                    ? AiiHttp.getRaw(url, headers, NET_TIMEOUT_S)
+                                    : AiiHttp.getRaw(url, headers, NET_TIMEOUT_S, prof);
+                        }
                     } catch (IOException e) {
                         last = e;
                         if (attempt == 0) {
@@ -349,11 +376,22 @@ final class SpiderRuntime {
                     }
                 }
                 if (raw == null) throw last == null ? new IOException("net 失败") : last;
+            } else if (jsonFormat) {
+                // JSON 体。OpenList/AList 的 /api/fs/list、/api/fs/get、/api/fs/search
+                // 只收 application/json —— 表单体过去它当空对象，回「path 不能为空」，
+                // 而那句话看起来像源拼错了参数，实际是编码形式不对。
+                //
+                // 不做 encodeFormBody 那套 %XX 转换：JSON 的 body 是字符串，字符集
+                // 已经在 postJsonRaw 里由 MediaType 钉成 UTF-8，转成 %XX 反而会把
+                // 中文变成字面上的 "%E4%B8%AD" 三个字符塞进 JSON 值里。
+                //
+                // 六参版本把 profile 传下去：POST 原来只能走全局路由建 client，
+                // 「源声明这个域要走代理」时兜底 client 拿不到 SmartDns，
+                // 源配置里钉死的地址就不生效 —— OpenList 三个接口全在这条路上。
+                raw = AiiHttp.postJsonRaw(url, body == null ? "" : body, headers, NET_TIMEOUT_S,
+                        cookieJar, s.profile);
             } else {
-                // 阶段 0 只做表单 POST：设计 §四 的 net 只带 method/headers/body 三样，
-                // 没有 content-type 字段，judge 它是不是 JSON 请求只能靠猜 —— 猜错的
-                // 代价是对方把 JSON 当表单收了，返回一句「参数缺失」。真实需要 JSON 体
-                // 的站（AList 那类）再加第四条 op，不在阶段 0 里发明。
+                // 表单 POST（缺省行为，和 stage 0 一字不差）。
                 //
                 // 非 UTF-8 的表单体没法靠 Content-Type 说清楚：AiiHttp.postFormRaw 里
                 // MediaType 是写死的 `charset=UTF-8`，而 OkHttp 的 BridgeInterceptor
@@ -361,8 +399,9 @@ final class SpiderRuntime {
                 // （改它就得动 AiiHttp 的公开面，合同不允许）。所以这里退一步：
                 // 把 body 里的非 ASCII 字符按目标字符集转成 %XX，实际发出的字节就对了 ——
                 // 老服务器大多本来就按自己的默认编码解表单，不看头。
-                raw = AiiHttp.postFormRaw(url, encodeFormBody(body == null ? "" : body, charset),
-                        headers, NET_TIMEOUT_S);
+                String form = encodeFormBody(body == null ? "" : body, charset);
+                // 六参版本，理由同上面那条 JSON 分支：profile 决定兜底 client 用哪个 DNS。
+                raw = AiiHttp.postFormRaw(url, form, headers, NET_TIMEOUT_S, cookieJar, s.profile);
             }
             if (raw.length > MAX_NET_BODY) {
                 throw new IOException("net 失败：响应体 " + (raw.length / 1024)
@@ -376,7 +415,14 @@ final class SpiderRuntime {
             // 成功记 200，非 2xx 走 ok:false 且没有 status 字段。
             out.put("status", 200);
             out.put("body", new String(raw, charset));
-            Log.i(TAG, "op=net host=" + host + " ms=" + (System.currentTimeMillis() - began));
+            // cookies 只在源要了、而且真的收到了的时候才出现。**没有就不给这个字段**，
+            // 不给一个空对象：源那边 `if (r.cookies && r.cookies.ga)` 两种写法都能过，
+            // 而空对象会诱使别人写 `r.cookies.ga !== undefined` 这种更脆的判断。
+            JSONObject cookies = pickCookies(cookieJar, keep);
+            if (cookies != null) out.put("cookies", cookies);
+            Log.i(TAG, "op=net host=" + host + " method=" + method
+                    + (jsonFormat ? " json" : "") + (cookies != null ? " cookies=" + cookies.length() : "")
+                    + " ms=" + (System.currentTimeMillis() - began));
             return out;
         } catch (IOException e) {
             Log.w(TAG, "op=net host=" + host + " ms=" + (System.currentTimeMillis() - began)
@@ -738,6 +784,116 @@ final class SpiderRuntime {
             // 读不出来就按空白名单算：net 全拒。宁可拒绝，不能放行。
             return EMPTY_HOSTS;
         }
+    }
+
+    /**
+     * 解析 {@code net} 的 {@code format} 参数：空 = {@code form}（历史行为）。
+     *
+     * <p>返回值是<b>归一化后的小写串</b>，调用方拿它跟字面量比。认不出来的值
+     * <b>抛</b>而不是回退到 form：回退的表现是「请求发出去了、对方说参数缺失」，
+     * 而真正的原因是源写错了 {@code format}，这两件事从响应上分不出来。
+     * 报错文案把原值带回去，一眼能看出是 {@code "form"} 少写了一个引号还是拼成了
+     * {@code "jsonp"}。
+     *
+     * <p>只认这两个值：多一个就别扭 —— 表单和 JSON 是 POST 体仅有的两种现实形态，
+     * 而 {@code multipart} 在 spider 侧没有使用场景（文件上传不在能力集里）。
+     *
+     * <p>包级可见是为了单测：这段不碰 Android，而它错了的表现是「静默走错编码」。
+     *
+     * @throws IOException 值不是 {@code form} / {@code json}
+     */
+    static String parseFormat(String raw) throws IOException {
+        String v = raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
+        // 空就是 form：这是加 format 之前所有源的行为，一个字节都不能变。
+        if (v.length() == 0 || "form".equals(v)) return "form";
+        if ("json".equals(v)) return "json";
+        // 文案里的原值用引号包起来：源传了 null / 数字 / 空格 时，日志上能看出边界
+        // （"不认识的 format：" 后面直接跟一个空串，那种打印什么也看不出来）。
+        throw new IOException("net 失败：不认识的 format：" + (raw == null ? "" : raw.trim())
+                + "（只认 form / json，缺省是 form）");
+    }
+
+    /**
+     * 解析 {@code net} 的 {@code keep} 参数：要回传哪些 cookie 名字。
+     *
+     * <p>形式很窄：<b>字符串数组</b>。字符串（{@code keep:"ga"}）也接受，当成只含一项的
+     * 数组 —— 这种写法太自然了，拒绝它只会换来「源作者以为是别的错」。
+     *
+     * <p>空串、非字符串条目一律丢掉：留着空名字等于让 {@code cookieJar.get("")} 命中
+     * 一个不存在的键，而报错时机在很远的地方（源那边拿到 {@code undefined}）。
+     *
+     * <p>返回 {@code String[0]} 表示「不要 cookie」，不返回 null：调用方只需要判长度，
+     * 少一个 null 判断就少一个空指针的机会。
+     *
+     * <p>包级可见是为了单测。参数类型故意收窄成 {@link Object} 而不是 JSONObject：
+     * 这样测试不用为了让 {@code opt} 生效去构造 Android 的桩，直接传
+     * {@code JSONArray} / {@code String} / null 就行。
+     */
+    static String[] parseKeep(Object raw) {
+        if (raw == null || raw == JSONObject.NULL) return EMPTY_HOSTS;
+        if (raw instanceof String) {
+            String one = ((String) raw).trim();
+            // 空串按「没要」处理，而不是按「要一个叫空串的 cookie」处理。
+            return one.length() == 0 ? EMPTY_HOSTS : new String[]{one};
+        }
+        if (!(raw instanceof JSONArray)) return EMPTY_HOSTS;
+        JSONArray arr = (JSONArray) raw;
+        String[] out = new String[arr.length()];
+        int n = 0;
+        for (int i = 0; i < arr.length(); i++) {
+            Object item = arr.opt(i);
+            // 只认字符串。数字/对象/null 全丢 —— cookie 名字本来就是字符串，
+            // 收别的只会把错误推迟到拼请求头的时候。
+            if (!(item instanceof String)) continue;
+            String name = ((String) item).trim();
+            if (name.length() == 0) continue;
+            // 去重：同一个名字要两遍没有任何额外含义，而 cookieOut 那张表只有一个位置。
+            boolean dup = false;
+            for (int k = 0; k < n; k++) {
+                if (out[k].equals(name)) { dup = true; break; }
+            }
+            if (!dup) out[n++] = name;
+        }
+        if (n == out.length) return out;
+        String[] trimmed = new String[n];
+        System.arraycopy(out, 0, trimmed, 0, n);
+        return trimmed;
+    }
+
+    /**
+     * 从收来的 cookie 表里挑出 {@code keep} 要的那几个。**一个都没有就返回 null。**
+     *
+     * <p>返回 null 而不是空 {@link JSONObject}：调用方据此决定要不要往返回值里放
+     * {@code cookies} 字段。契约里「keep 为空就不带 cookies 字段」是给源看的，
+     * 而「站点没下发这个 cookie」和「源没要」在源那一侧应该长得一样 ——
+     * 都是 {@code undefined}，都让它走兜底值（91porn 的兜底就是 {@code ga=1}）。
+     *
+     * <p>值原样保留，不做任何解码或裁剪：`Set-Cookie` 的值就是站点给的那串字节，
+     * 引号、base64 里的 {@code =} 都得原封不动还回去，否则带回去的标记不认。
+     *
+     * <p>包级可见是为了单测。
+     */
+    static JSONObject pickCookies(Map<String, String> jar, String[] keep) {
+        if (jar == null || jar.isEmpty() || keep == null || keep.length == 0) return null;
+        JSONObject out = null;
+        for (int i = 0; i < keep.length; i++) {
+            String name = keep[i];
+            if (name == null || name.length() == 0) continue;
+            String value = jar.get(name);
+            // 空值也算「没收到」：站点清标记时会下发 `ga=;Max-Age=0`，
+            // 把那个空串当成有效标记带回去，请求头里就是 `Cookie: ga=`，
+            // 对面会当成「有标记但无效」，比不带更糟。
+            if (value == null || value.length() == 0) continue;
+            if (out == null) out = new JSONObject();
+            try {
+                out.put(name, value);
+            } catch (Exception e) {
+                // JSONObject.put 只在不合法的 key（null）上抛，上面已经挡过。
+                // 真抛了也不能让一次 net 因为「cookie 名字怪」而失败 —— 少一个标记而已。
+                Log.w(TAG, "op=net cookie 名放不进 JSON：" + e);
+            }
+        }
+        return out;
     }
 
     private static Map<String, String> headersOf(JSONObject args) {

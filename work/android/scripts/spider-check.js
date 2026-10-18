@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * spider 离线回归：把 assets/spiders 里的源放进一个**没有 DOM** 的沙箱，喂本地
- * fixture，看它算出来的东西对不对。
+ * spider 离线回归：把 app/src/test/resources/spiders 里的源放进一个**没有 DOM** 的
+ * 沙箱，喂本地 fixture，看它算出来的东西对不对。
  *
  * ## 为什么是这个形状
  *
@@ -13,12 +13,30 @@
  * 这脚本就跑不了，而那意味着这个源从此没有离线回归，只能靠真机点。约束用沙箱
  * 强制，不靠约定。
  *
+ * ## 八家之后：按源分派
+ *
+ * 以前 ROUTES / CHECKS 是写死给 yhdm 的。现在有八份源（yhdm / hanime1 / porn91 /
+ * mrds66 / agedm / cms / missav / openlist），回归配置改成按 `__spiderSite.id`
+ * 查表（见下面的 `PROFILES`）。三条规矩：
+ *
+ *   ① **yhdm 那份原样不动。** 它是唯一已经跑绿过的基线，改它等于把已有回归拆了。
+ *      断言一条没少，文案一个字没改。
+ *   ② **没有配置不算失败。** 源还在别人手里写着，脚本不认识它是正常状态 ——
+ *      打印「这个源还没有离线回归配置」，退出码 0。只有「配置了断言但没过」才是 1。
+ *   ③ **未实现的能力不算失败。** 源可能只写了一半（比如 porn91 的 play 还没接），
+ *      打印「未实现」继续往下跑，别把一张半成品表变成一堆红。
+ *
  * ## 用法
  *
  *   node scripts/spider-check.js app/src/test/resources/spiders/yhdm.js
  *   node scripts/spider-check.js app/src/test/resources/spiders/yhdm.js --dump home   # 看原始输出
+ *   node scripts/spider-check.js app/src/test/resources/spiders/porn91.js --list      # 只列配置，不跑
  *
- * 退出码：0 全过 / 1 有断言失败 / 2 环境问题（文件不存在、spider 抛错）
+ * 当作模块用（`spider-all-check.js` 就是这么复用的）：
+ *
+ *   const { runSpider, listSpiders, describeProfile } = require('./spider-check.js');
+ *
+ * 退出码：0 全过（含「未配置」「未实现」）/ 1 有断言失败 / 2 环境问题（文件不存在、spider 抛错）
  */
 'use strict';
 
@@ -27,62 +45,471 @@ const path = require('path');
 const vm = require('vm');
 
 const HERE = __dirname;
-const FIXTURES = path.resolve(HERE, '../app/src/test/resources/yhdm');
+const APP_ROOT = path.resolve(HERE, '..');
+const FIXTURES = path.join(APP_ROOT, 'app/src/test/resources');
 
-/** URL 片段 → fixture 文件。命中的第一条生效；都没命中会打印出来，方便补。 */
-const ROUTES = [
-  { match: /\/_get_plays\//, file: 'plays.json' },
-  { match: /\/vod\/\d+/, file: 'detail-2026476948.html' },
-  { match: /\/list\/|\/show\//, file: 'list.html' },
-  { match: /yhdm\.one\/?(?:$|\?|#)/, file: 'home.html' },
-];
+/**
+ * 每个源的离线回归配置。
+ *
+ * 两种路由写法：
+ *   `routes`     —— regex 数组，命中哪条去哪条夹具。给路径形状稳定、但夹具要按
+ *                   **不同参数**分文件的站点用（yhdm 的 /vod/{id}、mrds66 的
+ *                   /category/{slug}/N/）。命中顺序就是数组顺序，别乱排。
+ *   `fixtures`   —— { '夹具文件名': /url/ }，夹具名就是 `app/src/test/resources/<dir>/`
+ *                   下的文件名。给「一个页面一个 URL」的站点用，读起来更像 JUnit 里
+ *                   那句 `fixture("home.html")`，对照着改不会错位。
+ *
+ * **断言里的每个数字都抄自对应的 JUnit**，注释里标了出处和原文。不要凭感觉写 ——
+ * 这里编一个数，等 Java 适配器删掉之后就没有第二个人能反驳它。
+ */
+const PROFILES = {
+  // ── yarn 1：yhdm（基线，一字不改）──────────────────────────────────────
+  yhdm: {
+    dir: 'yhdm',
+    routes: [
+      { match: /\/_get_plays\//, file: 'plays.json' },
+      { match: /\/vod\/\d+/, file: 'detail-2026476948.html' },
+      { match: /\/list\/|\/show\//, file: 'list.html' },
+      { match: /yhdm\.one\/?(?:$|\?|#)/, file: 'home.html' },
+    ],
+    // 数字来自 YhdmAdapterTest 的既有断言。
+    checks: {
+      home: [
+        ['卡片数 ≥ 40', r => r.items.length >= 40],
+        ['id 是数字', r => /^\d+$/.test(String(r.items[0].id))],
+        ['标题非空', r => String(r.items[0].title || '').length > 0],
+        ['封面是绝对地址', r => /^https?:\/\//.test(String(r.items[0].cover || ''))],
+      ],
+      detail: [
+        ['标题对得上', r => String(r.title || '').indexOf('仙逆剧场版') >= 0],
+        ['简介非空', r => String(r.description || '').length > 0],
+        ['剧集 3 条', r => (r.episodes || []).length === 3],
+        ['第一集是 ep1', r => String((r.episodes || [])[0] && r.episodes[0].ref) === 'ep1'],
+        ['第一集标题「第01集」', r => String((r.episodes || [])[0] && r.episodes[0].title) === '第01集'],
+        ['封面落在 /cover/2026476948', r => /\/cover\/2026476948/.test(String(r.cover || ''))],
+      ],
+      play: [
+        ['地址是 m3u8', r => /\.m3u8/.test(String(r.url || ''))],
+        ['至少有 1 条备选', r => (r.alts || []).length >= 1],
+      ],
+    },
+    // 三条能力各自的入参。故意写死在配置里，不搞「猜一个 ref 出来」。
+    args: {
+      home: {},
+      detail: { ref: '2026476948' },
+      play: { ref: '2026476948', line: 'lz' },
+    },
+  },
 
-/** 每个能力跑完之后要满足的断言。数字来自 YhdmAdapterTest 的既有断言。 */
-const CHECKS = {
-  home: [
-    ['卡片数 ≥ 40', r => r.items.length >= 40],
-    ['id 是数字', r => /^\d+$/.test(String(r.items[0].id))],
-    ['标题非空', r => String(r.items[0].title || '').length > 0],
-    ['封面是绝对地址', r => /^https?:\/\//.test(String(r.items[0].cover || ''))],
-  ],
-  detail: [
-    ['标题对得上', r => String(r.title || '').indexOf('仙逆剧场版') >= 0],
-    ['简介非空', r => String(r.description || '').length > 0],
-    ['剧集 3 条', r => (r.episodes || []).length === 3],
-    ['第一集是 ep1', r => String((r.episodes || [])[0] && r.episodes[0].ref) === 'ep1'],
-    ['第一集标题「第01集」', r => String((r.episodes || [])[0] && r.episodes[0].title) === '第01集'],
-    ['封面落在 /cover/2026476948', r => /\/cover\/2026476948/.test(String(r.cover || ''))],
-  ],
-  play: [
-    ['地址是 m3u8', r => /\.m3u8/.test(String(r.url || ''))],
-    ['至少有 1 条备选', r => (r.alts || []).length >= 1],
-  ],
+  // ── yarn 2：porn91（91porn，901.26702.app）──────────────────────────────
+  porn91: {
+    dir: 'porn91',
+    fixtures: {
+      'home.html': /\/v\.php(?:$|\?)/,
+      'list-hd.html': /cate_id=hd|cate_id=original|category=|viewtype=basic/,
+      'list-ori.html': /cate_id=ori/,
+      'search.html': /search_result\.php/,
+      'watch-51dc03e8e27a694f2fc7.html': /viewkey=51dc03e8e27a694f2fc7/,
+    },
+    checks: {
+      // Porn91AdapterTest#listDedupesTo24Cards：
+      //   assertEquals("分类页去重后应正好 24 条（站点每页 24）", 24, cards.length())
+      // Porn91AdapterTest#homeFixtureHasCards：
+      //   assertEquals("home.html（/v.php）应当正好 24 条", 24, cards.length())
+      home: [
+        ['首页 24 条（JUnit homeFixtureHasCards）', r => (r.items || []).length === 24],
+        ['id 非空', r => String((r.items || [])[0] && r.items[0].id || '').length > 0],
+        ['标题非空', r => String((r.items || [])[0] && r.items[0].title || '').length > 0],
+        ['封面是 https（JUnit everyCardHasTitleAndCover）',
+          r => String((r.items || [])[0] && r.items[0].cover || '').startsWith('https://')],
+        ['id 无重复', r => {
+          const ids = (r.items || []).map(one => String(one.id));
+          return ids.length === new Set(ids).size;
+        }],
+      ],
+      // 分类页走 list-ori.html；分类参数按 Java 的 cate_id=ori。
+      category: [
+        ['分类页 24 条（JUnit listDedupesTo24Cards）', r => (r.items || []).length === 24],
+        ['两种 viewkey 形态都在（JUnit listDedupesTo24Cards）', r => {
+          const ids = (r.items || []).map(one => String(one.id));
+          const numeric = ids.some(id => /^\d+$/.test(id));
+          const hex = ids.some(id => /^[0-9a-f]{20}$/.test(id));
+          return numeric && hex;
+        }],
+        ['时长角标 ≥ 20 条（JUnit cardsCarryDurationBadge）', r => {
+          const withBadge = (r.items || []).filter(one => /^\d{2}:\d{2}:\d{2}$/.test(String(one.badge || '')));
+          return withBadge.length >= 20;
+        }],
+      ],
+      search: [
+        ['搜索页有卡片', r => (r.items || []).length > 0],
+      ],
+      // Porn91AdapterTest#playSourceIsNotTheDecoy：
+      //   诱饵 358999.mp4 / ccm.91p52.com 必须被排除；签名三件套 st= e= f= 必须都在。
+      detail: [
+        ['标题非空（JUnit firstH4IsTheTitle）', r => String(r.title || '').length > 0],
+        ['标题不是 Video Information（JUnit firstH4IsTheTitle）',
+          r => String(r.title || '').indexOf('Video Information') < 0],
+        ['标题不是 Comment On This Video（JUnit firstH4IsTheTitle）',
+          r => String(r.title || '').indexOf('Comment On This Video') < 0],
+        ['封面是 https（JUnit everyCardHasTitleAndCover）',
+          r => String(r.cover || '').startsWith('https://')],
+        ['简介非空（JUnit descriptionAndUploaderParse）', r => String(r.description || '').length > 0],
+      ],
+      play: [
+        ['必须是 https 直链（JUnit playSourceIsNotTheDecoy）',
+          r => String(r.url || '').startsWith('https://')],
+        ['不是诱饵 358999.mp4（JUnit playSourceIsNotTheDecoy）',
+          r => String(r.url || '').indexOf('358999') < 0],
+        ['不是诱饵域名 ccm.91p52.com（JUnit playSourceIsNotTheDecoy）',
+          r => String(r.url || '').indexOf('ccm.91p52.com') < 0],
+        ['是 mp4 直链（JUnit playSourceIsNotTheDecoy）', r => String(r.url || '').indexOf('.mp4') >= 0],
+        ['带 st= 签名（JUnit playSourceIsNotTheDecoy）', r => String(r.url || '').indexOf('st=') >= 0],
+        ['带 e= 过期戳（JUnit playSourceIsNotTheDecoy）', r => String(r.url || '').indexOf('e=') >= 0],
+        ['带 f= 指纹段（JUnit playSourceIsNotTheDecoy）', r => String(r.url || '').indexOf('f=') >= 0],
+      ],
+    },
+    args: {
+      home: {},
+      category: { ref: 'ori', page: 1 },
+      search: { ref: '东京', page: 1 },
+      detail: { ref: '51dc03e8e27a694f2fc7' },
+      play: { ref: '51dc03e8e27a694f2fc7' },
+    },
+  },
+
+  // ── yarn 3：mrds66（每日大赛，www.mrds66.com）──────────────────────────
+  mrds66: {
+    dir: 'mrds66',
+    routes: [
+      { match: /\/archives\/(\d+)/, file: 'archives-$1.html' },
+      { match: /\/tag\//, file: 'tag-chigua.html' },
+      { match: /\/search\//, file: 'search-chigua.html' },
+      { match: /\/category\/mrds\/2\//, file: 'category-mrds-2.html' },
+      // 第 1 页不带数字（站点对 /category/mrds/1/ 回 301），所以最后一条兜住。
+      { match: /\/category\/mrds\/?(?:$|\?)/, file: 'category-mrds.html' },
+      { match: /mrds66\.com\/?(?:$|\?|#)/, file: 'home.html' },
+    ],
+    checks: {
+      // Mrds66AdapterTest#首页抠得出卡片：assertTrue("实际 " + cards.length(), cards.length() >= 25)
+      home: [
+        ['卡片 ≥ 25（JUnit 首页抠得出卡片）', r => (r.items || []).length >= 25],
+        ['id 是数字（JUnit 广告位没有混进来）',
+          r => /^\d+$/.test(String((r.items || [])[0] && r.items[0].id || ''))],
+        ['标题非空（JUnit 首页首条字段齐全）',
+          r => String((r.items || [])[0] && r.items[0].title || '').length > 0],
+        ['封面在 pic.jtzatly.cn（JUnit 首页首条字段齐全）',
+          r => String((r.items || [])[0] && r.items[0].cover || '').startsWith('https://pic.jtzatly.cn/')],
+        ['badge 是 yyyy-MM-dd（JUnit 首页首条字段齐全）',
+          r => /^\d{4}-\d{2}-\d{2}$/.test(String((r.items || [])[0] && r.items[0].badge || ''))],
+        ['标题不带热搜角标（JUnit 标题不带热搜角标）',
+          r => (r.items || []).every(one => String(one.title || '').indexOf('HOT') < 0)],
+        ['封面没有双斜杠（JUnit 封面没有双斜杠）', r => (r.items || []).every(one => {
+          const cover = String(one.cover || '');
+          if (!cover) return true;
+          return cover.indexOf('//', 'https://'.length) < 0;
+        })],
+      ],
+      // Mrds66AdapterTest#分类页有卡片：assertTrue("实际 " + cards.length(), cards.length() >= 20)
+      category: [
+        ['分类页 ≥ 20（JUnit 分类页有卡片）', r => (r.items || []).length >= 20],
+        ['标题非空（JUnit 没有标题的时候整条丢掉）',
+          r => (r.items || []).every(one => String(one.title || '').length > 0)],
+        ['id 是数字（JUnit 广告位没有混进来）',
+          r => (r.items || []).every(one => /^\d+$/.test(String(one.id || '')))],
+      ],
+      // Mrds66AdapterTest#搜索页有卡片：assertTrue("实际 " + cards.length(), cards.length() >= 20)
+      search: [
+        ['搜索页 ≥ 20（JUnit 搜索页有卡片）', r => (r.items || []).length >= 20],
+      ],
+      // Mrds66AdapterTest#详情的标题和封面 / 简介不含广告友链 / 播放地址是m3u8且带签名
+      detail: [
+        ['标题非空（JUnit 详情的标题和封面）', r => String(r.title || '').length > 0],
+        ['封面在 pic.jtzatly.cn（JUnit 详情的标题和封面）',
+          r => String(r.cover || '').indexOf('pic.jtzatly.cn') >= 0],
+        ['简介非空（JUnit 简介不含广告友链）', r => String(r.description || '').length > 0],
+        ['简介不含「春药高潮」（JUnit 简介不含广告友链）',
+          r => String(r.description || '').indexOf('春药高潮') < 0],
+        ['简介不含「棋牌电子」（JUnit 简介不含广告友链）',
+          r => String(r.description || '').indexOf('棋牌电子') < 0],
+        ['简介 ≤ 320 字（JUnit 简介不含广告友链）', r => String(r.description || '').length <= 320],
+        ['分类非空（JUnit 详情能读出分类和标签）', r => String(r.category || '').length > 0],
+        ['标签非空且已解码（JUnit 详情能读出分类和标签）', r => {
+          const tags = r.tags || [];
+          if (tags.length === 0) return false;
+          return tags.every(tag => String(tag).indexOf('%') < 0);
+        }],
+      ],
+      // Mrds66AdapterTest#播放地址是m3u8且带签名
+      play: [
+        ['是 m3u8（JUnit 播放地址是m3u8且带签名）', r => String(r.url || '').indexOf('.m3u8') >= 0],
+        ['带 auth_key=（JUnit 播放地址是m3u8且带签名）', r => String(r.url || '').indexOf('auth_key=') >= 0],
+        ['auth_key 没被改坏（JUnit 播放地址是m3u8且带签名）',
+          r => String(r.url || '').indexOf('auth_key= ') < 0],
+      ],
+    },
+    args: {
+      home: {},
+      category: { ref: 'mrds', page: 1 },
+      search: { ref: '吃瓜', page: 1 },
+      detail: { ref: '196475' },
+      play: { ref: '196475' },
+    },
+  },
+
+  // ── yarn 4：missav（missav.live）────────────────────────────────────────
+  //
+  // 这个源在 Cloudflare 盾后面。spider 版遇到挑战页会明确报「需要过盾」，
+  // 所以 home/category 有可能整条抛错 —— 那不是解析写错，是运行时限制。
+  // 备注列会把它显示成「抛错: …」，看的人别把它当回归失败。
+  missav: {
+    dir: 'missav',
+    fixtures: {
+      'missav-home-new.html': /missav\.live\/(?:dm\d+\/)?cn\/new|\/cn\/?(?:$|\?)/,
+      'missav-genres-p1.html': /\/cn\/genres/,
+      'missav-detail-fct210.html': /\/cn\/fct-210|\/cn\/[a-z0-9_-]+-\d+/,
+    },
+    checks: {
+      // MissavAdapterTest#homeParsesTwelveCards：assertEquals("首页卡片数不对 —— 真实页面是 12 张", 12, items.length())
+      home: [
+        ['首页正好 12 张（JUnit homeParsesTwelveCards）', r => (r.items || []).length === 12],
+        ['id 不含斜杠（JUnit cardIdIsBareSlug）', r => (r.items || []).every(one => String(one.id || '').indexOf('/') < 0)],
+        ['id 不带 dm 前缀（JUnit cardIdIsBareSlug）', r => (r.items || []).every(one => String(one.id || '').indexOf('dm') !== 0)],
+        ['id 形态 [a-z0-9_-]+（JUnit cardIdIsBareSlug）',
+          r => (r.items || []).every(one => /^[a-z0-9_-]+$/.test(String(one.id || '')))],
+        ['封面在 fourhoi.com（JUnit homeParsesTwelveCards）',
+          r => (r.items || []).every(one => String(one.cover || '').indexOf('fourhoi.com') >= 0)],
+        ['至少 10 条有时长（JUnit durationShape）', r => {
+          const withDuration = (r.items || []).filter(one => String(one.duration || '').length > 0);
+          return withDuration.length >= 10;
+        }],
+      ],
+      // MissavAdapterTest#genresPage：类型页第一页 36 个，解析出 35 个（去重后）。
+      // 断言写的是 cards.length() >= 30，第一个分类是「高清」/ dm96 / 290816 条。
+      category: [
+        ['类型条目 ≥ 30（JUnit genresPage）', r => (r.items || []).length >= 30],
+        ['第一个分类是「高清」（JUnit genresPage）',
+          r => String((r.items || [])[0] && r.items[0].name || '') === '高清'],
+        ['分类 id 是 dm96（JUnit genresPage）',
+          r => String((r.items || [])[0] && r.items[0].id || '') === 'dm96'],
+        ['分类 id 都是 dm+数字（JUnit categoryIdsWellFormedAndUnique）',
+          r => (r.items || []).every(one => /^dm\d+$/.test(String(one.id || '')))],
+        ['分类 id 无重复（JUnit categoryIdsWellFormedAndUnique）', r => {
+          const ids = (r.items || []).map(one => String(one.id));
+          return ids.length === new Set(ids).size;
+        }],
+      ],
+      // MissavAdapterTest#detailMetadata / #playUrlMatchesBrowserNetworkPanel
+      detail: [
+        ['id 是 fct-210（JUnit detailMetadata）', r => String(r.id || '') === 'fct-210'],
+        ['标题非空（JUnit detailMetadata）', r => String(r.title || '').length > 0],
+        ['封面在 fourhoi.com/fct-210/（JUnit detailMetadata）',
+          r => String(r.cover || '').startsWith('https://fourhoi.com/fct-210/')],
+      ],
+      play: [
+        ['播放地址是那条 surrit m3u8（JUnit playUrlMatchesBrowserNetworkPanel）',
+          r => String(r.url || '') === 'https://surrit.com/18b4bbc2-c802-44a7-ab7a-78531695c531/playlist.m3u8'],
+      ],
+    },
+    args: {
+      home: {},
+      category: { ref: 'genres/dm96/高清', page: 1 },
+      search: { ref: 'test', page: 1 },
+      detail: { ref: 'fct-210' },
+      play: { ref: 'fct-210' },
+    },
+  },
+
+  // ── yarn 5：hanime1（hanime1.me）─────────────────────────────────────────
+  //
+  // ⚠ 夹具不在仓库里。Hanime1AdapterTest 用的是**根目录**的 home.html /
+  // genre-1.html / query-1.html / watch-408706.html / tagpanel.html /
+  // empty-page.html，而不是 hanime1/ 子目录 —— 任务描述里说的 hanime1/ 目录
+  // 根本不存在，别去新建一个空的假装有。真抓下来之后把 dir 改成对应目录即可。
+  hanime1: {
+    dir: '.',
+    fixtures: {
+      'home.html': /hanime1\.me\/?(?:$|\?|#)/,
+      'genre-1.html': /\/search\?(?:[^#]*&)?(?:genre|sort)=/,
+      'query-1.html': /\/search\?(?:[^#]*&)?query=/,
+      'watch-408706.html': /\/watch\?v=408706/,
+      'tagpanel.html': /\/tag/,
+      'empty-page.html': /page=99/,
+    },
+    checks: {
+      // ⚠ 这里钉的是 48，不是 Hanime1AdapterTest 里那个 100。
+      //
+      // 两处测的不是同一层：
+      //   parseCards(html)  → 144 张，JUnit 断言 `>= 100`
+      //   home()            → 截到 HOME_LIMIT = 48（Hanime1Adapter.java:136，
+      //                       注释「首页有 10 个横排区、144 张卡，全塞进去首屏太重」），
+      //                       循环是 `i < all.length() && i < HOME_LIMIT`，里面还按 id 去重
+      //
+      // spider 的 home 对应的是 Java 的 home()，所以 48 是**对的**，不是丢数据。
+      // 别看到 48 < 144 就去改正则 —— 那会把正确的截断当成 bug 来修。
+      home: [
+        ['卡片 ≥ 48（JUnit 对齐 Hanime1Adapter.home() 的 HOME_LIMIT = 48）',
+          r => (r.items || []).length >= 48],
+        ['id 非空（JUnit 首页首条字段齐全）', r => String((r.items || [])[0] && r.items[0].id || '').length > 0],
+        ['封面在 vdownload.hembed.com（JUnit 首页首条字段齐全）',
+          r => String((r.items || [])[0] && r.items[0].cover || '').indexOf('vdownload.hembed.com') >= 0],
+        ['id 无重复（JUnit 首页id无重复）', r => {
+          const ids = (r.items || []).map(one => String(one.id));
+          return ids.length === new Set(ids).size;
+        }],
+      ],
+      // Hanime1AdapterTest#分类页数量正常：n >= 30 && n <= 45
+      category: [
+        ['分类页 30~45 条（JUnit 分类页数量正常）', r => {
+          const n = (r.items || []).length;
+          return n >= 30 && n <= 45;
+        }],
+        ['id 是数字（JUnit 分类页没有广告卡混入）',
+          r => (r.items || []).every(one => /^\d+$/.test(String(one.id || '')))],
+        ['封面没有 /image/icon/（JUnit 分类页没有广告位图集当封面）',
+          r => (r.items || []).every(one => String(one.cover || '').indexOf('/image/icon/') < 0)],
+      ],
+      // Hanime1AdapterTest#搜索页抠得出至少30张：>= 30
+      search: [
+        ['搜索页 ≥ 30（JUnit 搜索页抠得出至少30张）', r => (r.items || []).length >= 30],
+      ],
+      // Hanime1AdapterTest#详情页meta全部取到
+      detail: [
+        ['标题非空（JUnit 详情页meta全部取到）', r => String(r.title || '').length > 0],
+        ['封面在 vdownload.hembed.com（JUnit 详情页meta全部取到）',
+          r => String(r.cover || '').indexOf('vdownload.hembed.com') >= 0],
+      ],
+      // Hanime1AdapterTest#抠到三档直链且都带签名：3 档，quality 依次 480/720/1080，
+      // 每条 url 都含 ?secure=
+      play: [
+        ['三档直链（JUnit 抠到三档直链且都带签名）', r => (r.alts || []).length === 3],
+        ['每条都带 ?secure=（JUnit 抠到三档直链且都带签名）',
+          r => (r.alts || []).every(one => String(one.url || '').indexOf('?secure=') >= 0)],
+        ['url 是直链且带签名（JUnit 抠到三档直链且都带签名）',
+          r => String(r.url || '').indexOf('?secure=') >= 0],
+      ],
+    },
+    args: {
+      home: {},
+      category: { ref: '裏番', page: 1 },
+      search: { ref: 'RD', page: 1 },
+      detail: { ref: '408706' },
+      play: { ref: '408706' },
+    },
+  },
+
+  // ── yarn 6/7/8：agedm / cms / openlist ─────────────────────────────────
+  //
+  // 仓库里一份夹具都没有（这三个源的 JUnit —— AgedmAdapterTest 不存在、
+  // CmsAdapterTest 不存在、OpenListAdapterTest 只测纯函数 —— 也不依赖 HTML）。
+  // 所以这里只登记「我要去哪找夹具、将来断言抄谁」，checks 留空：
+  // 配置了就等于承诺能跑，一份夹具都没有时把它配成空是诚实的写法。
+  //
+  // 补夹具的做法：把 URL 响应丢进对应目录，然后按上面的形状填 fixtures / routes
+  // 和 checks，数字从新写的 JUnit 里抄。
+  agedm: {
+    dir: 'agedm',
+    fixtures: {},
+    checks: {},
+    args: {},
+    note: '没有夹具（AgedmAdapterTest 不存在），也还没有可抄的断言',
+  },
+  cms: {
+    dir: 'cms',
+    fixtures: {},
+    checks: {},
+    args: {},
+    note: '没有夹具（CmsAdapterTest 不存在），也还没有可抄的断言',
+  },  openlist: {
+    dir: 'openlist',
+    fixtures: {},
+    checks: {},
+    args: {},
+    // OpenListAdapterTest 只测纯函数（encodeId/decodeId/isMedia/join…），一个 HTML 都不读，
+    // 所以那只测试里的数字抄不过来 —— spider 的 home/detail/play 要的是 fs/list 的
+    // JSON POST 响应，那类夹具仓库里没有。
+    note: '没有夹具（OpenListAdapterTest 只测纯函数，不读 HTML）；POST 响应可用 post-<末段>.json 补',
+  },
 };
 
-function fail(message) {
-  console.error('✗ ' + message);
-  process.exit(2);
+/** 能力名的固定顺序：汇总表的列就是它。 */
+const CAPS = ['home', 'category', 'search', 'detail', 'play'];
+
+/** 每个源跑哪些能力：配置了断言的能力 + 配置了入参的能力，取并集，按 CAPS 排序。 */
+function capsFor(profile) {
+  if (!profile) return [];
+  const wanted = new Set();
+  Object.keys(profile.checks || {}).forEach(cap => wanted.add(cap));
+  Object.keys(profile.args || {}).forEach(cap => wanted.add(cap));
+  return CAPS.filter(cap => wanted.has(cap));
 }
 
-const spiderPath = process.argv[2];
-if (!spiderPath) fail('用法: node scripts/spider-check.js <spider.js> [--dump cap]');
-const dumpIdx = process.argv.indexOf('--dump');
-const dumpCap = dumpIdx > 0 ? process.argv[dumpIdx + 1] : null;
+/**
+ * 夹具按什么找。
+ *
+ * 两种写法最终都归到「URL → 文件内容」。找不到时**返回 null 而不是抛错** ——
+ * 未配置的 URL 是正常状态（比如源多打了一次请求去拿分类树），要让它继续跑，
+ * 最后在报告里把请求过的 URL 列出来。
+ */
+function makeResolver(profile) {
+  const dir = path.join(FIXTURES, profile.dir);
+  const requested = [];
+  const missed = [];
 
-const source = fs.readFileSync(path.resolve(process.cwd(), spiderPath), 'utf8');
-
-/** 记录所有请求过的 URL：没命中 fixture 时，这些就是你要补的规则。 */
-const requested = [];
-
-function bodyFor(url) {
-  requested.push(url);
-  for (const route of ROUTES) {
-    if (!route.match.test(url)) continue;
-    const file = path.join(FIXTURES, route.file);
-    if (!fs.existsSync(file)) fail('fixture 不存在: ' + file);
-    return fs.readFileSync(file, 'utf8');
+  function readFixture(file) {
+    const full = path.join(dir, file);
+    if (!fs.existsSync(full)) return { ok: false, why: '夹具不存在: ' + full };
+    return { ok: true, body: fs.readFileSync(full, 'utf8') };
   }
-  return null;
+
+  function resolve(url, method, body) {
+    requested.push({ url, method, body });
+    const isPost = String(method || 'GET').toUpperCase() === 'POST';
+
+    // POST 的夹具约定：`<dir>/post-<路径最后一段>.json`。
+    // 这是给 openlist / 将来任何 JSON POST 源留的口子 —— 补 POST 夹具时
+    // 只要放文件，不用改脚本。
+    if (isPost) {
+      let last = String(url).split('?')[0].replace(/\/+$/, '').split('/').pop() || 'root';
+      last = last.replace(/[^\w.-]/g, '_');
+      const hit = readFixture('post-' + last + '.json');
+      if (hit.ok) return hit;
+      missed.push({ url, method, why: '缺 POST 夹具 post-' + last + '.json' });
+      return { ok: false, missing: true, why: hit.why };
+    }
+
+    if (Array.isArray(profile.routes)) {
+      for (const route of profile.routes) {
+        const m = route.match.exec(url);
+        if (!m) continue;
+        // 支持 $1 / $2 这种回填，让 /archives/(\d+)/ 能直接对上文件。
+        const file = String(route.file).replace(/\$(\d+)/g, (all, i) => m[Number(i)] || all);
+        return readFixture(file);
+      }
+    }
+
+    if (profile.fixtures) {
+      for (const file of Object.keys(profile.fixtures)) {
+        if (profile.fixtures[file].test(url)) return readFixture(file);
+      }
+    }
+
+    missed.push({ url, method, why: '这个 URL 没有路由' });
+    return { ok: false, missing: true, why: '没有匹配的夹具路由' };
+  }
+
+  return {
+    resolve,
+    requested,
+    missed,
+    dir,
+    /** 这个源的夹具目录到底在不在 —— 决定「未配置夹具」还是「夹具缺失」。 */
+    hasDir: () => fs.existsSync(dir) && fs.statSync(dir).isDirectory(),
+    listed: () => {
+      if (!fs.existsSync(dir)) return [];
+      return fs.readdirSync(dir).filter(name => !name.startsWith('.'));
+    },
+  };
 }
 
 /**
@@ -95,81 +522,642 @@ function bodyFor(url) {
  *
  * 刻意没有 window / document / DOMParser：spider 一用 DOM API，这个脚本就跑不了，
  * 等于这个源从此没有离线回归。约束用沙箱强制，不靠约定。
+ *
+ * POST 也走同一条路：`method` / `format` 只是决定去哪找夹具（见 makeResolver），
+ * 这里不做任何协议转换 —— 真实运行时把 form 转成表单体、json 转成 JSON 体，
+ * 离线这边两者都是「夹具文件里的那段字符串」。
  */
-const ctx = {
-  async call(op, args) {
-    const a = args || {};
-    if (op === 'net') {
-      const url = String(a.url || '');
-      const body = bodyFor(url);
-      if (body == null) return { ok: false, error: '离线回归里没有这个 URL 的 fixture：' + url };
-      return { ok: true, status: 200, body };
-    }
-    if (op === 'log') {
-      if (a.msg) console.error('  [spider] ' + a.msg);
-      return { ok: true };
-    }
-    return { ok: false, error: '离线回归不支持 op=' + op };
-  },
-  net(args) { return this.call('net', args); },
-  log(args) { return this.call('log', args); },
-};
-
-const sandbox = { __spiderSite: null, console: { log() {}, error() {} } };
-vm.createContext(sandbox);
-try {
-  vm.runInContext(source, sandbox, { filename: spiderPath });
-} catch (error) {
-  fail('spider 执行失败：' + error.message);
+function makeCtx(resolver, logs) {
+  const ctx = {
+    async call(op, args) {
+      const a = args || {};
+      if (op === 'net') {
+        const url = String(a.url || '');
+        const method = String(a.method || 'GET').toUpperCase();
+        const hit = resolver.resolve(url, method, a.body);
+        if (!hit.ok) {
+          return { ok: false, error: '离线回归里没有这个 URL 的 fixture：' + url };
+        }
+        const out = { ok: true, status: 200, body: hit.body };
+        // keep 是「把这些 Set-Cookie 交回给源」。离线没有响应头，给一个空 jar：
+        // 源能拿到形状，但拿不到值 —— 这样它走的就是「站点没下发」那条兜底分支，
+        // 不会因为离线缺 cookie 而在某一步 differ。
+        if (Array.isArray(a.keep) && a.keep.length) out.cookies = {};
+        return out;
+      }
+      if (op === 'log') {
+        if (a.msg) logs.push(String(a.msg));
+        return { ok: true };
+      }
+      return { ok: false, error: '离线回归不支持 op=' + op };
+    },
+    net(args) { return this.call('net', args); },
+    log(args) { return this.call('log', args); },
+  };
+  return ctx;
 }
-const site = sandbox.__spiderSite;
-if (!site) fail('spider 没有导出 __spiderSite');
-if (!Array.isArray(site.hosts)) fail('spider 必须声明 hosts 数组');
 
-(async () => {
+/**
+ * 在 vm 里加载一个 spider 文件。
+ *
+ * 返回 `{ok:true, site, source}` 或 `{ok:false, error}`。**不抛** —— 调用方
+ * （汇总表）要的是「这一家为什么没起来」，不是一次挂掉整个脚本。
+ */
+function loadSpider(spiderPath) {
+  const abs = path.resolve(process.cwd(), spiderPath);
+  if (!fs.existsSync(abs)) return { ok: false, error: '文件不存在: ' + abs, path: abs };
+  let source;
+  try {
+    source = fs.readFileSync(abs, 'utf8');
+  } catch (error) {
+    return { ok: false, error: '读不了文件：' + error.message, path: abs };
+  }
+
+  const sandbox = { __spiderSite: null, console: { log() {}, error() {} } };
+  vm.createContext(sandbox);
+  try {
+    vm.runInContext(source, sandbox, { filename: abs });
+  } catch (error) {
+    return { ok: false, error: 'spider 执行失败：' + ((error && error.message) || error), path: abs };
+  }
+  const site = sandbox.__spiderSite;
+  if (!site) return { ok: false, error: 'spider 没有导出 __spiderSite', path: abs };
+  if (!Array.isArray(site.hosts)) return { ok: false, error: 'spider 必须声明 hosts 数组', path: abs };
+  return { ok: true, site, source, path: abs };
+}
+
+/**
+ * 调一个能力，带看门狗。
+ *
+ * ## 为什么不能只靠 `Promise.race([fn(), sleep(N)])`
+ *
+ * 因为源里的死循环是**同步**的。`race` 的计时器是宏任务，事件循环被一个
+ * `while` 占住时计时器根本轮不上 —— 整个进程就卡在那里，表一行都打不出来。
+ * 2026-10-19 真撞上了：missav 的 `qualities()` 里 `exec` 命中后 `continue`
+ * 没有推进 `lastIndex`，第二次命中同一个画质词就原地打转。
+ *
+ * ## 所以分两层
+ *
+ *  ① 同步段（函数体跑到第一个 await 之前）交给 `vm.runInContext` 的 `timeout`。
+ *     —— 但它对**已经在跑的 Promise 链**无能为力，只能兜住同步那一截。
+ *  ② 异步段交给 `Promise.race` 的计时器，等事件循环空出来才会触发。
+ *     所以它必须**在**同步段之后才可能生效，两层缺一不可。
+ *
+ * 超时不算「断言没过」——它是「这个源把回归脚本拖死了」，单独记成 error，
+ * 备注里说明白，别让人以为是解析写错了。
+ */
+function callWithWatchdog(fn, ctx, args, cap, entry) {
+  return new Promise(resolve => {
+    let settled = false;
+    const done = payload => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(payload);
+    };
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      entry.status = 'error';
+      entry.error = '看门狗超时：' + cap + ' 跑了超过 ' + CAP_TIMEOUT_MS
+        + 'ms 还没返回（大概率是源里的死循环 —— 检查 exec 循环有没有推进 lastIndex）';
+      resolve(null);
+    }, CAP_TIMEOUT_MS);
+
+    // 同步段：这里同步抛的错误直接走 catch，跟 await 抛的走同一条。
+    Promise.resolve()
+      .then(() => fn(ctx, args))
+      .then(payload => done(payload), error => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        entry.status = 'error';
+        entry.error = String((error && error.message) || error).split('\n')[0];
+        resolve(null);
+      });
+  });
+}
+
+/**
+ * 同步死循环的兜底：用子进程跑一次调用。
+ *
+ * 上面那个 `callWithWatchdog` 只能兜住「跑到第一个 await 之前」的那一截 ——
+ * `Promise.race` 的计时器是宏任务，事件循环被占住时它永远轮不上，而
+ * `vm.runInContext(…, {timeout})` 对已经跑起来的 Promise 链也管不着。
+ * 结果是整个进程挂在那儿，一张表都打不出来（2026-10-19 撞上过）。
+ *
+ * 唯一可靠的办法是**换一个进程**：kill 得掉的东西只有进程。所以每个能力
+ * 单独起一个 node 子进程，父进程 `spawnSync` 带超时 —— 超时就杀掉。
+ *
+ * 代价是每个能力多一次进程启动（约 40~80ms）。八个源 × 五个能力 ≈ 2~3 秒，
+ * 换「任何一家写坏了都不会让汇总表打不出来」，值。
+ *
+ * 判据：`process.execArgv` 里带 `--child` 就走内联那条（见文件末尾的 CLI），
+ * 不带就 spawn。这样 `node scripts/spider-check.js x.js` 的行为和以前一样，
+ * 只有汇总脚本（和显式加了 `--isolate` 的调用）才走子进程。
+ */
+function runIsolated(spiderPath, cap, timeoutMs) {
+  const { spawnSync } = require('child_process');
+  // 超时必须是一个实数 —— 传 undefined 时 spawnSync 会当「不设超时」，
+  // 于是死的源就把父进程一起拖住（2026-10-19 实测：subprocess 卡在
+  // missav 的同步死循环上，父进程等了一分钟以上）。
+  const limit = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : CAP_TIMEOUT_MS;
+  const started = Date.now();
+  const out = spawnSync(process.execPath, [__filename, '--child', spiderPath, cap], {
+    encoding: 'utf8',
+    timeout: limit,
+    killSignal: 'SIGKILL',
+    // stdio 必须显式给：默认的 inherit/pipe 混搭在子进程被 SIGKILL 之后，
+    // 父进程会挂在读管道上，timeout 等于没设。
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  const elapsed = Date.now() - started;
+
+  const text = String(out.stdout || '');
+  // 超时时 stdout 里可能有半截结果 —— 先看有没有完整的 __RESULT__ 行，
+  // 有就照用（子进程其实跑完了，只是没退出），没有才判超时。
+  const line = text.split('\n').filter(one => one.startsWith('__RESULT__')).pop();
+
+  if (out.error && out.error.code === 'ETIMEDOUT') {
+    if (line) {
+      try {
+        const parsed = JSON.parse(line.slice('__RESULT__'.length));
+        parsed.elapsed = elapsed;
+        return parsed;
+      } catch (error) { /* 落进下面的超时分支 */ }
+    }
+    return {
+      status: 'error',
+      error: '看门狗超时：' + cap + ' 跑了超过 ' + limit + 'ms（子进程被 SIGKILL）'
+        + ' —— 大概率是源里的同步死循环，检查 exec 循环有没有推进 lastIndex',
+      elapsed,
+    };
+  }
+  if (out.error) {
+    return { status: 'error', error: '子进程起不来：' + out.error.message, elapsed };
+  }
+  if (!line) {
+    const err = String(out.stderr || '').split('\n').filter(Boolean).pop() || '子进程没有输出';
+    return { status: 'error', error: err, elapsed };
+  }
+  try {
+    const parsed = JSON.parse(line.slice('__RESULT__'.length));
+    parsed.elapsed = elapsed;
+    return parsed;
+  } catch (error) {
+    return { status: 'error', error: '子进程结果不是 JSON：' + line.slice(0, 200), elapsed };
+  }
+}
+
+/** 单个能力的看门狗上限。真机的 SpiderRuntime 超时是 15s，这里给 5s 就够暴露死循环。 */
+const CAP_TIMEOUT_MS = 5000;
+
+/**
+ * 跑一个源。**这是 `spider-all-check.js` 唯一需要的东西。**
+ *
+ * 返回：
+ *   { id, version, ok, file, error,
+ *     configured,            // 有没有离线回归配置
+ *     dir, hasFixtures,      // 夹具目录在不在
+ *     caps: { home:{status, failed, checks, note, error, requested}, … },
+ *     requested, missed, logs }
+ *
+ * status 取值：'pass' | 'fail' | 'unimplemented'（源没写这个 cap）
+ *              | 'not-configured'（没配入参/断言）| 'no-fixtures'（缺夹具）
+ *              | 'error'（cap 抛错）| 'skipped'（--skip 指定跳过）
+ *
+ * 注意「fail」和「error」不是一回事：fail 是断言没过（解析写错了），
+ * error 是抛错（沙箱缺夹具、源自己报错）。汇总表两列分开显示。
+ */
+async function runSpider(spiderPath, options) {
+  const opts = options || {};
+  const loaded = loadSpider(spiderPath);  if (!loaded.ok) {
+    return {
+      id: path.basename(spiderPath, '.js'),
+      file: spiderPath,
+      ok: false,
+      error: loaded.error,
+      configured: false,
+      caps: {},
+      requested: [],
+      missed: [],
+      logs: [],
+    };
+  }
+
+  const site = loaded.site;
+  const id = String(site.id || path.basename(spiderPath, '.js'));
+  const profile = PROFILES[id];
+  const result = {
+    id,
+    version: site.version,
+    file: spiderPath,
+    ok: true,
+    error: null,
+    configured: !!profile,
+    profile,
+    caps: {},
+    requested: [],
+    missed: [],
+    logs: [],
+  };
+
+  if (!profile) {
+    result.note = '这个源还没有离线回归配置';
+    return result;
+  }
+
+  const resolver = makeResolver(profile);
+  const logs = [];
+  const ctx = makeCtx(resolver, logs);
+  result.hasFixtures = resolver.hasDir();
+  result.fixtureDir = resolver.dir;
+  result.fixtureFiles = resolver.listed();
+
+  const caps = capsFor(profile);
+  const only = opts.only && opts.only.length ? new Set(opts.only) : null;
+
+  // 一条断言都没配的源（agedm / cms / openlist）：给每个能力补一个
+  // 'not-configured' 条目，让汇总表显示 ⊘ 而不是一片 —。
+  // 一片「未实现」会误导成「源没写完」，实际是「回归还没配」——两件事的
+  // 下一步动作不一样（一个等 A/B 组，一个等补夹具）。
+  if (caps.length === 0) {
+    for (const cap of CAPS) {
+      result.caps[cap] = {
+        status: 'not-configured',
+        failed: 0,
+        checks: [],
+        error: null,
+        note: '没有断言可跑（' + (profile.note || '夹具和断言都还没配') + '）',
+        requested: [],
+      };
+    }
+    result.requested = [];
+    result.missed = [];
+    result.logs = [];
+    return result;
+  }
+
+  // 隔离模式：每个能力起一个子进程跑。汇总脚本默认走这条 —— 任何一家
+  // 写了个同步死循环，死的也只是那个子进程。
+  const isolate = !!opts.isolate;
+
+  for (const cap of caps) {
+    if (only && !only.has(cap)) continue;
+
+    const entry = {
+      status: 'pass',
+      failed: 0,
+      checks: [],
+      error: null,
+      note: null,
+      requested: [],
+    };
+    result.caps[cap] = entry;
+
+    if (typeof site[cap] !== 'function') {
+      entry.status = 'unimplemented';
+      entry.note = '未实现';
+      continue;
+    }
+
+    const checks = (profile.checks && profile.checks[cap]) || [];
+    const args = (profile.args && profile.args[cap]) || {};
+
+    if (checks.length === 0 && Object.keys(args).length === 0) {
+      entry.status = 'not-configured';
+      entry.note = '未配置';
+      continue;
+    }
+
+    if (isolate) {
+      const child = runIsolated(spiderPath, cap, opts.timeoutMs || CAP_TIMEOUT_MS);
+      entry.status = child.status;
+      entry.error = child.error || null;
+      entry.note = child.note || null;
+      entry.requested = child.requested || [];
+      entry.checks = child.checks || [];
+      entry.failed = child.failed || 0;
+      entry.firstFailure = child.firstFailure;
+      entry.elapsed = child.elapsed;
+      // payload 由子进程序列化带回，`--dump` 打的就是它。
+      entry.payload = child.payload;
+      // 子进程里只跑了这一个能力，夹具的「没命中」也要带回来。
+      if (child.missed) result.missed = (result.missed || []).concat(child.missed);
+      if (child.requestedList) result.requested = (result.requested || []).concat(child.requestedList);
+      if (child.logs) logs.push.apply(logs, child.logs);
+      continue;
+    }
+
+    const payload = await callWithWatchdog(site[cap], ctx, args, cap, entry);
+    if (entry.status === 'error') {
+      entry.requested = resolver.requested.slice();
+      continue;
+    }
+
+    entry.requested = resolver.requested.slice();
+    // 存一份原始 payload：`--dump` 打的是它（不是内部分析结果）——
+    // 补断言的人要看的是「spider 到底吐了什么」，不是「我们判它过了没」。
+    entry.payload = payload;
+
+    if (checks.length === 0) {
+      // 有入参没断言：跑通了就算「能跑」，但不判对错。
+      entry.note = '无断言（只验证能跑）';
+      continue;
+    }
+
+    for (const [label, predicate] of checks) {
+      let ok = false;
+      try {
+        ok = !!predicate(payload || {});
+      } catch (error) {
+        ok = false;
+      }
+      entry.checks.push({ label, ok });
+      if (!ok) {
+        entry.failed++;
+        if (entry.firstFailure === undefined) {
+          entry.firstFailure = {
+            label,
+            actual: String(JSON.stringify(payload)).slice(0, 240),
+          };
+        }
+      }
+    }
+    entry.status = entry.failed === 0 ? 'pass' : 'fail';
+  }
+
+  result.requested = resolver.requested.slice();
+  result.missed = resolver.missed.slice();
+  result.logs = logs;
+  return result;
+}
+
+/** 列出 spiders 目录里所有源文件，跳过 `_` 开头（阶段 0 的自检样本）。 */
+function listSpiders(dir) {
+  const base = dir || path.join(FIXTURES, 'spiders');
+  if (!fs.existsSync(base)) return [];
+  return fs
+    .readdirSync(base)
+    .filter(name => name.endsWith('.js') && !name.startsWith('_') && !name.startsWith('.'))
+    .sort()
+    .map(name => path.join(base, name));
+}
+
+/** 给 `--list` 用：一句话说清这个源配了什么。 */
+function describeProfile(id) {
+  const profile = PROFILES[id];
+  if (!profile) return '未配置';
+  const caps = capsFor(profile);
+  if (caps.length === 0) {
+    return '没有断言（' + (profile.note || '还没抄到可用的数字') + '）';
+  }
+  const parts = caps.map(cap => {
+    const n = ((profile.checks && profile.checks[cap]) || []).length;
+    return cap + (n ? '(' + n + ')' : '(0)');
+  });
+  return parts.join(' ') + ' · 夹具目录 ' + profile.dir;
+}
+
+// ── CLI ────────────────────────────────────────────────────────────────────
+// 被 require 时不跑。判据是 `require.main === module`，不用 argv[1] —— 后者在
+// `node -e "require('./spider-check.js')"` 下也会命中。
+function main(argv) {
+  const spiderPath = argv[2];
+  if (!spiderPath || spiderPath.startsWith('--')) {
+    fail('用法: node scripts/spider-check.js <spider.js> [--dump <cap>] [--list] [--skip cap,cap] [--no-isolate]');
+  }
+
+  const dumpIdx = argv.indexOf('--dump');
+  const dumpCap = dumpIdx > 0 ? argv[dumpIdx + 1] : null;
+  const skipIdx = argv.indexOf('--skip');
+  const only = skipIdx > 0 && argv[skipIdx + 1]
+    ? CAPS.filter(cap => argv[skipIdx + 1].split(',').indexOf(cap) < 0)
+    : null;
+
+  // 单源模式**默认也走 isolate**。理由：`runSpider` 里的 `Promise.race` 看门狗
+  // 兜不住同步死循环（计时器是宏任务，事件循环被 `while` 占住时永远轮不上），
+  // 唯一杀得掉的是进程。2026-10-19 实测：`spider-check.js missav.js` 裸跑
+  // 60 秒不返回，只能 SIGKILL —— 而同样的源在汇总脚本里是好的，因为它走了
+  // 子进程。保护不能只装在汇总那一侧。
+  //
+  // `--no-isolate` 保留快路：调试时想看完整堆栈、想单步，就用它。
+  const isolate = argv.indexOf('--no-isolate') < 0;
+
+  const loaded = loadSpider(spiderPath);
+  if (!loaded.ok) fail(loaded.error);
+
+  const site = loaded.site;
   console.error('spider: ' + site.id + ' v' + site.version + ' requires=' + site.requires
     + ' hosts=' + JSON.stringify(site.hosts));
 
-  let failed = 0;
-  for (const cap of Object.keys(CHECKS)) {
-    if (typeof site[cap] !== 'function') {
-      console.error('✗ ' + cap + ' 没有实现');
-      failed++;
-      continue;
-    }
-    let result;
-    try {
-      result = await site[cap](ctx, cap === 'home' ? {} : (cap === 'detail'
-        ? { ref: '2026476948' }
-        : { ref: '2026476948', line: (site.__lineName || 'lz') }));
-    } catch (error) {
-      console.error('✗ ' + cap + ' 抛错：' + (error && error.message));
-      failed++;
-      continue;
-    }
-    if (dumpCap === cap) {
-      console.log(JSON.stringify(result, null, 2));
-      continue;
-    }
-    for (const [label, predicate] of CHECKS[cap]) {
-      let ok = false;
-      try { ok = !!predicate(result || {}); } catch (error) { ok = false; }
-      if (!ok) {
-        failed++;
-        console.error('✗ ' + cap + ' · ' + label);
-        console.error('   实际: ' + JSON.stringify(result).slice(0, 400));
-      }
-    }
-    if (failed === 0) console.error('✓ ' + cap + ' ' + CHECKS[cap].length + ' 条');
+  const profile = PROFILES[site.id];
+  if (!profile) {
+    // 没配置**不是失败**：源可能还在别人手里，或者是个自检样本。
+    console.error('这个源还没有离线回归配置（' + site.id + '）');
+    const known = Object.keys(PROFILES);
+    console.error('已配置：' + known.map(id => id + ' → ' + describeProfile(id)).join('\n         '));
+    process.exit(0);
   }
 
-  if (requested.length && failed) {
-    console.error(' 蜘蛛请求过的 URL：');
-    for (const url of requested) console.error('   ' + url);
+  console.error('离线回归配置：' + describeProfile(site.id));
+  if (argv.indexOf('--list') > 0) process.exit(0);
+
+  if (isolate) {
+    console.error('看门狗：每个能力独立子进程，单次上限 ' + CAP_TIMEOUT_MS + 'ms（--no-isolate 关掉）');
   }
-  if (failed) {
-    console.error('✗ 共 ' + failed + ' 条失败');
-    process.exit(1);
+
+  runSpider(spiderPath, { only, isolate }).then(result => {
+    const caps = Object.keys(result.caps);
+    if (caps.length === 0) {
+      console.error('这个源还没有配断言（' + site.id + '）');
+      process.exit(0);
+    }
+
+    let failed = 0;
+    let ran = 0;
+
+    for (const cap of caps) {
+      const entry = result.caps[cap];
+
+      if (entry.status === 'unimplemented') {
+        console.error('· ' + cap + ' 未实现');
+        continue;
+      }
+      if (entry.status === 'not-configured') {
+        console.error('· ' + cap + ' 未配置');
+        continue;
+      }
+      if (entry.status === 'error') {
+        console.error('✗ ' + cap + ' 抛错：' + entry.error);
+        for (const one of entry.requested || []) console.error('   请求过：' + one.url);
+        failed++;
+        continue;
+      }
+      if (dumpCap === cap) {
+        ran++;
+        continue;
+      }
+
+      ran++;
+      for (const one of entry.checks) {
+        if (one.ok) continue;
+        failed++;
+        console.error('✗ ' + cap + ' · ' + one.label);
+        if (entry.firstFailure) {
+          console.error('   实际: ' + entry.firstFailure.actual);
+        }
+      }
+      if (entry.failed === 0) console.error('✓ ' + cap + ' ' + entry.checks.length + ' 条');
+    }
+
+    if (dumpCap) {
+      // --dump 只跑那一格，把**原始输出**打出来（给补断言的人看字段长什么样）。
+      // 打的是 payload 不是结果对象 —— 和改动前一致，别在这里换了形状。
+      runSpider(spiderPath, { only: [dumpCap] }).then(one => {
+        const entry = one.caps[dumpCap];
+        if (!entry || entry.status === 'unimplemented' || entry.status === 'not-configured'
+          || entry.payload === undefined) {
+          console.error('· ' + dumpCap + ' 没有可 dump 的输出');
+          process.exit(0);
+        }
+        console.log(JSON.stringify(entry.payload, null, 2));
+        process.exit(failed ? 1 : 0);
+      });
+      return;
+    }
+
+    if (!ran) {
+      console.error('这个源还没有配断言（' + site.id + '）');
+      process.exit(0);
+    }
+
+    if (failed) {
+      const urls = result.requested;
+      if (urls.length) {
+        console.error('  蜘蛛请求过的 URL：');
+        for (const one of urls) console.error('   ' + one.method + ' ' + one.url);
+      }
+      if (result.missed.length) {
+        console.error('  没有夹具的 URL（补夹具用）：');
+        for (const one of result.missed) console.error('   ' + one.method + ' ' + one.url + ' —— ' + one.why);
+      }
+      console.error('✗ 共 ' + failed + ' 条失败');
+      process.exit(1);
+    }
+    console.error('全部通过');
+    process.exit(0);
+  });
+}
+
+function fail(message) {
+  console.error('✗ ' + message);
+  process.exit(2);
+}
+
+if (require.main === module) {
+  const argv = process.argv;
+  // --child <spider.js> <cap>：子进程模式，只跑一个能力，把结果打一行 JSON 就走。
+  // 父进程（runIsolated）拿 spawnSync 的 timeout 兜住整个子进程 —— 这是唯一
+  // 能杀掉同步死循环的办法。
+  if (argv[2] === '--child') {
+    runChild(argv[3], argv[4]);
+  } else {
+    main(argv);
   }
-  console.error('全部通过');
-})();
+}
+
+/** 子进程：跑一个源的一个能力，结果打成 `__RESULT__{…}` 一行。 */
+function runChild(spiderPath, cap) {
+  const loaded = loadSpider(spiderPath);
+  if (!loaded.ok) {
+    console.log('__RESULT__' + JSON.stringify({ status: 'error', error: loaded.error }));
+    process.exit(0);
+  }
+  const site = loaded.site;
+  const profile = PROFILES[String(site.id || '')];
+  if (!profile) {
+    console.log('__RESULT__' + JSON.stringify({ status: 'not-configured', note: '未配置' }));
+    process.exit(0);
+  }
+  if (typeof site[cap] !== 'function') {
+    console.log('__RESULT__' + JSON.stringify({ status: 'unimplemented', note: '未实现' }));
+    process.exit(0);
+  }
+
+  const resolver = makeResolver(profile);
+  const logs = [];
+  const ctx = makeCtx(resolver, logs);
+  const checks = (profile.checks && profile.checks[cap]) || [];
+  const args = (profile.args && profile.args[cap]) || {};
+
+  Promise.resolve()
+    .then(() => site[cap](ctx, args))
+    .then(payload => {
+      const out = {
+        status: 'pass',
+        failed: 0,
+        checks: [],
+        requested: resolver.requested.slice(),
+        missed: resolver.missed.slice(),
+        requestedList: resolver.requested.slice(),
+        logs,
+      };
+      // payload 要跟着回来 —— 父进程的 `--dump` 打的是它。
+      // JSON 能序列化就带着，带不动（循环引用之类）就算了，父进程会判
+      // 「没有可 dump 的输出」，不会崩。
+      try {
+        const json = JSON.stringify(payload);
+        out.payload = json === undefined ? null : JSON.parse(json);
+      } catch (error) {
+        out.payloadNote = 'payload 不能序列化成 JSON：' + error.message;
+      }
+      if (checks.length === 0) {
+        out.status = 'not-configured';
+        out.note = '无断言（只验证能跑）';
+      } else {
+        for (const [label, predicate] of checks) {
+          let ok = false;
+          try {
+            ok = !!predicate(payload || {});
+          } catch (error) {
+            ok = false;
+          }
+          out.checks.push({ label, ok });
+          if (!ok) {
+            out.failed++;
+            if (out.firstFailure === undefined) {
+              out.firstFailure = { label, actual: String(JSON.stringify(payload)).slice(0, 240) };
+            }
+          }
+        }
+        out.status = out.failed === 0 ? 'pass' : 'fail';
+      }
+      console.log('__RESULT__' + JSON.stringify(out));
+      process.exit(0);
+    })
+    .catch(error => {
+      console.log('__RESULT__' + JSON.stringify({
+        status: 'error',
+        error: String((error && error.message) || error).split('\n')[0],
+        requested: resolver.requested.slice(),
+        missed: resolver.missed.slice(),
+        requestedList: resolver.requested.slice(),
+        logs,
+      }));
+      process.exit(0);
+    });
+}
+
+module.exports = {
+  PROFILES,
+  CAPS,
+  FIXTURES,
+  capsFor,
+  describeProfile,
+  listSpiders,
+  loadSpider,
+  runSpider,
+};

@@ -43,7 +43,7 @@ public class NetRouteTest {
         assertFalse(NetRoute.mustProxy("bfikuncdn.com"));
     }
 
-    /** origin 就算适配器忘了写，也必须进代理表 —— 否则整站直连，加源直接超时。 */
+    /** origin 就算源配置忘了写进 net.proxy，也必须进代理表 —— 否则整站直连，加源直接超时。 */
     @Test public void origin兜底进代理表() throws Exception {
         JSONObject net = new JSONObject();
         net.put("proxy", new JSONArray());        // 空表，等于「什么都不代理」
@@ -61,59 +61,5 @@ public class NetRouteTest {
         assertTrue(NetRoute.directOnly("jx.wuzhoupai.com"));
         // 不在表里的保持「看全局开关」，这里不能断言死 —— 但至少不能误判成直连
         assertFalse(NetRoute.directOnly("example.com"));
-    }
-
-    /** 樱花动漫的配置必须真的带上 net.proxy，否则上面那些语义就没生效。 */
-    @Test public void 樱花配置声明了代理域() throws Exception {
-        JSONObject config = YhdmSite.buildConfig("https://yhdm.one");
-        JSONObject net = config.optJSONObject("net");
-        assertNotNull("配置里必须有 net 块", net);
-        JSONArray proxy = net.optJSONArray("proxy");
-        assertNotNull(proxy);
-        boolean hasOrigin = false;
-        for (int i = 0; i < proxy.length(); i++) {
-            if ("yhdm.one".equals(proxy.optString(i))) hasOrigin = true;
-        }
-        assertTrue("net.proxy 里必须有站点入口域", hasOrigin);
-    }
-
-    /**
-     * 旧配置（没有 net 块）必须被适配器补上。
-     *
-     * 2026-10-18 真机踩到：配置是加源那天存的快照，适配器后来加了 net 声明，
-     * 老配置里没有 —— 运行时还是走老规则，CDN 照样被代理拖走。
-     * 症状和「没修」一模一样，而代码看起来完全正确。
-     */
-    @Test public void 旧配置会被补上net块() throws Exception {
-        JSONObject old = YhdmSite.buildConfig("https://yhdm.one");
-        old.remove("net");                       // 模拟 22:42 存下来的那份
-        NetRoute.configure(old.optJSONObject("net"), "");   // 没补之前：未声明
-        assertFalse(NetRoute.declared());
-
-        new YhdmSite().patch(old);               // SiteProfile 构造时会调这个
-        assertNotNull("适配器必须补上 net 块", old.optJSONObject("net"));
-
-        NetRoute.configure(old.optJSONObject("net"), "https://yhdm.one");
-        assertTrue(NetRoute.declared());
-        assertFalse("入口域走代理", NetRoute.directOnly("yhdm.one"));
-        assertTrue("CDN 直连", NetRoute.directOnly("bfikuncdn.com"));
-    }
-
-    /** 路径模板里的占位符，前端必须都填得上 —— 少一个就是静默空请求。 */
-    @Test public void 路径模板的占位符都能填上() throws Exception {
-        JSONObject config = YhdmSite.buildConfig("https://yhdm.one");
-        JSONObject paths = config.optJSONObject("web").optJSONObject("paths");
-        // 前端 fillTemplate 的参数表（adapters.js apiPathFor 里那个对象）
-        java.util.Set<String> known = new java.util.HashSet<String>(java.util.Arrays.asList(
-                "id", "episode", "keyword", "slug", "cateId", "page", "size"));
-        for (java.util.Iterator<String> it = paths.keys(); it.hasNext(); ) {
-            String key = it.next();
-            String tpl = paths.optString(key, "");
-            java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\{(\\w+)\\}").matcher(tpl);
-            while (m.find()) {
-                assertTrue("web.paths." + key + " 用了未知占位符 {" + m.group(1) + "}",
-                        known.contains(m.group(1)));
-            }
-        }
     }
 }

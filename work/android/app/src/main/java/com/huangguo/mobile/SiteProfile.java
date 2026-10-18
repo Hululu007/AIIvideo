@@ -18,10 +18,6 @@ final class SiteProfile {
     final String origin;
     private final JSONObject rules;
 
-    String rule(String str) {
-        return this.rules.optString(str);
-    }
-
     /**
      * 生产路径：内置模板（assets/site-default.json）+ 用户配置，合并后交给下面那个构造器。
      *
@@ -72,20 +68,8 @@ final class SiteProfile {
         if (!"plain".equals(string) && ((keyBytes("key").length != 16 && keyBytes("key").length != 24 && keyBytes("key").length != 32) || keyBytes("iv").length != 16)) {
             throw new IllegalArgumentException("无效封面密钥或 IV");
         }
-        // 让适配器给旧配置补缺省块（纯本地）。必须在 NetRoute.configure 之前 ——
-        // 它补的正是 net 块，顺序反了就等于没补。
-        String adapterId = jSONObjectMerge.optString("adapter", "");
-        if (adapterId.length() > 0) {
-            SiteAdapter impl = Adapters.byId(adapterId);
-            if (impl != null) {
-                try { impl.patch(jSONObjectMerge); } catch (Throwable e) {
-                    UserSource.log("适配器补配置失败（" + adapterId + "）：" + e);
-                }
-            }
-        }
-
         // 网络路由跟着源走。这是整个 App 里唯一一处「当前源长什么样」的组装点，
-        // 不在这儿装就得在每个适配器里各装一遍 —— 那份名单注定漂。
+        // 不在这儿装就得在每个源里各装一遍 —— 那份名单注定漂。
         NetRoute.configure(jSONObjectMerge.optJSONObject("net"), strReplaceAll);
         // 播放层出口的主机白名单同理：原来是两行硬编码在 PlaybackHttpBridge 里，
         // 换个源或换个播放线路就得改 Java。现在由源自己声明（http.hosts），
