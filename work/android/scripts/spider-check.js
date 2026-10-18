@@ -15,8 +15,8 @@
  *
  * ## 用法
  *
- *   node scripts/spider-check.js assets/spiders/yhdm.js
- *   node scripts/spider-check.js assets/spiders/yhdm.js --dump home   # 看原始输出
+ *   node scripts/spider-check.js app/src/test/resources/spiders/yhdm.js
+ *   node scripts/spider-check.js app/src/test/resources/spiders/yhdm.js --dump home   # 看原始输出
  *
  * 退出码：0 全过 / 1 有断言失败 / 2 环境问题（文件不存在、spider 抛错）
  */

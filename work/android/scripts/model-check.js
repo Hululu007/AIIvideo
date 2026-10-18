@@ -33,7 +33,7 @@ const vm = require('vm');
 
 const HERE = __dirname;
 const MODEL_PATH = path.resolve(HERE, '../app/src/main/assets/model.js');
-const SPIDER_PATH = path.resolve(HERE, '../app/src/main/assets/spiders/yhdm.js');
+const SPIDER_PATH = path.resolve(HERE, '../app/src/test/resources/spiders/yhdm.js');
 const FIXTURES = path.resolve(HERE, '../app/src/test/resources/yhdm');
 
 /**

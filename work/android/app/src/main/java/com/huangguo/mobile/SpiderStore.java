@@ -45,12 +45,6 @@ final class SpiderStore {
 
     private static final String TAG = "HG.Spider";
 
-    /** 热更包里源所在的位置，相对 {@code currentUiDir()}。 */
-    private static final String HOT_SUBDIR = "spiders";
-
-    /** APK assets 里的源目录。 */
-    private static final String ASSET_DIR = "spiders";
-
     /**
      * 用户自己装的源（应用私有目录下的 {@code files/spiders/}）。
      *
@@ -267,65 +261,25 @@ final class SpiderStore {
 
     // ── 扫描 ──────────────────────────────────────────────────────────
 
+    /**
+     * 现在只有一个来源：**用户自己装的**。
+     *
+     * <p>2026-10-19 撤掉了另外两条（热更包 {@code ui/spiders/}、APK assets
+     * {@code spiders/}）。留着它们的时候，「这个源哪来的」每加一个源都要解释一遍，
+     * 而且三条来源的优先级规则会咬人：用户装了 v1、热更推了 v2，谁赢？
+     * 现在答案只有一句：谁装的就是谁的。
+     *
+     * <p>代价是出厂不带任何源 —— 这是有意的，和「不带任何内容」是同一条线：
+     * 壳只提供运行环境，源由用户自己决定装什么。
+     */
     private static List<Entry> scan(Context ctx) {
         List<Entry> out = new ArrayList<Entry>();
-        Set<String> seen = new HashSet<String>();
-
-        // ① 用户装的（优先级最高）
-        File installed = installDir(ctx);
-        File[] userFiles = installed.listFiles();
-        if (userFiles != null) {
-            Arrays.sort(userFiles, FILE_BY_NAME);
-            for (File f : userFiles) {
-                Entry e = fromFile(f, "user");
-                if (e == null) continue;
-                out.add(e);
-                seen.add(e.id);
-            }
-        }
-
-        // ② 热更包
-        File hotUi = null;
-        try {
-            hotUi = HotUpdateManager.get(ctx).currentUiDir();
-        } catch (Throwable t) {
-            // 热更层坏了不该让所有源一起消失：下面还有 assets 兜底。
-            Log.w(TAG, "热更目录读不到，回落到 assets：" + t);
-        }
-        if (hotUi != null) {
-            File[] files = new File(hotUi, HOT_SUBDIR).listFiles();
-            if (files != null) {
-                Arrays.sort(files, FILE_BY_NAME);
-                for (File f : files) {
-                    Entry e = fromFile(f, "hot");
-                    if (e == null) continue;
-                    out.add(e);
-                    // 同 id 的 assets 版本不再列：生效的是热更那份，列两遍会让
-                    // 界面上出现两个同名源，用户没法判断哪个是真的。
-                    seen.add(e.id);
-                }
-            }
-        }
-
-        String[] names = null;
-        try {
-            names = ctx.getAssets().list(ASSET_DIR);
-        } catch (Throwable t) {
-            Log.w(TAG, "assets/" + ASSET_DIR + " 读不到：" + t);
-        }
-        if (names != null) {
-            Arrays.sort(names);
-            for (String name : names) {
-                if (!name.endsWith(".js")) continue;
-                Entry e = fromAsset(ctx, name);
-                if (e == null) continue;
-                if (seen.contains(e.id)) {
-                    Log.d(TAG, "spider " + e.id + " 已被更高优先级的来源提供（用户装 > 热更 > assets），assets 里的那份忽略");
-                    continue;
-                }
-                out.add(e);
-                seen.add(e.id);
-            }
+        File[] files = installDir(ctx).listFiles();
+        if (files == null) return out;
+        Arrays.sort(files, FILE_BY_NAME);
+        for (File f : files) {
+            Entry e = fromFile(f, "user");
+            if (e != null) out.add(e);
         }
         return out;
     }
@@ -354,17 +308,6 @@ final class SpiderStore {
         return e;
     }
 
-    private static Entry fromAsset(Context ctx, String name) {
-        if (!name.endsWith(".js")) return null;
-        String src;
-        try {
-            src = readFully(ctx.getAssets().open(ASSET_DIR + "/" + name));
-        } catch (Throwable t) {
-            return rejected(name, "apk", "读不出来：" + t);
-        }
-        return parse(src, "apk", name);
-    }
-
     // ── 元信息 ────────────────────────────────────────────────────────
 
     /** 一个源的描述。字段都是「读文件就能知道」的那些，没有一个需要执行。 */
@@ -379,12 +322,12 @@ final class SpiderStore {
         String fileName = "";
         File file;
 
-        /** 热更有文件就用文件，否则回落到 assets 里的同名条目。 */
+        /** 源永远来自磁盘上那个文件（用户装的）。 */
         String readSource(Context ctx) throws IOException {
-            if (file != null && file.isFile()) {
-                return readFully(new FileInputStream(file));
+            if (file == null || !file.isFile()) {
+                throw new IOException("源文件不见了：" + fileName);
             }
-            return readFully(ctx.getAssets().open(ASSET_DIR + "/" + fileName));
+            return readFully(new FileInputStream(file));
         }
     }
 
