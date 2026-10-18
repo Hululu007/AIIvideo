@@ -44,18 +44,18 @@
 
 ## 安装
 
-前往 [Releases](https://github.com/zhaoruizhe81/AIIvideo/releases/latest) 下载 APK（约 7.9 MB，Android 8.0 及以上）。装完填一个源配置地址就能用。
+前往 [Releases](https://github.com/zhaoruizhe81/AIIvideo/releases/latest) 下载 APK（约 47 MB，Android 8.0 及以上）。装完填一个源配置地址就能用。
 
 配置从哪来：自己写一份，或者用别人分享的。格式看 [站点配置参考](docs/站点配置参考.md) —— 完整字段表、响应形状、三道校验的报错对照，以及一份能直接抄的最小配置。
 
 设置里的「恢复出厂设置」会退出登录、清掉片单/缓存/内容源/代理，重启落回「设置源」那一屏。账号和云端片单不动，重新登录就回来。
 
-> **仓库里不放 APK。** 二进制不进 git 历史（每发一版多 8 MB，删不掉），而且安装包里带着账号服务器的实际地址 —— 放 Releases 至少是个显式动作，不是「clone 一下就有了」。
+> **仓库里不放 APK。** 二进制不进 git 历史（每发一版多 47 MB，删不掉），而且安装包里带着账号服务器的实际地址 —— 放 Releases 至少是个显式动作，不是「clone 一下就有了」。
 
 ## 许可与致谢
 
 - 源码以 [GPL-3.0](LICENSE) 许可证开源。
-- 应用外壳基于一个已有的安卓应用重打包改造，改造部分全部以补丁集形式维护。
+- 应用外壳基于一个已有的安卓应用改造。早期以补丁集形式维护，2026-10-17 起是独立的 Gradle 源码工程。
 - 「壳 + 自带源」这个交互范式来自 [TVBox](https://github.com/o0HalfLife0o/TVBoxOSC) 一系。
 
 ## 构建
@@ -64,7 +64,7 @@
 
 ```bash
 cd work/android
-./scripts/build.sh verify    # 清空重建 + 42 个单测 + 断言 APK
+./scripts/build.sh verify    # 清空重建 + 126 个单测 + 断言 APK
 ./scripts/build.sh install   # 构建 → 装真机 → 冷启动 → 截图
 ```
 
@@ -72,5 +72,5 @@ cd work/android
 [`keystore.properties.example`](work/android/keystore.properties.example)（密钥不入库）。
 
 架构说明、桥指令清单、测试与踩过的坑见 [`work/android/README.md`](work/android/README.md)；
-业务与协议层面（账号后端、播放器、热更通道）见 [开发说明](docs/开发说明.md)
-—— 注意那篇的「发版清单」「目录结构」等节描述的是旧链路，开头有说明。
+业务与协议层面（账号后端、播放器、热更通道、发版流程）见 [开发说明](docs/开发说明.md)；
+热更怎么发见 [热更新说明](docs/热更新说明.md)。

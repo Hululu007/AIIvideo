@@ -8,17 +8,17 @@
 
 ```bash
 cd work/android
-./gradlew :app:assembleRelease      # 出 app-arm64-v8a-release.apk（约 56 MB）
+./gradlew :app:assembleRelease      # 出 app-arm64-v8a-release.apk（约 47 MB）
 ./gradlew :app:assembleDebug        # debug 包
 ./gradlew :app:compileDebugJavaWithJavac   # 只验编译，秒级
-./gradlew :app:testDebugUnitTest           # 单元测试，42 个用例
+./gradlew :app:testDebugUnitTest           # 单元测试，126 个用例
 ```
 
 或者用脚本（推荐，日志更清楚）：
 
 ```bash
 ./scripts/build.sh check      # 编译 + 资源 + assets
-./scripts/build.sh test       # 42 个单元测试
+./scripts/build.sh test       # 126 个单元测试
 ./scripts/build.sh build      # 出 release APK
 ./scripts/build.sh install    # 构建 → 装真机 → 冷启动 → 截图
 ./scripts/build.sh verify     # 清空重建 + 测试 + 断言 APK 内容
@@ -39,11 +39,14 @@ adb shell am start -n com.huangguo.mobile/.MainActivity
 ```
 work/android/
 ├── app/src/main/
-│   ├── java/com/huangguo/mobile/     26 个类
+│   ├── java/com/huangguo/mobile/     36 个类
 │   ├── assets/                        前端（7000+ 行 JS，全部自有）
+│   │   ├── free-nodes.json            内置免费节点池（可热更新，见 NodesFeed）
+│   │   └── hot-update-public.pem      热更验签公钥（私钥不入库）
 │   ├── res/                           只有自己的资源（图标、主题、CSP 配置）
 │   └── AndroidManifest.xml            40 行
 ├── scripts/gen-web-config.py          site-default.json → site-web.js
+├── publish-nodes.sh                   发布节点池：校验（+ 可选 commit/push）
 ├── keystore/                          本地签名（git 忽略）
 └── FIX_RULES.md                       反编译产物的修复规则（历史参考）
 ```
@@ -101,6 +104,22 @@ jadx 版的 return 写成了 `new WebResourceResponse(str2, ...)` —— **所�
 `/* JADX WARN: Failed to restore switch over string */` 警告，看到这句就要
 逐分支对照 smali，不能信任生成的 Java 控制流。
 
+## 另一个真实的 bug：热更从来没生效过（2026-10-18 修）
+
+`HotUpdateManager.unpack()` 把资源包（zip 字节）写进了 `envelope.json`，而
+`metadata()` 又拿这个文件去 `verifyEnvelope()` —— 对一堆 zip 字节做 JSON 解析，
+必然抛异常。
+
+后果不是「热更失败」，是 `beginSession()` 每次都走 catch：新版本被标成 `blocked`，
+`active` 也被清掉，最后 `load(0)` 回内置。表现是**下载了、提示了「下次启动生效」、
+重启之后永远是内置版本**，而且一条错误日志都不打。磁盘上那个 `active` revision
+是旧 apktool 版留下的，所以从 Gradle 工程重建之后就没人发现这条路是断的。
+
+**这类错误的特征**：反编译/重写时把两个 `byte[]` 参数搞混了（一个信封、一个包），
+类型一样、编译一样过。修的时候顺手在 `beginSession` 的四个分支各加了一行
+`Log.d("AIIvideo", "[hot] ...")` —— 一个「静默工作、静默失败」的子系统，没有
+日志就只能靠猜。
+
 ## 桥指令注册表
 
 `Bridge.dispatch()` 原来是**两段嵌套 switch**：`switch (str.hashCode())` 里 40 个
@@ -153,15 +172,21 @@ curl -s http://127.0.0.1:9222/json   # 取 webSocketDebuggerUrl
 
 ## 测试
 
-42 个 JUnit 用例，全部在 JVM 上跑，不需要设备，秒级。
+126 个 JUnit 用例，全部在 JVM 上跑，不需要设备，秒级。
 
 | 测试类 | 用例 | 测什么 |
 |---|---|---|
-| `UserSourceTest` | 15 | 用户填的源配置能否通过校验，以及拒绝理由是否可读 |
+| `ProxyCoreTest` | 30 | 内置核心的生命周期、端口分配、节点 JSON |
 | `Hanime1AdapterTest` | 17 | HTML 解析（首页/分类/搜索/详情/标签面板/播放直链） |
+| `UserSourceTest` | 15 | 用户填的源配置能否通过校验，以及拒绝理由是否可读 |
+| `SubscriptionTest` | 15 | 订阅解析（裸列表 / base64 / 拒绝 YAML）+ 测速结果排序 |
+| `ShareLinkTest` | 15 | 分享链接解析：vmess / vless / trojan / ss / 裸代理 |
+| `NodesFeedTest` | 11 | 节点池热更新的准入校验（劫持页、半截文件、全是不支持的协议） |
 | `ProxyParseTest` | 10 | 代理串解析：哪些能认、哪些返回 null |
+| `UpdateMirrorTest` | 7 | 更新清单取 versionCode 最大的那份，坏数据跳过 |
+| `EffectiveProxyTest` | 6 | 内置核心与用户手填地址的优先级 |
 
-`./scripts/build.sh verify` 会连测试一起跑，42 个不过就不出包。
+`./scripts/build.sh verify` 会连测试一起跑，不过就不出包。
 
 ### 两个必须知道的坑
 
@@ -184,17 +209,21 @@ cp *.html ../../../android/app/src/test/resources/
 全部集中在 `Endpoints.java`，业务类里不再出现字符串。换域名只改这一个文件。
 
 ```java
-Endpoints.API_BASE        // https://149.104.21.177.sslip.io/api/
-Endpoints.HOT_BASE        // .../hot
-Endpoints.HOT_INDEX       // .../hot/hot-update.json
-Endpoints.UPDATES_BASE    // .../updates
-Endpoints.RELEASE_BASE    // .../updates/
-Endpoints.UPDATE_MANIFEST // 三个镜像的 JSON 数组，按序试
+Endpoints.API_BASE        // https://149.104.21.177.sslip.io/api/   账号服务，跑在自己的机器上
+Endpoints.UPDATE_MANIFEST // 三条 gh 镜像的 JSON 数组，逐个拉、取 versionCode 最大的
+Endpoints.hotIndexUrls()  // 三条候选，带时间戳查询串绕 CDN
+Endpoints.nodesUrls()     // 三条候选，免费节点池
+Endpoints.mirrorsOf(url)  // 给 GitHub 地址派生镜像候选（包下载用）
+Endpoints.releaseUrl()    // 清单没给 urls 时的兜底，拼 GitHub Releases
 ```
 
 原来散在 `HuangGuoApp`、`AccountService`（注释）、`HotUpdateManager`、
 `UpdateManager`（两处）—— 换一次要改五处，漏一处就是线上半瘫：
 可能热更拉得到、但账号登不上。
+
+**2026-10-18 起「分发」和「账号」分家了。** 账号 API 必须跑在自己的服务器上
+（有服务端逻辑）；热更清单、热更包、APK 清单、免费节点池这四样是纯静态文件，
+全部搬进 GitHub 仓库 + gh 镜像。理由见 `Endpoints` 里的注释。
 
 ## 还没做的
 
