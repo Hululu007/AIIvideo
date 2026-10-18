@@ -1,15 +1,15 @@
 {
-  "versionName": "1.0.25",
-  "tag": "v1.0.25",
-  "versionCode": 10025,
-  "apk": "AIIvideo-v1.0.25-release.apk",
+  "versionName": "1.0.26",
+  "tag": "v1.0.26",
+  "versionCode": 10026,
+  "apk": "AIIvideo-v1.0.26-release.apk",
   "urls": [
-    "https://gh-proxy.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.25/AIIvideo-v1.0.25-release.apk",
-    "https://ghfile.geekertao.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.25/AIIvideo-v1.0.25-release.apk",
-    "https://gh.dpik.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.25/AIIvideo-v1.0.25-release.apk",
-    "https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.25/AIIvideo-v1.0.25-release.apk"
+    "https://gh-proxy.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.26/AIIvideo-v1.0.26-release.apk",
+    "https://ghfile.geekertao.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.26/AIIvideo-v1.0.26-release.apk",
+    "https://gh.dpik.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.26/AIIvideo-v1.0.26-release.apk",
+    "https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.26/AIIvideo-v1.0.26-release.apk"
   ],
-  "sha256": "d7d71a441a6aca29c693fc28ea7dd5834278d4d8ac969f163b09b43d6d15102a",
-  "size": 48973375,
-  "notes": "适配器层重构：站点识别/分流/校验/白名单收成一份注册表，加站点只改一处。新增 OpenList（asmrgay.com，文件站，卡片=目录、伪装扩展名的 MPEG-TS 视频按体积放行）与 91porn（901.26702.app，补站点识别、修中文搜索）。mrds66 修 UA 被挡、封面 AES、简介残标签。免费节点清空旧 178 条，换成订阅里逐条实测可用的 7 条 HTTPS 代理；订阅与节点池下载改走代理。"
+  "sha256": "7b25d8de245ab49f54c1115be52591dcb32c0b12272dc94924d6bcc4207184f5",
+  "size": 48973975,
+  "notes": "修源市场清单的识别与报错：贴 market.json 这类清单时直接列出可勾选的源，不再先失败一次再猜形状；清单拉不下来时说清是超时、404 还是格式不对，而不是甩一句「认不出这是什么配置」。市场缩到 2 条影视线路。"
 }
