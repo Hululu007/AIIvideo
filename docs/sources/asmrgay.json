@@ -1,0 +1,39 @@
+{
+  "_note": "asmrgay.com（OpenList 文件站）的手工源配置。App 的『设置源』可以直接填这个文件的 raw 地址；正常流程是填站点根 https://www.asmrgay.com/ 由 OpenListSite 自动生成，这份是给「第一次配置时站点直连不通、但 GitHub 通」的场景用的。",
+  "adapter": "openlist",
+  "origin": "https://www.asmrgay.com",
+  "cover": { "mode": "plain", "allowedHosts": ["www.asmrgay.com"], "hostRewrites": {} },
+  "web": {
+    "firstPageSize": 24,
+    "pageSize": 30,
+    "paths": {
+      "home": "/api/home",
+      "detail": "/api/videos/{id}",
+      "episode": "/api/videos/{id}/play?ep={episode}",
+      "search": "/api/search?q={keyword}&page={page}",
+      "category": "/api/videos?cate_id={cateId}&page={page}",
+      "tags": "/api/tags",
+      "tag-list": "/api/videos?cate_id={slug}&page={page}"
+    },
+    "categories": { "asmr": "/asmr", "asmr2": "/asmr2", "asmr4": "/asmr4", "asmr6": "/asmr6" },
+    "ui": {
+      "tabs": [
+        { "key": "asmr", "label": "asmr", "icon": "film" },
+        { "key": "asmr2", "label": "asmr2", "icon": "sparkle" },
+        { "key": "asmr4", "label": "asmr4", "icon": "tv" },
+        { "key": "asmr6", "label": "asmr6", "icon": "grid" }
+      ],
+      "categoryIds": { "asmr": ["asmr"], "asmr2": ["asmr2"], "asmr4": ["asmr4"], "asmr6": ["asmr6"] },
+      "categoryLabels": { "asmr": ["asmr"], "asmr2": ["asmr2"], "asmr4": ["asmr4"], "asmr6": ["asmr6"] },
+      "categoryTitles": { "asmr": "asmr", "asmr2": "asmr2", "asmr4": "asmr4", "asmr6": "asmr6" },
+      "categoryLeads": {
+        "asmr": "目录 /asmr 下的作品。",
+        "asmr2": "目录 /asmr2 下的作品。",
+        "asmr4": "目录 /asmr4 下的作品。",
+        "asmr6": "目录 /asmr6 下的作品。"
+      },
+      "popularTags": [["asmr", "asmr"], ["asmr2", "asmr2"]],
+      "publicPopularTags": []
+    }
+  }
+}
