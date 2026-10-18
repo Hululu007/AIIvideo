@@ -329,8 +329,60 @@ public final class AiiHttp {
     }
 
     private static byte[] getWith(OkHttpClient http, String url, SiteProfile profile) throws Exception {
+        return getWith(http, url, null, profile);
+    }
+
+    /**
+     * 带调用方自定义头的 GET。**走和适配器同一条路由**（{@link NetRoute} + 自洽性兜底）。
+     *
+     * <p>存在的理由：spider 运行时（{@code __spider:net}）要能带 Referer / UA 抓页面，
+     * 而 {@code getRaw} 那一族用的是 {@link #effectiveRoute()}（全局代理设置），
+     * 完全不知道「当前源声明哪些域该走代理」。2026-10-19 真机就栽在这上面：
+     * 内置核心还没起来的那 0.7 秒里，spider 的 net 按全局设置判成直连，直连撞上
+     * 被污染的 IPv6，一个 60 秒的超时串烧（{@code failed to connect to
+     * yhdm.one/2001::caa0:…}）。
+     *
+     * <p>所以这条走 {@link #client(SiteProfile)} + {@code NetRoute.mustProxy} 的
+     * 自洽补丁，和适配器取数据一模一样 —— 路由只该有一个真相。
+     */
+    static byte[] getRaw(String url, java.util.Map<String, String> headers, int timeoutSeconds,
+                         SiteProfile profile) throws Exception {
+        log("GET " + hostOfUrl(url) + pathOfUrl(url));
+        OkHttpClient http = client(profile);
+        if (timeoutSeconds > 0) {
+            OkHttpClient.Builder timed = new OkHttpClient.Builder()
+                    .connectTimeout(timeoutSeconds, TimeUnit.SECONDS)
+                    .readTimeout(timeoutSeconds, TimeUnit.SECONDS);
+            if (http.dns() != null) timed.dns(http.dns());
+            if (http.proxy() != null) timed.proxy(http.proxy());
+            if (http.proxyAuthenticator() != null) timed.proxyAuthenticator(http.proxyAuthenticator());
+            http = timed.build();
+        }
+        // h2 被中途掐断就降级 h1 重试一次 —— 和 fetchUncached 同一条规矩。
+        // 出口节点抖的时候实测就是这个形态：18 秒后 Connection reset，重试才过。
+        try {
+            return getWith(http, url, headers, profile);
+        } catch (IOException e) {
+            if (!isStreamBreak(e)) throw e;
+            log("HTTP/2 被重置，降级 HTTP/1.1 重试 " + pathOfUrl(url));
+            OkHttpClient.Builder h1 = new OkHttpClient.Builder()
+                    .connectTimeout(http.connectTimeoutMillis(), TimeUnit.MILLISECONDS)
+                    .readTimeout(http.readTimeoutMillis(), TimeUnit.MILLISECONDS);
+            if (http.dns() != null) h1.dns(http.dns());
+            if (http.proxy() != null) h1.proxy(http.proxy());
+            if (http.proxyAuthenticator() != null) h1.proxyAuthenticator(http.proxyAuthenticator());
+            h1.protocols(java.util.Collections.singletonList(okhttp3.Protocol.HTTP_1_1));
+            return getWith(h1.build(), url, headers, profile);
+        }
+    }
+
+    private static byte[] getWith(OkHttpClient http, String url,
+                                  java.util.Map<String, String> headers, SiteProfile profile) throws Exception {
         Request.Builder builder = new Request.Builder().url(url);
         applyHeaders(builder, profile, url);
+        if (headers != null) {
+            for (java.util.Map.Entry<String, String> e : headers.entrySet()) builder.header(e.getKey(), e.getValue());
+        }
         // 不要压缩。这条链路本来就慢，多一次解压不值当，也让响应体大小可预期。
         builder.header("Accept-Encoding", "identity");
         // 分流：直连表里的域名现拼一个不带代理的 client（client(profile) 是按

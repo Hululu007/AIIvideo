@@ -204,11 +204,30 @@ public final class MainActivity extends Activity {
             if (asset == null || asset.length() == 0) asset = "spiders/_dev-hello.js";
             int timeout = getIntent().getIntExtra("spider_timeout", 15000);
             final String chosen = asset;
+            // --es spider_id yhdm 走 SpiderStore（真源、真网络），否则跑 assets 里的自检样本。
+            final String spiderId = getIntent().getStringExtra("spider_id");
+            final String cap = getIntent().getStringExtra("spider_cap");
+            final String spiderArgs = getIntent().getStringExtra("spider_args");
             // 第四个数：第一次失败之后再跑一次。超时把宿主销毁了，
             // 这一条验的就是「下一次调用能重新建页」——不然用户点第二次还是坏的。
             final String after = getIntent().getStringExtra("spider_after");
             final int afterTimeout = getIntent().getIntExtra("spider_after_timeout", 15000);
             this.requests.execute(() -> {
+                if (spiderId != null && spiderId.length() > 0) {
+                    try {
+                        JSONObject args = spiderArgs == null || spiderArgs.length() == 0
+                                ? new JSONObject() : new JSONObject(spiderArgs);
+                        long t0 = System.currentTimeMillis();
+                        JSONObject payload = SpiderStore.call(this, spiderId,
+                                cap == null || cap.length() == 0 ? "home" : cap, args, timeout);
+                        Log.i("HG.Spider", "真源 " + spiderId + "." + cap + " ok "
+                                + (System.currentTimeMillis() - t0) + "ms payload="
+                                + payload.toString().substring(0, Math.min(600, payload.toString().length())));
+                    } catch (Throwable e) {
+                        Log.e("HG.Spider", "真源调用失败：" + e);
+                    }
+                    return;
+                }
                 try {
                     runSpiderDemo(chosen, timeout);
                 } catch (Throwable e) {
@@ -1012,10 +1031,27 @@ public final class MainActivity extends Activity {
         // 装进宿主页跑一次 home，返回它给的 payload。阶段 1 接上热更之后，调用方从
         // 「自检」换成「当前源」，这条指令的形状不用变。
         this.commands.put("spider", jSONObject -> {
-            String op = jSONObject.optString("op", "demo");
-            if (!"demo".equals(op)) throw new IllegalArgumentException("spider 运行时的 op 还不支持：" + op);
-            return runSpiderDemo(jSONObject.optString("asset", "spiders/_dev-hello.js"),
-                    jSONObject.optInt("timeoutMs", 15000));
+            String op = jSONObject.optString("op", "list");
+            if ("list".equals(op)) {
+                // 源清单：热更 ui/spiders/ 优先，APK assets 兜底。每项都带 ok/reason，
+                // 被 ABI 门禁拒掉的那些也在里面 —— 让页面能说清「为什么这个源用不了」。
+                JSONObject out = new JSONObject();
+                JSONArray arr = new JSONArray();
+                for (JSONObject one : SpiderStore.list(this)) arr.put(one);
+                out.put("spiders", arr);
+                out.put("abi", SpiderRuntime.ABI);
+                return out;
+            }
+            if ("call".equals(op)) {
+                return SpiderStore.call(this, jSONObject.optString("id"), jSONObject.optString("cap", "home"),
+                        jSONObject.optJSONObject("args") == null ? new JSONObject() : jSONObject.optJSONObject("args"),
+                        jSONObject.optInt("timeoutMs", 15000));
+            }
+            if ("demo".equals(op)) {
+                return runSpiderDemo(jSONObject.optString("asset", "spiders/_dev-hello.js"),
+                        jSONObject.optInt("timeoutMs", 15000));
+            }
+            throw new IllegalArgumentException("spider 运行时的 op 还不支持：" + op);
         });
         this.commands.put("theme", jSONObject -> {
             String strOptString4 = jSONObject.optString("mode");

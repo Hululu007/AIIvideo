@@ -227,6 +227,31 @@ final class HotUpdateManager {
         return profile;
     }
 
+    /**
+     * 当前生效的热更包 ui 目录；没有生效包（或目录不在）返回 null。
+     *
+     * <p>给 {@link SpiderStore} 读 {@code ui/spiders/*.js} 用。
+     *
+     * <p><b>为什么是包内可见而不是 public</b>：它暴露的是一个磁盘布局
+     * （{@code root/<revision>/ui}），那是打包格式的实现细节，不是对外承诺。
+     * 做成 public 就等于允许包外代码把路径钉死，哪天换布局会一起崩；包内可见把
+     * 影响面限制在同一个包里的两个类。
+     *
+     * <p><b>为什么现读 state.json 而不是缓存</b>：热更在运行中会换 active
+     * （pending 转正、trial 回滚），缓存一个 File 会让 spider 继续读上一版目录，
+     * 表现是「界面更新了但源还是旧的」。
+     */
+    synchronized File currentUiDir() {
+        try {
+            long active = state().optLong("active");
+            if (active == 0) return null;
+            File ui = new File(directory(active), "ui");
+            return ui.isDirectory() ? ui : null;
+        } catch (Throwable e) {
+            return null;
+        }
+    }
+
     synchronized Session beginSession() {
         long jOptLong;
         boolean z;

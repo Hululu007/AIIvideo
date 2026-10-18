@@ -39,6 +39,9 @@ window.__spider = {
     }
   }
 };
+// ctx.net(…) / ctx.log(…) 只是 call 的糖：spider 两种写法都行，真机和离线沙箱里一致。
+window.__spider.net = function (args) { return window.__spider.call('net', args); };
+window.__spider.log = function (args) { return window.__spider.call('log', args); };
 // 一次能力调用只走这条路：永远 resolve，成功 {ok:true,payload}，失败 {ok:false,error:字符串}。
 window.__spiderRun = function (cap, argsJson) {
   return Promise.resolve()

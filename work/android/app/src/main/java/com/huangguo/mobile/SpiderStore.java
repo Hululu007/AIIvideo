@@ -1,0 +1,547 @@
+package com.huangguo.mobile;
+
+import android.content.Context;
+import android.util.Log;
+
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * spider 源仓库：先找热更包里的 {@code ui/spiders/*.js}，再回落到 APK 的
+ * {@code assets/spiders/*.js}，并在这一层做 ABI 门禁。
+ *
+ * <p>阶段 0 的源是硬编码读 assets 的（`_dev-hello.js`）。阶段 1 让它来自热更包 ——
+ * 那才是「加源不发版」真正落地的一步：新源写一份 JS、打进热更包，壳不用动。
+ *
+ * <p>══ 为什么元信息靠正则、不靠执行 ══
+ * 要拿 {@code id/version/requires} 只需要读文件头。执行一遍得先建 WebView（几百毫秒
+ * 加一个渲染进程），而这一步在「列出所有源」时会对每个文件都做一次 —— 那是给自己
+ * 造一个卡顿。所以这里只用正则抓字面量；抓不到就明确拒绝，不猜。
+ *
+ * <p>══ ABI 门禁为什么在这一层，而不是在 JS 里 ══
+ * 老壳装上新源时，唯一的正确行为是<b>当场说清楚</b>「这个源要用新版应用」。
+ * 放进 JS 里判断就变成了「跑起来之后才发现」，而那时用户已经看到空白页了。
+ * 所以门禁在读文件的时候就判，判不过的源连注入都不做。
+ *
+ * <p>没有缓存：热更会换目录、换文件，缓存要配一套失效逻辑，而失效逻辑写错的症状
+ * （「源更新了但界面还是旧的」）极难查。一次扫描读几个 10KB 的文件，不值得为它
+ * 引入那类 bug。
+ */
+final class SpiderStore {
+
+    private static final String TAG = "HG.Spider";
+
+    /** 热更包里源所在的位置，相对 {@code currentUiDir()}。 */
+    private static final String HOT_SUBDIR = "spiders";
+
+    /** APK assets 里的源目录。 */
+    private static final String ASSET_DIR = "spiders";
+
+    /**
+     * 单份源码的上限 2MB。
+     *
+     * <p>正常的源是几 KB 到几十 KB；2MB 已经能装下最离谱的站。设上限是为了防
+     * 「热更包里混进一个大文件把内存吃光」—— 热更包是有签名的，但它也可能是
+     * 发版时手滑打进去的东西，而这道闸门只要一行。
+     */
+    private static final long MAX_SOURCE_BYTES = 2 * 1024 * 1024;
+
+    private static final Comparator<File> FILE_BY_NAME = new Comparator<File>() {
+        @Override
+        public int compare(File a, File b) {
+            return a.getName().compareTo(b.getName());
+        }
+    };
+
+    private SpiderStore() {
+    }
+
+    // ── 对外入口 ──────────────────────────────────────────────────────
+
+    /**
+     * 列出所有能找到的源（含被拒绝的），按「热更在前、assets 在后」的顺序。
+     *
+     * <p>被拒绝的源也列出来，而且带 reason：设置页要能告诉用户「这个源要新版应用」，
+     * 而不是让它凭空消失 —— 消失的话用户只会觉得「热更没生效」。
+     *
+     * @return 每项 {@code {id, name, version, requires, source, ok, reason}}，
+     *         {@code source} 取值 {@code "hot"} / {@code "apk"}
+     */
+    static List<JSONObject> list(Context ctx) {
+        List<Entry> entries = scan(ctx);
+        List<JSONObject> out = new ArrayList<JSONObject>(entries.size());
+        for (Entry e : entries) {
+            try {
+                out.add(new JSONObject()
+                        .put("id", e.id)
+                        .put("name", e.name)
+                        .put("version", e.version)
+                        .put("requires", e.requires)
+                        .put("source", e.source)
+                        .put("ok", e.ok)
+                        .put("reason", e.reason));
+            } catch (Throwable t) {
+                // JSONObject.put 只会在 key 为 null 时抛，这里不可能；真抛了也别让
+                // 一个条目毁掉整个列表。
+                Log.w(TAG, "spider 条目编码失败：" + e.id);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * 调用某个源的一个能力：找到源码 → 交给 {@link SpiderRuntime} 跑。
+     *
+     * <p><b>后台线程调用</b>（SpiderRuntime 那边要阻塞等 WebView）。
+     *
+     * @throws IOException 找不到源、源被 ABI 门禁拒了、源码读不出来 —— message
+     *                     都是能直接给用户/日志看的那一句
+     */
+    static JSONObject call(Context ctx, String spiderId, String cap,
+                           JSONObject args, int timeoutMs) throws Exception {
+        if (spiderId == null || spiderId.length() == 0) {
+            throw new IOException("没有指定要调用哪个 spider。");
+        }
+        Entry e = find(ctx, spiderId);
+        if (e == null) {
+            throw new IOException("找不到 spider：" + spiderId);
+        }
+        if (!e.ok) {
+            // 门禁的裁决原样往外抛：调用方/日志看到的就是「需要更新版本的应用
+            // （需要 abi 2，当前 1）」这种能直接转述给用户的话。
+            throw new IOException(e.reason);
+        }
+        String source = e.readSource(ctx);
+        if (source == null || source.length() == 0) {
+            throw new IOException("spider 源码是空的：" + spiderId);
+        }
+        Log.i(TAG, "cap=" + cap + " id=" + spiderId + " src=" + e.source
+                + " bytes=" + source.length());
+        return SpiderRuntime.call(ctx, source, cap, args, timeoutMs);
+    }
+
+    // ── 扫描 ──────────────────────────────────────────────────────────
+
+    private static List<Entry> scan(Context ctx) {
+        List<Entry> out = new ArrayList<Entry>();
+        Set<String> seen = new HashSet<String>();
+
+        File hotUi = null;
+        try {
+            hotUi = HotUpdateManager.get(ctx).currentUiDir();
+        } catch (Throwable t) {
+            // 热更层坏了不该让所有源一起消失：下面还有 assets 兜底。
+            Log.w(TAG, "热更目录读不到，回落到 assets：" + t);
+        }
+        if (hotUi != null) {
+            File[] files = new File(hotUi, HOT_SUBDIR).listFiles();
+            if (files != null) {
+                Arrays.sort(files, FILE_BY_NAME);
+                for (File f : files) {
+                    Entry e = fromFile(f);
+                    if (e == null) continue;
+                    out.add(e);
+                    // 同 id 的 assets 版本不再列：生效的是热更那份，列两遍会让
+                    // 界面上出现两个同名源，用户没法判断哪个是真的。
+                    seen.add(e.id);
+                }
+            }
+        }
+
+        String[] names = null;
+        try {
+            names = ctx.getAssets().list(ASSET_DIR);
+        } catch (Throwable t) {
+            Log.w(TAG, "assets/" + ASSET_DIR + " 读不到：" + t);
+        }
+        if (names != null) {
+            Arrays.sort(names);
+            for (String name : names) {
+                if (!name.endsWith(".js")) continue;
+                Entry e = fromAsset(ctx, name);
+                if (e == null) continue;
+                if (seen.contains(e.id)) {
+                    Log.d(TAG, "spider " + e.id + " 由热更包提供，assets 里的那份忽略");
+                    continue;
+                }
+                out.add(e);
+                seen.add(e.id);
+            }
+        }
+        return out;
+    }
+
+    private static Entry find(Context ctx, String spiderId) {
+        for (Entry e : scan(ctx)) {
+            if (spiderId.equals(e.id)) return e;
+        }
+        return null;
+    }
+
+    private static Entry fromFile(File f) {
+        if (!f.isFile() || !f.getName().endsWith(".js")) return null;
+        if (f.length() > MAX_SOURCE_BYTES) {
+            return rejected(f.getName(), "hot",
+                    "文件太大（" + (f.length() / 1024) + "KB），上限 2MB");
+        }
+        String src;
+        try {
+            src = readFully(new FileInputStream(f));
+        } catch (Throwable t) {
+            return rejected(f.getName(), "hot", "读不出来：" + t);
+        }
+        Entry e = parse(src, "hot", f.getName());
+        e.file = f;
+        return e;
+    }
+
+    private static Entry fromAsset(Context ctx, String name) {
+        if (!name.endsWith(".js")) return null;
+        String src;
+        try {
+            src = readFully(ctx.getAssets().open(ASSET_DIR + "/" + name));
+        } catch (Throwable t) {
+            return rejected(name, "apk", "读不出来：" + t);
+        }
+        return parse(src, "apk", name);
+    }
+
+    // ── 元信息 ────────────────────────────────────────────────────────
+
+    /** 一个源的描述。字段都是「读文件就能知道」的那些，没有一个需要执行。 */
+    private static final class Entry {
+        String id;
+        String name;
+        int version;
+        String requires = "";
+        String source = "apk";
+        boolean ok = true;
+        String reason = "";
+        String fileName = "";
+        File file;
+
+        /** 热更有文件就用文件，否则回落到 assets 里的同名条目。 */
+        String readSource(Context ctx) throws IOException {
+            if (file != null && file.isFile()) {
+                return readFully(new FileInputStream(file));
+            }
+            return readFully(ctx.getAssets().open(ASSET_DIR + "/" + fileName));
+        }
+    }
+
+    private static final class Meta {
+        String id;
+        String name;
+        String version;
+        String requires;
+    }
+
+    private static Entry rejected(String fileName, String source, String reason) {
+        Entry e = new Entry();
+        e.fileName = fileName;
+        e.source = source;
+        e.id = baseName(fileName);
+        e.name = e.id;
+        e.ok = false;
+        e.reason = reason;
+        Log.w(TAG, "拒绝 spider " + fileName + "（" + source + "）：" + reason);
+        return e;
+    }
+
+    private static Entry parse(String src, String source, String fileName) {
+        Meta m = metaOf(src);
+        if (m == null || m.id == null || m.id.length() == 0) {
+            return rejected(fileName, source,
+                    "spider 元信息读不出来（找不到 __spiderSite 或里面的 id）");
+        }
+        Entry e = new Entry();
+        e.id = m.id;
+        e.name = m.name == null || m.name.length() == 0 ? m.id : m.name;
+        e.version = parseInt(m.version);
+        e.requires = m.requires == null ? "" : m.requires;
+        e.source = source;
+        e.fileName = fileName;
+
+        String problem = abiProblem(e.requires);
+        if (problem != null) {
+            e.ok = false;
+            e.reason = problem;
+            Log.w(TAG, "拒绝 spider " + e.id + "（" + source + "）：" + problem);
+        }
+        return e;
+    }
+
+    /**
+     * 从源码里抓 {@code __spiderSite = { … }} 里的四个字面量。
+     *
+     * <p>找的是<b>对象字面量本身</b>而不是全文：全文搜 {@code id:} 会命中函数体里
+     * 的 {@code id: row.id} 这种赋值，抓出来是错的值。
+     */
+    private static Meta metaOf(String src) {
+        int open = siteLiteralAt(src);
+        if (open < 0) return null;
+        int close = matchingBrace(src, open);
+        // 花括号配平失败（压缩过、或者正则里写了不配对的 {）时退化成「从 { 起最多
+        // 8KB」：这四个字段按约定都在字面量最前面，够用，而且不会因为一个怪文件
+        // 就把整条链路搞挂。
+        String body = close > open
+                ? src.substring(open, close + 1)
+                : src.substring(open, Math.min(src.length(), open + 8192));
+        Meta m = new Meta();
+        m.id = strField(body, "id");
+        m.name = strField(body, "name");
+        m.version = numField(body, "version");
+        m.requires = strField(body, "requires");
+        return m;
+    }
+
+    /**
+     * 找 {@code __spiderSite = {} 后面那个 '{'} 的位置，跳过注释和字符串。
+     *
+     * <p><b>为什么不能直接 {@code indexOf("__spiderSite")}</b>：源文件开头常有一段
+     * 说明注释，里面本来就会提到这个名字（自检源里就有一句「直接给 __spiderSite
+     * 赋值」）。indexOf 命中的是注释里的那个词，接下来找到的 '{' 就成了旁边某个
+     * 函数体的开头，抓出来的四个字段全是 null —— 这个 bug 在真实文件上是「好源
+     * 被判成元信息读不出来」，而且看不出来为什么。
+     */
+    private static int siteLiteralAt(String src) {
+        final String name = "__spiderSite";
+        int i = 0;
+        int n = src.length();
+        while (i < n) {
+            int next = skipNoiseAt(src, i);
+            if (next != NOT_NOISE) {
+                if (next < 0) return -1;
+                i = next;
+                continue;
+            }
+            if (!src.startsWith(name, i)) {
+                i++;
+                continue;
+            }
+            int j = i + name.length();
+            while (j < n && Character.isWhitespace(src.charAt(j))) j++;
+            if (j < n && src.charAt(j) == '=') {
+                j++;
+                while (j < n && Character.isWhitespace(src.charAt(j))) j++;
+                if (j < n && src.charAt(j) == '{') return j;
+            }
+            i = j;
+        }
+        return -1;
+    }
+
+    /**
+     * 从 {@code open} 这个 '{' 起找配对的那个 '}'。
+     *
+     * <p>注释、字符串、<b>正则字面量</b>都要跳过：源里一个 {@code /title=["']([^"']+)["']/}
+     * 这种正则，里面的引号一旦被当成字符串开头，扫描就会被带偏到文件另一边 ——
+     * 那不是理论风险，yhdm 的第一个版本就踩在这上面（表现为「好源被判成元信息
+     * 读不出来」）。
+     */
+    private static int matchingBrace(String s, int open) {
+        int depth = 0;
+        int i = open;
+        while (i < s.length()) {
+            int next = skipNoiseAt(s, i);
+            if (next == NOT_NOISE) {
+                char c = s.charAt(i);
+                if (c == '{') {
+                    depth++;
+                } else if (c == '}') {
+                    depth--;
+                    if (depth == 0) return i;
+                }
+                i++;
+            } else if (next < 0) {
+                return -1;
+            } else {
+                i = next;
+            }
+        }
+        return -1;
+    }
+
+    /** {@link #skipNoiseAt} 的返回值：i 处不是注释/字符串/正则，照常处理。 */
+    private static final int NOT_NOISE = -2;
+
+    /**
+     * 如果 i 处是注释、字符串或正则字面量的开头，返回它结束后的位置；
+     * 不是这些就返回 {@link #NOT_NOISE}；一直到文件尾都没结束返回 -1。
+     */
+    private static int skipNoiseAt(String s, int i) {
+        int n = s.length();
+        char c = s.charAt(i);
+        if (c == '/' && i + 1 < n) {
+            char d = s.charAt(i + 1);
+            if (d == '/') {
+                int nl = s.indexOf('\n', i);
+                return nl < 0 ? -1 : nl + 1;
+            }
+            if (d == '*') {
+                int end = s.indexOf("*/", i + 2);
+                return end < 0 ? -1 : end + 2;
+            }
+            if (regexAllowedAfter(s, i)) {
+                return skipRegex(s, i);
+            }
+            return NOT_NOISE;                 // 除号
+        }
+        if (c == '\'' || c == '"' || c == '`') {
+            return skipString(s, i);
+        }
+        return NOT_NOISE;
+    }
+
+    /**
+     * 这个 '/' 是正则的开头还是除号？
+     *
+     * <p>看前一个非空白字符：出现在运算符/括号/逗号/分号后面的一定是正则，
+     * 出现在标识符或右括号后面的大概率是除号。JS 本身就得靠上下文判，
+     * 我们只需要「别把正则里的引号当字符串」这一条，这个启发式够用。
+     */
+    private static boolean regexAllowedAfter(String s, int i) {
+        int j = i - 1;
+        while (j >= 0 && Character.isWhitespace(s.charAt(j))) j--;
+        if (j < 0) return true;
+        return "([{,;:=!&|?+-*%~^<>".indexOf(s.charAt(j)) >= 0;
+    }
+
+    /** 跳过 /…/flags。正则不能跨行，遇到换行就是没闭合。 */
+    private static int skipRegex(String s, int start) {
+        int i = start + 1;
+        boolean inClass = false;
+        while (i < s.length()) {
+            char c = s.charAt(i);
+            if (c == '\\') {
+                i += 2;
+                continue;
+            }
+            if (c == '[') {
+                inClass = true;
+            } else if (c == ']') {
+                inClass = false;
+            } else if (c == '/' && !inClass) {
+                return i + 1;
+            } else if (c == '\n') {
+                return -1;
+            }
+            i++;
+        }
+        return -1;
+    }
+
+    /** 返回收尾引号之后的位置；没闭合返回 -1。 */
+    private static int skipString(String s, int start) {
+        char quote = s.charAt(start);
+        int i = start + 1;
+        while (i < s.length()) {
+            char c = s.charAt(i);
+            if (c == '\\') {
+                i += 2;
+                continue;
+            }
+            if (c == quote) return i + 1;
+            i++;
+        }
+        return -1;
+    }
+
+    /**
+     * 抓 {@code key: 'value'} 这类字符串字面量。
+     *
+     * <p>前缀要求一个 {@code , { 空白} 之一，是为了避开 {@code bridgeVersion: 1} 命中
+     * {@code version} 这种情况 —— 不用后行断言是因为这类正则要在最短路径上跑，
+     * 而前缀匹配已经够准。
+     */
+    private static String strField(String body, String key) {
+        Matcher m = Pattern.compile("(?:^|[,{\\s])" + key + "\\s*:\\s*(['\"`])([^'\"`]*)\\1")
+                .matcher(body);
+        return m.find() ? m.group(2) : null;
+    }
+
+    private static String numField(String body, String key) {
+        Matcher m = Pattern.compile("(?:^|[,{\\s])" + key + "\\s*:\\s*(\\d+)").matcher(body);
+        return m.find() ? m.group(1) : null;
+    }
+
+    // ── ABI 门禁 ──────────────────────────────────────────────────────
+
+    /**
+     * requires 与 {@link SpiderRuntime#ABI} 比对。返回 null 表示放行。
+     *
+     * <p>只支持 {@code >=N}：约定里有且只有这一种形状，多支持一种写法就要多维护
+     * 一套解析和一套测试。认不出来的一律<strong>拒绝</strong>而不是放行 ——
+     * 放行一个我们没读懂的版本声明，等于把「老壳跑新源」的风险留在外面。
+     */
+    private static String abiProblem(String requires) {
+        if (requires == null) return null;
+        String text = requires.trim();
+        if (text.length() == 0) return null;
+        if (!text.startsWith(">=")) {
+            return "requires 写法不支持（只支持 >=N）：" + text;
+        }
+        int need;
+        try {
+            need = Integer.parseInt(text.substring(2).trim());
+        } catch (NumberFormatException e) {
+            return "requires 写法不支持（只支持 >=N）：" + text;
+        }
+        if (SpiderRuntime.ABI < need) {
+            return "需要更新版本的应用（需要 abi " + need + "，当前 " + SpiderRuntime.ABI + "）";
+        }
+        return null;
+    }
+
+    // ── 小工具 ────────────────────────────────────────────────────────
+
+    private static int parseInt(String value) {
+        try {
+            return Integer.parseInt(value);
+        } catch (Throwable e) {
+            return 0;
+        }
+    }
+
+    private static String baseName(String fileName) {
+        int dot = fileName.lastIndexOf('.');
+        return dot > 0 ? fileName.substring(0, dot) : fileName;
+    }
+
+    /** 读到底，超过上限直接抛 —— 不截断，截断出来的源码是坏源码，报错更难查。 */
+    private static String readFully(InputStream in) throws IOException {
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream(16 * 1024);
+            byte[] buf = new byte[8192];
+            long total = 0;
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                total += n;
+                if (total > MAX_SOURCE_BYTES) {
+                    throw new IOException("文件超过 2MB 上限");
+                }
+                out.write(buf, 0, n);
+            }
+            return new String(out.toByteArray(), StandardCharsets.UTF_8);
+        } finally {
+            try {
+                in.close();
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+}

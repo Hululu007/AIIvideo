@@ -141,6 +141,14 @@ final class SpiderRuntime {
         /** 注入后从 {@code __spiderSite.hosts} 读出来的一份快照，net 只认这份。 */
         volatile String[] hosts = EMPTY_HOSTS;
 
+        /**
+         * 调用开始那一刻的源配置。net 用它走 {@link NetRoute}（当前源声明的直连/代理
+         * 规则），而不是全局代理设置 —— 两条路由真相并存的话，源声明了走代理而全局
+         * 是直连时，适配器能取到、spider 取不到，症状是「这个源在网页里好好的，
+         * 换成 spider 就打不开」。取不到（没配置）时退回全局，至少不比现在差。
+         */
+        volatile SiteProfile profile;
+
         /** onPageFinished 可能对同一页触发多次（子框架、重定向），注入只做一次。 */
         volatile boolean injected;
 
@@ -198,6 +206,11 @@ final class SpiderRuntime {
 
         final Session s = new Session(cap, spiderSource,
                 args == null ? "{}" : args.toString(), budget);
+        // 当前生效的源配置。取不到就留 null，net 退回全局路由（见 Session.profile）。
+        try {
+            s.profile = HotUpdateManager.get(activity.getApplicationContext()).currentSite();
+        } catch (Throwable ignored) {
+        }
 
         // 排队也算在预算里：等锁等掉的钱不该再从看门狗里另算一份，
         // 否则用户点一下要等 30 秒才看到「超时」。
@@ -271,6 +284,11 @@ final class SpiderRuntime {
             throw new IOException("net 拒绝：主机不在白名单");
         }
 
+        // 打一行路由。spider 这条路最容易出的诊断困境是「App 能取、spider 取不到」，
+        // 而两者差的就是路由决策 —— 不把结论打出来，只能靠猜。
+        UserSource.log("net " + host + " → " + (NetRoute.mustProxy(host) ? "代理" : "直连")
+                + (NetRoute.directOnly(host) ? "（直连表命中）" : ""));
+
         Map<String, String> headers = headersOf(args);
         String method = args.optString("method", "GET").trim().toUpperCase(Locale.ROOT);
         String body = args.isNull("body") ? null : args.optString("body", "");
@@ -282,7 +300,26 @@ final class SpiderRuntime {
             java.nio.charset.Charset charset = charsetOf(args.optString("charset", ""));
             byte[] raw;
             if ("GET".equals(method)) {
-                raw = AiiHttp.getRaw(url, headers, NET_TIMEOUT_S);
+                SiteProfile prof = s.profile;
+                // 重试一次。出口节点抖的时候实测就是这个形态：第一次 15~30 秒后
+                // Connection reset，第二次直接过（App 自己的 /api/home 也是靠
+                // 第二次才成功的，见 00:23:33 那条「预热完成 … 32329ms」）。
+                // 不重试的话 spider 比 App 内在路径更脆，而用户分不清两者的差别。
+                raw = null;
+                IOException last = null;
+                for (int attempt = 0; attempt < 2 && raw == null; attempt++) {
+                    try {
+                        raw = prof == null
+                                ? AiiHttp.getRaw(url, headers, NET_TIMEOUT_S)
+                                : AiiHttp.getRaw(url, headers, NET_TIMEOUT_S, prof);
+                    } catch (IOException e) {
+                        last = e;
+                        if (attempt == 0) {
+                            android.util.Log.w("HG.Spider", "op=net 重试一次：" + e.getMessage());
+                        }
+                    }
+                }
+                if (raw == null) throw last == null ? new IOException("net 失败") : last;
             } else {
                 // 阶段 0 只做表单 POST：设计 §四 的 net 只带 method/headers/body 三样，
                 // 没有 content-type 字段，judge 它是不是 JSON 请求只能靠猜 —— 猜错的
