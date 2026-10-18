@@ -64,6 +64,15 @@ public final class UserSource {
     /** 桥指令前缀。前端拼成 __source:set?url=... 经 detail 桥送进来。 */
     public static final String PREFIX = "__source:";
 
+    /**
+     * load() 认出「源市场清单」时抛的固定串。
+     *
+     * 贴在设置页的地址可能是一份 {sources:[…]} 清单而不是一个源。这不是错误，
+     * 只是「用户贴的东西比一个源大一层」。前端看到这个串就去渲染勾选列表；
+     * 万一没人接住，它至少比「认不出这是什么配置」更接近事实。
+     */
+    public static final String MARKET_LIST = "MARKET_SOURCES";
+
     private UserSource() {}
 
     // ── 桥入口 ────────────────────────────────────────────────────────
@@ -973,9 +982,10 @@ public final class UserSource {
      * 用户不需要知道「适配器」是什么 —— 贴上去能识别就行。识别不出来时给一句
      * 人话，别让他对着一个沉默的输入框猜。
      *
-     * 认四种：
+     * 认五种：
      *   {origin|web}         我们自己的 JSON 配置      → adapter 缺省（rest）
      *   {code,list,class}    苹果CMS 接口             → adapter=cms，从 class[] 生成 categories
+     *   {sources[]}          源市场清单               → 不是源，见 MARKET_LIST
      *   {urls[]}             TVBox 多仓               → 二期
      *   {sites[]}            TVBox 单仓               → 二期
      */
@@ -998,6 +1008,15 @@ public final class UserSource {
             if (adapter.matchesBody(fetched)) return adapter.probe(url, fetched);
         }
 
+        // 源市场清单（{sources:[{name,url,desc}]}）。它不是一份源，是一份源**目录** ——
+        // 前端收到这个标记就把里面的源列出来让用户勾，而不是自己再猜一遍。
+        //
+        // 为什么要标记而不是在这里直接展开：勾选是前端的活（要渲染、要落盘、要按顺序
+        // 生效），Java 这边只负责告诉它「你贴的是清单，不是源」。写成固定串是因为
+        // 桥只能回人类可读的 error 字段，前端按前缀匹配——比多开一条桥指令省事。
+        if (fetched.has("sources")) {
+            throw new IOException(MARKET_LIST);
+        }
         if (fetched.has("urls")) {
             throw new IOException("这是 TVBox 多仓配置（列出的是子配置地址），二期才支持");
         }

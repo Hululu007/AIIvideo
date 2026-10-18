@@ -65,3 +65,11 @@ work/shells/java-test/fixtures/*.html
 # 发帖用的截图，代码和文档一处都不引用，没必要占历史。
 # 本地留着，只是不进 git。
 帖子图片/
+
+# ── nativetest 从设备上拉的系统 so ───────────────────────────────────
+# libEGL / libc++ / libjnigraphics / libz 是拼测试二进制时从手机 /system/lib64
+# 拿的链接依赖，换台机器重拉一遍就有。libtestprobe.so 是本项目自己的产物，照常提交。
+work/shells/nativetest/libEGL.so
+work/shells/nativetest/libc++.so
+work/shells/nativetest/libjnigraphics.so
+work/shells/nativetest/libz.so

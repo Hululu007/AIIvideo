@@ -70,23 +70,34 @@
     }
   }
 
-  // 把「市场清单」当输入接受：拉回 JSON，若形如 {sources:[{name,url}]} 就
-  // 在面板里列出可选源。返回 true 表示已经接手渲染（调用方不再报原来的错）。
   // 把「市场清单」当输入接受：拉回 JSON，若形如 {sources:[{name,url}]} 就在面板里
   // 列出可勾选的源。可以多选 —— 一次把要用的都加进源列表，最后选中的那个生效。
   // 返回 true 表示已接手渲染（调用方不再报原来的错）。
-  async function offerMarket(url) {
-    let parsed = null;
+  //
+  // 拉取失败时**必须自己说话** —— 但只在「确实是一份清单」的时候。
+  //
+  // 以前这里 return false 就完事，屏幕上留着的是上一条报错（set 那句「认不出这是
+  // 什么配置」），于是「网络超时」被显示成「格式不认识」，用户和排查的人都会照错的
+  // 方向找。现在：Java 已经断言过是清单（confident）就把失败原因写在它该在的位置；
+  // 只是「顺便试试形状」的场合仍旧闭嘴，让调用方报原来那条更准确的原因。
+  async function offerMarket(url, confident) {
+    const fail = message => {
+      if (confident) showError('这是一份源清单，但没拉下来：' + message);
+      return confident;
+    };
+    let body = '';
     try {
       const reply = await bridgeCall('detail', { id: '__source:fetch?url=' + encodeURIComponent(url) });
       const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
-      if (!result || !result.ok) return false;
-      parsed = JSON.parse(result.body || '{}');
+      if (!result || !result.ok) return fail((result && result.error) || '未知原因');
+      body = result.body || '';
     } catch (error) {
-      return false;
+      return fail(error.message || String(error));
     }
+    let parsed = null;
+    try { parsed = JSON.parse(body); } catch (error) { return fail('响应不是 JSON'); }
     const items = Array.isArray(parsed && parsed.sources) ? parsed.sources : [];
-    if (!items.length) return false;
+    if (!items.length) return fail('清单里没有 sources 数组');
     const box = document.getElementById('setup-market');
     box.hidden = false;
     box.innerHTML = '<p class="setup-market-loading">这是一份源清单，勾选要用的（可多选，最后一个为当前源）：</p>'
@@ -160,9 +171,16 @@
       if (!result || !result.ok) {
         // 粘进来的可能不是「一个源」，而是「一份源清单」（市场）。这种情况别直接
         // 报错 —— 拉回来看看是不是 {sources:[…]}，是就把里面的源列出来让用户挑。
-        const picked = await offerMarket(url);
+        //
+        // Java 那边认出来时 throw 的是固定串 MARKET_SOURCES（UserSource.MARKET_LIST）。
+        // 那是「清单，不是源」的确定结论，不是失败；其余错误也照旧试一次市场，
+        // 因为老版本的服务端没有这个标记，靠形状认是唯一的退路。
+        const marketMark = /MARKET_SOURCES/.test((result && result.error) || '');
+        const picked = await offerMarket(url, marketMark);
         if (picked) return;
-        showError((result && result.error) || '设置失败');
+        showError(marketMark
+          ? '你贴的是一份源清单，但里面没有可用的源'
+          : ((result && result.error) || '设置失败'));
         return;
       }
       // 成功。这里**必须重建 Activity**，光 reload 页面是不够的 —— SiteProfile 是在

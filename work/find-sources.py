@@ -293,7 +293,7 @@ def site_name(api):
     except Exception:  # noqa: BLE001
         return ""
 
-def market_json(rows, path, extra=None, top=5):
+def market_json(rows, path, extra=None, top=2):
     usable = [r for r in rows if rate_of(r) >= 50]
     sources = []
     seen_hosts = set()
@@ -309,7 +309,7 @@ def market_json(rows, path, extra=None, top=5):
         name = "影视线路 %d" % (len(sources) + 1)
         # 描述只说「有多少分类」。**不写测速结果** —— 那个数是香港 VPS 测的，
         # 手机上完全不是这个数。用户看到「首片 0.1s」选了它，实际卡起来
-        # 只会觉得 App 有毛病。速度留在脚本里用来挑哪 5 个入选就够了。
+        # 只会觉得 App 有毛病。速度留在脚本里用来挑哪 2 个入选就够了。
         desc = "%d 个分类" % r["classes"]
         sources.append({"name": name, "desc": desc, "url": r["api"]})
         # 给用户看的清单不需要 18 个：两个换着用就够，多了只会选不出来。
@@ -338,7 +338,7 @@ def main():
                         help="测速节点名，只写进 desc（如 HK / 手机），不影响逻辑")
     parser.add_argument("--extra",
                         help="固定条目文件 {sources:[…]}，原样追加到输出末尾")
-    parser.add_argument("--top", type=int, default=5,
+    parser.add_argument("--top", type=int, default=2,
                         help="清单里放几个探测出来的源（默认 5）")
     args = parser.parse_args()
     global NODE_LABEL
