@@ -198,8 +198,8 @@ function spiderSection() {
   const items = asArray(box?.items);
   const rows = items.map(item => {
     const ok = item.ok === true || item.ok === 'true';
-    const meta = [item.id, 'v' + (item.version || 0), item.source === 'hot' ? '热更' : '内置']
-      .filter(Boolean).join(' · ');
+    const origin = item.source === 'user' ? '已安装' : (item.source === 'hot' ? '热更' : '内置');
+    const meta = [item.id, 'v' + (item.version || 0), origin].filter(Boolean).join(' · ');
     const chip = ok ? '可用' : '不可用';
     const user = item.source === 'user';
     return `<li class="source-row${ok ? '' : ' is-disabled'}">
@@ -348,12 +348,36 @@ document.addEventListener('click', async event => {
   }
   const id = call.getAttribute('data-spider-call');
   const label = call.querySelector('strong')?.textContent || id;
+  // 一次点按跑完整条链：home → detail（第一张卡的详情）→ play（第一集）。
+  //
+  // 只跑 home 证明不了什么 —— 选集和播放地址才是这条链路容易断的地方
+  // （集号是站点自己的字符串、线路要现取、地址在一段时间内有效）。
+  // 三段都过，这个源才算真的能用。
   toast(label + ' · 正在跑 home…', true);
+  const t0 = Date.now();
   try {
-    const t0 = Date.now();
-    const payload = await bridgeCall('spider', { op: 'call', id, cap: 'home', timeoutMs: 45000 });
-    const count = asArray(payload?.items).length;
-    toast(label + ' · ' + count + ' 张卡 · ' + ((Date.now() - t0) / 1000).toFixed(1) + 's');
+    const home = await bridgeCall('spider', { op: 'call', id, cap: 'home', timeoutMs: 45000 });
+    const cards = asArray(home?.items);
+    if (!cards.length) throw new Error('home 没有返回卡片');
+    const ref = String(cards[0].id || '');
+    toast(label + ' · ' + cards.length + ' 张卡 · 取详情…', true);
+
+    const detail = await bridgeCall('spider', { op: 'call', id, cap: 'detail', args: { ref }, timeoutMs: 45000 });
+    const eps = asArray(detail?.episodes);
+    const lines = asArray(detail?.lines);
+    if (!eps.length) throw new Error('detail 没有返回剧集');
+
+    const first = eps[0];
+    const line = first.line || (lines[0] && lines[0].line) || 'default';
+    toast(label + ' · ' + eps.length + ' 集 · 取播放地址…', true);
+    const play = await bridgeCall('spider', {
+      op: 'call', id, cap: 'play', args: { ref, line }, timeoutMs: 45000
+    });
+    const url = String(play?.url || '');
+    if (!url) throw new Error('play 没有返回地址');
+    const secs = ((Date.now() - t0) / 1000).toFixed(1);
+    toast(label + ' · ' + cards.length + ' 卡 / ' + eps.length + ' 集 / ' + asArray(play.alts).length
+      + ' 备选 · ' + secs + 's');
   } catch (error) {
     toast(label + ' · 失败：' + (error.message || error));
   }

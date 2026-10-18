@@ -320,7 +320,7 @@ final class SpiderStore {
                 Entry e = fromAsset(ctx, name);
                 if (e == null) continue;
                 if (seen.contains(e.id)) {
-                    Log.d(TAG, "spider " + e.id + " 由热更包提供，assets 里的那份忽略");
+                    Log.d(TAG, "spider " + e.id + " 已被更高优先级的来源提供（用户装 > 热更 > assets），assets 里的那份忽略");
                     continue;
                 }
                 out.add(e);
