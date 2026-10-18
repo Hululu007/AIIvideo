@@ -207,8 +207,32 @@
   var DETAIL_CAPS = { detail: 1, episode: 1 };
   var PLAY_CAPS = { play: 1 };
 
+  // ── Home ─────────────────────────────────────────────────────────
+  //
+  // home 是个例外：它不是 Paged，而是**首页信封**。app.js 的 renderHome /
+  // homeItems 读的是 adaptHome 产出的那五个键（featured / homepageRecommend /
+  // homepageNewest / recommend.items / newest.items），少一个就是一块空白。
+  // 2026-10-19 真机第一次跑 spider 源时首页只有横幅没有网格，就是这里按 Paged
+  // 返回了 {items}。
+  //
+  // featured 取前 8 条当横幅轮播（adaptHome 里是 4 条 + 分类推荐拼出来的）；
+  // 没有单独的「推荐」「最新」数据时三行指向同一批 items —— 首页是入口，
+  // 多给几处重复比空着强。
+  function home(payload) {
+    var items = arr((payload || {}).items).map(card);
+    var featured = items.slice(0, 8);
+    return {
+      featured: featured,
+      homepageRecommend: items,
+      homepageNewest: items,
+      recommend: { items: items },
+      newest: { items: items }
+    };
+  }
+
   function fromBridge(payload, cap) {
     var name = str(cap);
+    if (name === 'home') return home(payload);
     if (PAGED_CAPS[name]) return paged(payload);
     if (DETAIL_CAPS[name]) return detail(payload);
     if (PLAY_CAPS[name]) return play(payload);
@@ -219,6 +243,7 @@
 
   var HGModel = {
     card: card,
+    home: home,
     paged: paged,
     detail: detail,
     play: play,

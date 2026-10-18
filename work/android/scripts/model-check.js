@@ -171,16 +171,19 @@ function checkNoUndefined(label, shape) {
   const home = HGModel.fromBridge(homeRaw, 'home');
   if (dumpCap === 'home') { console.log(JSON.stringify(home, null, 2)); return; }
 
-  check('home · items 是数组', () => Array.isArray(home.items), home.items);
-  check('home · 卡片数 ≥ 40', () => home.items.length >= 40, { length: home.items.length });
-  check('home · items[0].id 非空', () => String(home.items[0].id).length > 0, home.items[0]);
-  check('home · items[0].title 非空', () => String(home.items[0].title).length > 0, home.items[0]);
-  check('home · items[0].cover 是绝对地址',
-    () => /^https?:\/\//.test(String(home.items[0].cover)), home.items[0].cover);
-  check('home · items[0].episodeLabel 是字符串（不是 undefined）',
-    () => typeof home.items[0].episodeLabel === 'string', home.items[0].episodeLabel);
-  check('home · page 是 1', () => home.page === 1, home.page);
-  check('home · hasMore 是布尔', () => typeof home.hasMore === 'boolean', home.hasMore);
+  // home 不是 Paged，是**首页信封**：renderHome 读 featured / recommend.items /
+  // newest.items 这几处，少一个就是一块空白（2026-10-19 真机首页只有横幅）。
+  check('home · 是信封不是 Paged', () => Array.isArray(home.recommend.items), Object.keys(home));
+  check('home · featured 非空', () => home.featured.length > 0, { length: home.featured.length });
+  check('home · 卡片数 ≥ 40', () => home.recommend.items.length >= 40, { length: home.recommend.items.length });
+  check('home · newest 与 recommend 同源', () => home.newest.items.length === home.recommend.items.length, {});
+  const home0 = home.recommend.items[0];
+  check('home · 第一张 id 非空', () => String(home0.id).length > 0, home0);
+  check('home · 第一张 title 非空', () => String(home0.title).length > 0, home0);
+  check('home · 第一张 cover 是绝对地址',
+    () => /^https?:\/\//.test(String(home0.cover)), home0.cover);
+  check('home · 第一张 episodeLabel 是字符串（不是 undefined）',
+    () => typeof home0.episodeLabel === 'string', home0.episodeLabel);
   checkNoUndefined('home', home);
 
   // ---- detail → Detail ----
