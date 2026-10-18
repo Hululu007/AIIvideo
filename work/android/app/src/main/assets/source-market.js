@@ -172,6 +172,57 @@ function tvboxSection() {
   </section>`;
 }
 
+// ── spider 源（阶段 1）─────────────────────────────────────────────
+//
+// 这一段是「加源不发版」第一次露在界面上：源不再是配置里的一个地址，而是一个
+// 可以随时下发的 js 文件。列表来自 Java 的 SpiderStore（热更 ui/spiders/ 优先，
+// APK assets 兜底），每一条都带 ok/reason —— 被 ABI 门禁拒掉的也在里面，因为
+// 「为什么这个源用不了」比「它不在列表里」有用得多。
+//
+// 点一下跑 home，只报卡片数。阶段 1 的目标是证明这条链路通了，不是做播放器；
+// 等模型定稿（阶段 2）再把结果接进真正的渲染路径。
+
+async function loadSpiderSources(force = false) {
+  if (state.spiders && !force) return state.spiders;
+  try {
+    const reply = await bridgeCall('spider', { op: 'list' });
+    state.spiders = { abi: Number(reply?.abi) || 0, items: asArray(reply?.spiders), error: '' };
+  } catch (error) {
+    state.spiders = { abi: 0, items: [], error: error.message || String(error) };
+  }
+  return state.spiders;
+}
+
+function spiderSection() {
+  const box = state.spiders;
+  const items = asArray(box?.items);
+  const rows = items.map(item => {
+    const ok = item.ok === true || item.ok === 'true';
+    const meta = [item.id, 'v' + (item.version || 0), item.source === 'hot' ? '热更' : '内置']
+      .filter(Boolean).join(' · ');
+    const chip = ok ? '可用' : '不可用';
+    return `<li class="source-row${ok ? '' : ' is-disabled'}">
+      <button type="button" class="source-pick" data-spider-call="${esc(item.id)}" ${ok ? '' : 'disabled'}>
+        <span><strong>${esc(item.name || item.id || '未命名')}</strong><small>${esc(meta)}</small></span>
+        <em class="${ok ? 'is-ok' : 'is-warn'}">${esc(chip)}</em>
+      </button>
+      ${ok ? '' : `<p class="settings-form-hint">${esc(item.reason || '加载不了')}</p>`}
+    </li>`;
+  }).join('');
+  const hint = box == null
+    ? '正在读源清单…'
+    : (items.length ? `${items.length} 个 · 点一个跑一次 home` : '这个版本还没装任何 spider 源');
+  return `<section class="settings-card" aria-label="spider 源">
+    <div class="settings-row is-static">
+      <span class="settings-icon">${icon('source')}</span>
+      <span class="settings-body"><strong>spider 源</strong><small>${esc(box?.error || hint)}</small></span>
+      <span class="settings-tail"><button type="button" class="settings-mini" data-spider-refresh="1">刷新</button></span>
+    </div>
+    ${items.length ? `<ul class="source-list">${rows}</ul>` : ''}
+    <p class="settings-form-hint">${box ? 'ABI ' + box.abi + ' · 源以 js 形式随热更下发，加源不用更新应用' : ''}</p>
+  </section>`;
+}
+
 function renderSourceSettings() {
   const items = asArray(state.sources);
   const active = items.find(item => item.active);
@@ -231,10 +282,37 @@ function renderSourceSettings() {
     </section>
 
     ${tvboxSection()}
+    ${spiderSection()}
   </div>`;
 }
 
 /** 写/清一个源的备注。空串 = 清掉，退回自动取的名字。 */
+// spider 的点击与刷新走 document 上的委托：这几行是这个文件自己的一小块，
+// 不值得再往 app.js 那个巨大的点击处理器里塞一条分支。
+document.addEventListener('click', async event => {
+  const call = event.target.closest('[data-spider-call]');
+  const refresh = event.target.closest('[data-spider-refresh]');
+  if (!call && !refresh) return;
+  event.preventDefault();
+  if (refresh) {
+    state.spiders = null;
+    await loadSpiderSources(true);
+    if (state.route === 'source-settings') renderSourceSettings();
+    return;
+  }
+  const id = call.getAttribute('data-spider-call');
+  const label = call.querySelector('strong')?.textContent || id;
+  toast(label + ' · 正在跑 home…', true);
+  try {
+    const t0 = Date.now();
+    const payload = await bridgeCall('spider', { op: 'call', id, cap: 'home', timeoutMs: 45000 });
+    const count = asArray(payload?.items).length;
+    toast(label + ' · ' + count + ' 张卡 · ' + ((Date.now() - t0) / 1000).toFixed(1) + 's');
+  } catch (error) {
+    toast(label + ' · 失败：' + (error.message || error));
+  }
+});
+
 async function saveSourceNote(url, text) {
   const clean = String(text == null ? '' : text).trim();
   try {
@@ -285,5 +363,7 @@ function goSourceSettings() {
   setRoute('source-settings');
   renderSourceSettings();
   refreshSources().then(() => { if (state.route === 'source-settings') renderSourceSettings(); }).catch(() => {});
+  // spider 清单是本地文件 IO，很快；读到之后单独重画一次，不挡源列表。
+  loadSpiderSources().then(() => { if (state.route === 'source-settings') renderSourceSettings(); }).catch(() => {});
   content.querySelector('#source-value')?.focus();
 }
