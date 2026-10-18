@@ -43,10 +43,13 @@ final class SpeedTest {
     private static final int THREADS = 1;
 
     /**
-     * 单个节点的超时。串行跑，这个值直接决定「一轮能测几个」。
-     * 3 秒：慢但能用的节点一般 1~2 秒返回，3 秒还回不来的基本是死的。
+     * 单个节点的超时（**现在是真的生效了**，见 probeOne 的 Future.get）。
+     *
+     * 4 秒：能用的节点一般 1~2 秒返回，4 秒还回不来的基本是死的。
+     * 之前这个值是 3 秒但根本没生效 —— native 那边照样等 12 秒，
+     * 3 个一批实测 36 秒，前端只能干等。
      */
-    private static final int PER_NODE_MS = 3000;
+    private static final int PER_NODE_MS = 4000;
 
     /** 整轮硬上限。到点返回已完成的，剩下的标 untested。 */
     static final int WALL_CLOCK_MS = 30000;
@@ -92,6 +95,18 @@ final class SpeedTest {
      * 不抛异常：测速失败是常态，把它当成结果的一部分返回。
      */
     static List<Item> run(List<XrayConfig.Node> nodes, List<String> links, String probeUrl, Progress progress) {
+        return run(nodes, links, probeUrl, progress, 0);
+    }
+
+    /**
+     * 带偏移的版本。
+     *
+     * 分批测的时候，第二次调用传进来的 nodes 是从第 4 个开始的 —— 如果 Item.index
+     * 还用批内下标，三批的 index 全是 0/1/2，累加起来只剩 3 条（实测出来的 bug）。
+     * offset 让 index 始终是**它在完整列表里的位置**，前端 use?index=N 才对得上。
+     */
+    static List<Item> run(List<XrayConfig.Node> nodes, List<String> links, String probeUrl,
+                          Progress progress, int offset) {
         int total = nodes.size();
         List<Item> out = new ArrayList<Item>(total);
         if (total == 0) return out;
@@ -111,12 +126,13 @@ final class SpeedTest {
         // 20 秒上限内大约能测 10~12 个。这不是遗憾，是正确的取舍：
         // 用户要的是「几个能用的」，不是「400 个都体检一遍」。
         for (int i = 0; i < total; i++) {
+            final int index = offset + i;
             long left = deadline - System.currentTimeMillis();
             if (left <= 0) {
-                out.add(untested(i, nodes.get(i), linkOf(links, i)));
+                out.add(untested(index, nodes.get(i), linkOf(links, i)));
                 continue;
             }
-            out.add(probeOne(i, nodes.get(i), linkOf(links, i), url, deadline));
+            out.add(probeOne(index, nodes.get(i), linkOf(links, i), url, deadline));
             int d = done.incrementAndGet();
             if (progress != null) {
                 try {
@@ -132,17 +148,43 @@ final class SpeedTest {
         return links != null && i < links.size() ? links.get(i) : "";
     }
 
+    /**
+     * 测一个节点，**带真正的超时控制**。
+     *
+     * measureOutboundDelay 内部写死等 12 秒，传参数改不了。所以这里把它扔进
+     * 一个单线程池，用 Future.get(timeout) 到点就放弃 —— native 那个调用会
+     * 自己在后台跑完（它没有取消机制），但调用方不用陪着等。
+     *
+     * 代价是「被放弃的调用」还会占着一个 native 线程跑满 12 秒。所以线程池
+     * 用的是可回收的：每次新建、用完 shutdownNow。串行调用下最多有一两个
+     * 残留，不会堆积。
+     */
     private static Item probeOne(int index, XrayConfig.Node node, String link, String url, long deadline) {
         long left = deadline - System.currentTimeMillis();
         if (left <= 0) return untested(index, node, link);
+
+        final long budget = Math.min(left, PER_NODE_MS);
+        java.util.concurrent.ExecutorService one =
+                java.util.concurrent.Executors.newSingleThreadExecutor();
         try {
-            long ms = ProxyCore.probe(node, url, (int) Math.min(left, PER_NODE_MS));
+            java.util.concurrent.Future<Long> f = one.submit(new Callable<Long>() {
+                @Override
+                public Long call() {
+                    return ProxyCore.probe(node, url, 0);
+                }
+            });
+            long ms = f.get(budget, TimeUnit.MILLISECONDS);
             if (ms > 0) return new Item(index, node, link, ms, "");
             return new Item(index, node, link, -1, "不通");
+        } catch (java.util.concurrent.TimeoutException e) {
+            // 到点没回来就是不通。用户不需要知道「其实是 12 秒才放弃」。
+            return new Item(index, node, link, -1, "超时");
         } catch (Throwable e) {
             String m = e.getMessage();
             if (m == null || m.isEmpty()) m = e.getClass().getSimpleName();
             return new Item(index, node, link, -1, trim(m));
+        } finally {
+            one.shutdownNow();
         }
     }
 

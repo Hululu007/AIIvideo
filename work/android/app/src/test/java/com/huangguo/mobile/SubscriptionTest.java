@@ -132,6 +132,32 @@ public class SubscriptionTest {
         assertTrue("应含节点数：" + s, s.contains("1"));
     }
 
+    /**
+     * hysteria2 / tuic 这类「认得出协议名但没实现」的条目要单独计数。
+     *
+     * 静默丢掉会让用户困惑：他的订阅明明有 47 个节点，App 只显示 23 个，
+     * 而且不讲原因。这条钉住「必须报出来」。
+     */
+    @Test
+    public void 不支持的协议要单独计数() {
+        String text = "vmess://eyJ2IjoiMiIsImFkZCI6IjEuMi4zLjQiLCJwb3J0IjoiNDQzIiwiaWQiOiJ1dWlkIiwibmV0IjoidGNwIn0=\n"
+                + "hysteria2://pass@1.2.3.4:443?sni=a.com\n"
+                + "hysteria2://pass@5.6.7.8:443\n"
+                + "tuic://uuid:pw@9.9.9.9:443\n";
+
+        Subscription.Result r = Subscription.parse(text);
+        assertEquals(1, r.size());
+        assertEquals(3, r.unsupported);
+        assertTrue("应记下 hysteria2：" + r.unsupportedNames, r.unsupportedNames.contains("hysteria2"));
+        assertTrue("应记下 tuic：" + r.unsupportedNames, r.unsupportedNames.contains("tuic"));
+        // 不支持的项不该被算成「格式坏了」
+        assertEquals(0, r.failed);
+
+        String summary = Subscription.summary(r);
+        assertTrue("摘要要提到不支持：" + summary, summary.contains("不支持"));
+        assertTrue("摘要要说是哪种：" + summary, summary.contains("hysteria2"));
+    }
+
     // ── 内置节点文件 ───────────────────────────────────────────────────
 
     /**

@@ -1650,31 +1650,52 @@ function renderProxySettingsKeepScroll() {
  * 单独抽出来是因为有两个入口：点「测速并挑选」，以及导入订阅之后自动跑一次。
  * 两处各写一遍的话，进度文案和失败处理迟早分叉。
  */
+/**
+ * 跑一轮测速。**分批调用**，每批回来就刷新一次界面。
+ *
+ * 为什么不一次测完：一次测 12 个要 20 多秒，中途页面什么都不变，用户会以为
+ * 按钮坏了（上一版就是这样）。分批之后每 5~9 秒能看到「已测 3 个，通了 1 个」，
+ * 而且**先测出来的能用的节点会立刻出现在列表里**，用户不用等全部跑完。
+ */
 async function runSpeedTest() {
   const sub = subState();
   if (sub.busy) return;
   sub.busy = true;
   sub.testing = true;
-  sub.speedNote = '正在测速，最多 20 秒…';
   sub.speed = [];
+  sub.speedNote = '正在测速…';
   renderProxySettingsKeepScroll();
+
+  let batch = 0;
   try {
-    const result = await proxyCoreCommand('speed');
-    sub.busy = false;
-    sub.testing = false;
-    if (result.ok === false) throw new Error(result.error || '测速失败');
-    sub.speed = Array.isArray(result.nodes) ? result.nodes : [];
-    sub.count = result.total || sub.count;
-    // 说清测的是哪一份：内置那份是 App 自带，订阅那份是用户自己导的。
-    const from = result.source === 'subscription' ? '你的订阅' : '内置的免费节点';
-    sub.speedNote = '从' + from + '里挑了 ' + (result.total || 0)
-      + ' 个来测，通了 ' + (result.usable || 0) + ' 个。点一行直接连。';
+    // 上限 10 批只是保险：正常 12 个 / 每批 3 个 = 4 批就结束。
+    // 后端 done=true 或返回空就停，不会真的跑满 10 轮。
+    while (batch < 10) {
+      const result = await proxyCoreCommand('speed?batch=' + batch);
+      if (result.ok === false) throw new Error(result.error || '测速失败');
+      sub.speed = Array.isArray(result.nodes) ? result.nodes : [];
+      sub.count = result.total || sub.count;
+      const tested = Number(result.tested) || sub.speed.length;
+      const usable = Number(result.usable) || 0;
+      const from = result.source === 'subscription' ? '你的订阅' : '内置的免费节点';
+      if (result.done) {
+        sub.speedNote = '从' + from + '里挑了 ' + tested + ' 个来测，通了 '
+          + usable + ' 个。' + (usable ? '点一行直接连。' : '这一轮没测到通的，过会儿再试。');
+        break;
+      }
+      sub.speedNote = '正在测速… ' + tested + '/' + (result.total || '?')
+        + '，已通 ' + usable + ' 个';
+      // 每批都重画：先测出来的节点立刻可见，用户不用等全部跑完。
+      renderProxySettingsKeepScroll();
+      batch++;
+    }
   } catch (problem) {
+    sub.speedNote = problem.message;
+  } finally {
     sub.busy = false;
     sub.testing = false;
-    sub.speedNote = problem.message;
+    renderProxySettingsKeepScroll();
   }
-  renderProxySettingsKeepScroll();
 }
 
 function renderSpeedList(sub) {
@@ -3024,36 +3045,6 @@ document.addEventListener('submit', async event => {
     }
     return;
   }
-  const subAction = event.target.closest('[data-proxy-sub]');
-  if (subAction) {
-    const action = subAction.dataset.proxySub;
-    if (action === 'clear') {
-      subAction.disabled = true;
-      proxyCoreCommand('subclear').then(() => {
-        state.proxySub = { url: '', count: 0, summary: '', speedNote: '', speed: [], testing: false, busy: false };
-        renderProxySettingsKeepScroll();
-        toast('已改回用内置的免费节点');
-      }).catch(problem => { toast(problem.message, true); subAction.disabled = false; });
-      return;
-    }
-    runSpeedTest();
-    return;
-  }
-  const useNode = event.target.closest('[data-proxy-use]');
-  if (useNode) {
-    const index = useNode.dataset.proxyUse;
-    useNode.disabled = true;
-    try {
-      const status = await proxyCoreCommand('use?index=' + encodeURIComponent(index));
-      if (status.ok === false) throw new Error(status.error || '这个节点没连上');
-      applyProxyCore(status);
-      toast(status.running ? '已连接 ' + (status.host || '') : '已切换');
-    } catch (problem) {
-      toast(problem.message, true);
-      useNode.disabled = false;
-    }
-    return;
-  }
   if (event.target.id !== 'password-form') return;
   event.preventDefault();
   const form = event.target;
@@ -3178,6 +3169,40 @@ document.addEventListener('click', async event => {
     }).then(() => { coreAction.disabled = !proxyState().running; });
     return;
   }
+  // ── 订阅 / 测速 / 选节点 ──────────────────────────────────────────
+  // 这三个必须挂在 click 上。上一版误放在 submit 监听里，而它们是
+  // <button type="button">，根本不触发 submit —— 表现是「点了没反应」。
+  const subAction = event.target.closest('[data-proxy-sub]');
+  if (subAction) {
+    const action = subAction.dataset.proxySub;
+    if (action === 'clear') {
+      subAction.disabled = true;
+      proxyCoreCommand('subclear').then(() => {
+        state.proxySub = { url: '', count: 0, summary: '', speedNote: '', speed: [], testing: false, busy: false };
+        renderProxySettingsKeepScroll();
+        toast('已改回用内置的免费节点');
+      }).catch(problem => { toast(problem.message, true); subAction.disabled = false; });
+      return;
+    }
+    runSpeedTest();
+    return;
+  }
+  const useNode = event.target.closest('[data-proxy-use]');
+  if (useNode) {
+    const index = useNode.dataset.proxyUse;
+    useNode.disabled = true;
+    try {
+      const status = await proxyCoreCommand('use?index=' + encodeURIComponent(index));
+      if (status.ok === false) throw new Error(status.error || '这个节点没连上');
+      applyProxyCore(status);
+      toast(status.running ? '已连接 ' + (status.host || '') : '已切换');
+    } catch (problem) {
+      toast(problem.message, true);
+      useNode.disabled = false;
+    }
+    return;
+  }
+
   if (event.target.closest('[data-source-settings]')) { goSourceSettings(); return; }
   if (event.target.closest('[data-market]')) { goMarket(); return; }
   if (event.target.closest('[data-market-reload]')) { goMarket(); return; }

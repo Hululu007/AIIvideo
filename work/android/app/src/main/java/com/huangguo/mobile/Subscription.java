@@ -44,6 +44,11 @@ final class Subscription {
         /** 原样的分享链接，和 nodes 一一对应。存原文是因为「再启动一次」要用它。 */
         final List<String> links = new ArrayList<String>();
         int failed;
+        /** 认得协议名但不支持的（hysteria2 / tuic / ssr 之类）。单独计数，
+         *  因为这不是「格式坏了」，是「这个协议我们没实现」—— 提示语不一样。 */
+        int unsupported;
+        /** 不支持的协议名，用于提示（去重，最多几个）。 */
+        final java.util.Set<String> unsupportedNames = new LinkedHashSet<String>();
         String firstError;
 
         int size() {
@@ -159,7 +164,16 @@ final class Subscription {
             if (result.nodes.size() >= MAX_NODES) break;
             String item = line.trim();
             if (item.isEmpty() || item.startsWith("#") || item.startsWith("//")) continue;
-            if (!looksLikeLink(item)) continue;
+            if (!looksLikeLink(item)) {
+                // 认得出协议名但不在支持列表里（hysteria2 / tuic / ssr …）。
+                // 静默丢掉会让用户以为「我明明有 47 个节点，怎么只出来 23 个」。
+                String scheme = schemeOf(item);
+                if (scheme != null) {
+                    result.unsupported++;
+                    if (result.unsupportedNames.size() < 3) result.unsupportedNames.add(scheme);
+                }
+                continue;
+            }
             if (!seen.add(item)) continue;
             try {
                 XrayConfig.Node node = XrayConfig.parseShareLink(item);
@@ -184,6 +198,18 @@ final class Subscription {
         return t.contains("vmess://") || t.contains("vless://")
                 || t.contains("trojan://") || t.contains("ss://")
                 || t.contains("socks5://") || t.contains("http://");
+    }
+
+    /** `xxx://...` 里的 `xxx`，取不到返回 null。 */
+    private static String schemeOf(String line) {
+        int mark = line.indexOf("://");
+        if (mark <= 0 || mark > 20) return null;
+        String scheme = line.substring(0, mark).toLowerCase(Locale.ROOT);
+        for (int i = 0; i < scheme.length(); i++) {
+            char c = scheme.charAt(i);
+            if (!(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9')) return null;
+        }
+        return scheme;
     }
 
     private static boolean looksLikeLink(String line) {
@@ -226,6 +252,16 @@ final class Subscription {
         StringBuilder sb = new StringBuilder();
         sb.append(result.size()).append(" 个节点");
         if (result.failed > 0) sb.append("，").append(result.failed).append(" 个看不懂被跳过");
+        if (result.unsupported > 0) {
+            sb.append("，").append(result.unsupported).append(" 个不支持（");
+            boolean first = true;
+            for (String name : result.unsupportedNames) {
+                if (!first) sb.append("/");
+                sb.append(name);
+                first = false;
+            }
+            sb.append("）");
+        }
         return sb.toString();
     }
 

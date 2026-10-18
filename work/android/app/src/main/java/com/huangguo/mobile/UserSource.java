@@ -2044,7 +2044,7 @@ public final class UserSource {
             if ("boot".equals(action)) return proxyBoot(context, out);
             if ("sub".equals(action)) return proxySubscribe(context, param(query, "url"), out);
             if ("subclear".equals(action)) return proxySubClear(context, out);
-            if ("speed".equals(action)) return proxySpeed(context, out);
+            if ("speed".equals(action)) return proxySpeed(context, param(query, "batch"), out);
             if ("use".equals(action)) return proxyUse(context, param(query, "index"), out);
             return fail(out, "不认识的代理指令：" + action);
         } catch (Throwable e) {
@@ -2255,6 +2255,22 @@ public final class UserSource {
     private static volatile List<SpeedTest.Item> lastSpeedTest;
     private static volatile String lastSubUrl = "";
 
+    /** 一轮测速一共测多少个。 */
+    private static final int SPEED_POOL = 12;
+    /**
+     * 每批测几个。
+     *
+     * 3 个一批，配合 SpeedTest 里 4 秒/个的硬超时 ≈ 12 秒最坏。
+     *
+     * 曾经是 3 个一批但超时不生效（native 内部死等 12 秒），实测 36 秒一批，
+     * 前端那期间只能干等 —— 体感问题就出在这。现在超时是真生效的，
+     * 3 个一批既能每 12 秒刷新一次，又不会把整轮拖到两分钟。
+     */
+    private static final int SPEED_BATCH = 3;
+    /** 分批累计。null 表示这一轮还没开始（或已结束）。 */
+    private static java.util.TreeMap<Integer, SpeedTest.Item> speedAccum;
+    private static final Object SPEED_LOCK = new Object();
+
     /**
      * 拉订阅并解析，返回节点列表（**不测速**）。
      *
@@ -2354,7 +2370,7 @@ public final class UserSource {
      * 判断依据是 SUB_URL_KEY 有没有值，不是 mode：用户可能导入过订阅但
      * 后来又切回直连，那时候测速仍然该测他导入的那份。
      */
-    private static JSONObject proxySpeed(Context context, JSONObject out) throws Exception {
+    private static JSONObject proxySpeed(Context context, String batchText, JSONObject out) throws Exception {
         Subscription.Result parsed;
         String target = proxyStore(context).getString(SUB_URL_KEY, "");
         boolean fromSubscription = target != null && target.length() > 0;
@@ -2380,14 +2396,74 @@ public final class UserSource {
         //
         // 为什么不是全测：400 个串行要十几分钟。用户要的是「几个能用的」，
         // 不是一份完整体检报告。取前 12 个已经能覆盖绝大多数情况。
-        int limit = Math.min(parsed.size(), 12);
-        List<XrayConfig.Node> nodes = parsed.nodes.subList(0, limit);
-        List<String> links = parsed.links.subList(0, limit);
+        // 分批发测，每批 3 个。前端循环调用，每批回来就刷新一次界面 ——
+        // 一次测 12 个要 20 多秒，中途什么都不显示，用户会以为卡死了。
+        //
+        // 为什么要后端分批而不是后端一次算完再推进度：桥是「一问一答」的，
+        // 有个 Promise 对应一次请求，没有服务端推送。分批是这套桥下最省事的
+        // 做法，而且天然带断点 —— 用户中途退出，已测的结果不会白费。
+        int limit = Math.min(parsed.size(), SPEED_POOL);
+        int batch;
+        try {
+            batch = batchText == null || batchText.trim().isEmpty() ? 0 : Integer.parseInt(batchText.trim());
+        } catch (NumberFormatException e) {
+            batch = 0;
+        }
+        // batch == 0 表示新一轮开始 —— 清掉上一轮的累计。
+        // 不清的话，第二次测速会把第一次的结果一起算进去，
+        // 表现是「测了 12 个，列表里冒出 20 多个」。
+        if (batch == 0) {
+            synchronized (SPEED_LOCK) {
+                speedAccum = null;
+                lastSpeedTest = null;
+            }
+        }
 
-        List<SpeedTest.Item> items = SpeedTest.run(nodes, links, null, null);
-        SpeedTest.sortBySpeed(items);
-        lastSpeedTest = items;
+        int from = batch * SPEED_BATCH;
+        if (from >= limit) {
+            // 已经测完，把累计结果原样返回。
+            return speedResult(out, true, fromSubscription, parsed.size());
+        }
+        int to = Math.min(from + SPEED_BATCH, limit);
 
+        List<XrayConfig.Node> nodes = parsed.nodes.subList(from, to);
+        List<String> links = parsed.links.subList(from, to);
+
+        List<SpeedTest.Item> items = SpeedTest.run(nodes, links, null, null, from);
+
+        // 累计到一个 map 里，按 index 存 —— 分批之间靠它拼回完整结果。
+        synchronized (SPEED_LOCK) {
+            if (speedAccum == null) speedAccum = new java.util.TreeMap<Integer, SpeedTest.Item>();
+            for (SpeedTest.Item item : items) speedAccum.put(Integer.valueOf(item.index), item);
+            lastSpeedTest = new java.util.ArrayList<SpeedTest.Item>(speedAccum.values());
+            SpeedTest.sortBySpeed(lastSpeedTest);
+        }
+
+        boolean done = to >= limit;
+        if (done) log("测速完成，本轮共测 " + listSize());
+        return speedResult(out, done, fromSubscription, parsed.size());
+    }
+
+    private static int listSize() {
+        synchronized (SPEED_LOCK) {
+            return lastSpeedTest == null ? 0 : lastSpeedTest.size();
+        }
+    }
+
+    /**
+     * 把累计结果拼成答复。
+     *
+     * done 表示这一轮测完了 —— 前端据此决定还要不要继续调下一批。
+     * 每批都回完整列表（不是增量），前端拿到就整块重画，不用自己拼。
+     */
+    private static JSONObject speedResult(JSONObject out, boolean done,
+                                          boolean fromSubscription, int pool) throws Exception {
+        List<SpeedTest.Item> items;
+        synchronized (SPEED_LOCK) {
+            items = lastSpeedTest == null
+                    ? new java.util.ArrayList<SpeedTest.Item>()
+                    : new java.util.ArrayList<SpeedTest.Item>(lastSpeedTest);
+        }
         int usable = 0;
         JSONArray arr = new JSONArray();
         for (SpeedTest.Item item : items) {
@@ -2401,17 +2477,14 @@ public final class UserSource {
             o.put("error", item.error);
             arr.put(o);
         }
-
-        log("测速完成：" + usable + "/" + items.size() + " 可用");
-
         out.put("ok", true);
-        out.put("total", items.size());
+        out.put("done", done);
+        out.put("tested", items.size());
+        out.put("total", Math.min(pool, SPEED_POOL));
         out.put("usable", usable);
         out.put("nodes", arr);
-        // 让前端能说清「测的是哪一份」：内置那份是 App 自带、
-        // 订阅那份是用户自己导的，出错时这两种要分别提示。
         out.put("source", fromSubscription ? "subscription" : "builtin");
-        out.put("pool", parsed.size());
+        out.put("pool", pool);
         return out;
     }
 

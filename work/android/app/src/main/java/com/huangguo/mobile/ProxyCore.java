@@ -280,8 +280,10 @@ public final class ProxyCore {
      * 失败一律返回 -1，不抛：测速失败是常态（免费节点大半不通），
      * 抛异常只会让调用方每个节点都写一遍 try。
      *
-     * @param timeoutSeconds 超时秒数。AAR 内部固定 12 秒，这个参数只是先做
-     *                       一次可用性判断（免得排到队尾的节点还白等）。
+     * @param timeoutSeconds **无效，只为签名对齐保留**。AAR 里的
+     *                       measureOutboundDelay 内部写死了 12 秒超时
+     *                       （见 libv2ray 的 Go 源码：12 * time.Second），
+     *                       传什么进去都改变不了它等多久。
      * @return 往返毫秒；-1 表示不通或超时
      */
     static long probe(XrayConfig.Node node, String url, int timeoutSeconds) {
