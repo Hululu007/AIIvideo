@@ -54,17 +54,6 @@
     },
     "firstPageSize": 8,
     "pageSize": 20,
-    "paths": {
-      "home": "/api/home",
-      "detail": "/api/videos/{id}",
-      "episode": "/api/videos/{id}/play?ep={episode}",
-      "search": "/api/search?q={keyword}&page={page}",
-      "category": "/api/videos?cate_id={cateId}&page={page}&size={size}",
-      "tags": "/api/tags",
-      "recommend": "/api/videos?page={page}&size={size}",
-      "newest": "/api/videos?sort=new&page={page}&size={size}",
-      "tag-list": "/api/search?q={keyword}&page={page}"
-    },
     "ui": {
       "_why": "界面常量。以前硬编码在 app.js 第 69-81 行。tabs 是底部导航中间那几格，换源时由适配器整块替换；categoryIds / categoryLabels / categoryTitles / categoryLeads 都按 tabs 的 key 索引 —— 加一个 tab 就得在这几张表里都补上，缺哪张那张就退回默认文案。categoryIds 里的 slug 还必须在上面 categories 里有对应 cate_id，只加一边的话点那个分类会算出 null，落到 Java 桥撞上已抛异常的桩。",
       "categoryIds": {
@@ -262,6 +251,7 @@
       "code": [
         "code"
       ]
-    }
+    },
+    "_paths_note": "已经没有任何默认接口路径。源要么自带 web.paths（REST 源，过渡期），要么声明 web.spider（内容由 spider 运行时提供）。两者都没有的源在内容请求时会明确报「没有可用的 xxx 接口路径」，而不是拿到一份空数据。"
   }
 }

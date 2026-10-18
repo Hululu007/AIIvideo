@@ -227,6 +227,10 @@ async function spiderApi(action, args) {
   if (!cap) throw new Error('spider 源还不支持 ' + action + '（阶段 2 只做 home/category/search/detail/play）');
   const model = window.HGModel;
   if (!model) throw new Error('模型层没加载：model.js 不在页面里');
+  // 一行进/出日志。阶段 2 第一次真机播放时，播放器拿到地址却没有任何网络动作 ——
+  // 有 home/detail 的日志、没有 play 的，说不清是「没走这条」还是「走了但命中缓存」。
+  // 这条日志就是为了让那种情况一眼可辨：进这一行 = 走了 spider。
+  console.log('[spider-api] ' + action + ' → cap=' + cap + ' args=' + JSON.stringify(spiderArgsFor(action, args)));
   const payload = await bridgeCall('spider', {
     op: 'call', id, cap, args: spiderArgsFor(action, args), timeoutMs: 45000
   });
