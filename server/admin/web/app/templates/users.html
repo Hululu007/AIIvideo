@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}App 用户 · AIIvideo 后台{% endblock %}
+{% block body %}
+<h1>App 用户</h1>
+{% if user_error %}
+<div class="flash bad">读不到账号库：{{ user_error }}</div>
+{% else %}
+<form class="row" method="get" action="{{ mount }}/users">
+  <input name="q" value="{{ listing.query }}" placeholder="按用户名或邮箱搜">
+  <button type="submit">搜索</button>
+</form>
+<p class="muted">共 {{ listing.total }} 个用户 · 第 {{ listing.page }} 页</p>
+<table>
+  <thead><tr><th>用户名</th><th>邮箱</th><th>注册</th><th>更新</th><th></th></tr></thead>
+  <tbody>
+  {% for u in listing.users %}
+  <tr>
+    <td>{{ u.username }}</td>
+    <td class="muted">{{ u.email or '—' }}</td>
+    <td class="muted">{{ u.created_at }}</td>
+    <td class="muted">{{ u.updated_at }}</td>
+    <td class="right actions">
+      <form method="post" action="{{ mount }}/users/{{ u.id }}/password" onsubmit="return resetPw(this)">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="password" value="">
+        <button class="ghost">重置口令</button>
+      </form>
+      <form method="post" action="{{ mount }}/users/{{ u.id }}/delete" onsubmit="return confirm('删除用户 {{ u.username }}？收藏与历史会一起清掉。')">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="ghost danger">删除</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}<tr><td colspan="5" class="muted">没有匹配的用户</td></tr>{% endfor %}
+  </tbody>
+</table>
+<div class="row pager">
+  {% if listing.page > 1 %}<a class="ghost link" href="{{ mount }}/users?q={{ listing.query }}&page={{ listing.page - 1 }}">上一页</a>{% endif %}
+  {% if listing.has_more %}<a class="ghost link" href="{{ mount }}/users?q={{ listing.query }}&page={{ listing.page + 1 }}">下一页</a>{% endif %}
+</div>
+<script>
+function resetPw(form) {
+  const value = prompt('给这个用户设置新口令（至少 8 位）');
+  if (!value) return false;
+  form.querySelector('input[name=password]').value = value;
+  return true;
+}
+</script>
+{% endif %}
+{% endblock %}

@@ -178,11 +178,13 @@ final class Endpoints {
         //   ① 顺序换成 gh-proxy 优先、dpik 次之 —— 缓存策略更规矩的那个放前面。
         //   ② 每个地址带一个时间戳查询串：对认 query 的 CDN 能绕过缓存，
         //      对不认的也没坏处。清单只有 50KB，多这一次请求可以忽略。
-        String bust = "?t=" + System.currentTimeMillis();
+        // 时间戳查询串**不要加**：镜像的用法是「镜像主机 + GitHub 完整地址」，
+        // 往后面接 ?t= 会被当成内层地址的查询串，gh-proxy 直接回一个 HTML 错误页，
+        // 客户端报「内容不像节点池」。试过一次，撤了。
         java.util.List<String> urls = new java.util.ArrayList<String>(3);
-        urls.add(AKAMS_B + "/" + RAW_NODES + bust);
-        urls.add(AKAMS_A + "/" + RAW_NODES + bust);
-        urls.add(RAW_NODES + bust);
+        urls.add(AKAMS_B + "/" + RAW_NODES);
+        urls.add(AKAMS_A + "/" + RAW_NODES);
+        urls.add(RAW_NODES);
         return urls;
     }
 }

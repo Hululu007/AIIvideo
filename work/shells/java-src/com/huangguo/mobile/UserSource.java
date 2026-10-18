@@ -2,6 +2,7 @@ package com.huangguo.mobile;
 
 import android.content.Context;
 import android.content.Intent;
+import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 
@@ -393,6 +394,42 @@ public final class UserSource {
                 out.put("cached", usedCache[0]);
                 out.put("ms", spent);
                 return out;
+            }
+
+            // 通用抓取：源市场清单、TVBox 单仓配置这类「不是源配置本身的 JSON」
+            // 也要经原生 HTTP 拉回来 —— WebView 直接 fetch 会被 CORS 拦（页面
+            // origin 是 appassets.androidplatform.net，第三方接口不会带 ACAO 头）。
+            // __http: 那条通道有播放层主机白名单，不能挪用；这里单独开一个，
+            // 只限 https、限大小、限超时，内容交回前端自己解析。
+            if ("fetch".equals(action)) {
+                if (url.length() == 0) return fail(out, "没有提供地址");
+                if (!url.startsWith("https://")) return fail(out, "只放行 https：" + url);
+                // 故意**不走 AiiHttp**：那条 client 挂着当前源的 DoH 解析器，
+                // 对市场这种「和源无关的第三方域名」会解析出坏答案（实测 sslip.io
+                // 在 DoH 下直接 UnknownHost）。这里用系统解析的裸连接，和热更新
+                // 通道同样的路径。
+                java.net.HttpURLConnection conn =
+                        (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+                try {
+                    conn.setConnectTimeout(15000);
+                    conn.setReadTimeout(20000);
+                    conn.setRequestProperty("User-Agent", "AIIvideo/1.0");
+                    int code = conn.getResponseCode();
+                    if (code < 200 || code >= 300) return fail(out, "HTTP " + code);
+                    java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
+                    java.io.InputStream in = conn.getInputStream();
+                    byte[] chunk = new byte[8192];
+                    int read;
+                    while ((read = in.read(chunk)) > 0) {
+                        buffer.write(chunk, 0, read);
+                        if (buffer.size() > 2_000_000) return fail(out, "内容超过 2MB，不像一份源清单");
+                    }
+                    out.put("ok", true);
+                    out.put("body", new String(buffer.toByteArray(), "UTF-8"));
+                    return out;
+                } finally {
+                    conn.disconnect();
+                }
             }
 
             // 后台把某条地址的配置重新拉一遍，只更新**本地缓存**，不动当前生效那份 ——
@@ -1930,6 +1967,78 @@ public final class UserSource {
      *   brightness?value=0.42   0~1 的窗口亮度；-1 表示交回系统
      *   variants?url=<m3u8>     把主列表里的清晰度档位列出来（页面自己 fetch 不了）
      */
+    /**
+     * 用外部播放器打开一个视频地址。
+     *
+     * 为什么需要：这个播放器是 WebView 里的 <video>，解码能力跟着 WebView 走。
+     * 同一条 m3u8 在 A 手机上能放、B 手机上 MediaError 4（SRC_NOT_SUPPORTED），
+     * 差别就在设备/编码：HEVC、10bit、或者系统 WebView 没带那个解码器。
+     * 这种时候把地址交出去，让 MX Player / VLC 用自己的解码链放，比报错有用。
+     */
+    private static JSONObject externalPlayer(Context context, String url, JSONObject out) throws Exception {
+        if (url == null || url.length() == 0) return fail(out, "没有可播放的地址");
+        if (!url.startsWith("http://") && !url.startsWith("https://")) return fail(out, "只能打开 http(s) 地址");
+        Intent intent = new Intent(Intent.ACTION_VIEW);
+        intent.setDataAndType(Uri.parse(url), "video/*");
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            context.startActivity(intent);
+        } catch (Exception e) {
+            // 没有能接管 video/* 的应用：退一步不限定类型再试一次
+            Intent fallback = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            try {
+                context.startActivity(fallback);
+            } catch (Exception again) {
+                return fail(out, "这台设备没有能打开视频的应用");
+            }
+        }
+        out.put("ok", true);
+        return out;
+    }
+
+    /**
+     * 拉起内置播放器（libVLC）。
+     *
+     * payload 是一份 JSON：{url, id, episode, title, cover, source, start, referer,
+     * ua, decode, cache, rate}。字段全部可选，缺的按默认值走 —— 页面那边写这份
+     * payload 的地方就一处（feed-player.js 的 nativePayload()）。
+     *
+     * 返回里带一个 fallback 标记：这台设备上没有内置播放器（32 位包没打进 so，
+     * 或者装的是精简过的包）时，页面要能退回网页播放器而不是什么都不发生。
+     */
+    private static JSONObject nativePlayer(Context context, String raw, JSONObject out) throws Exception {
+        if (raw == null || raw.length() == 0) return fail(out, "内置播放器没有收到参数");
+        if (!VlcPlayerActivity.available(context)) {
+            out.put("ok", false);
+            out.put("fallback", true);
+            out.put("error", "这个安装包没带内置播放器（只打了 " + VlcPlayerActivity.abi()
+                    + " 的 so），可以继续用网页播放器");
+            return out;
+        }
+        JSONObject config = new JSONObject(raw);
+        String url = config.optString("url", "");
+        if (url.length() == 0) return fail(out, "没有可播放的地址");
+        VlcPlayerActivity.start(context, config);
+        out.put("ok", true);
+        return out;
+    }
+
+    /** 内置播放器退出时写下的那一次现场。读到就清，避免同一条记录被算两次。 */
+    private static JSONObject lastNativeSession(Context context, JSONObject out) throws Exception {
+        JSONObject record = VlcPlayerActivity.takeLastSession(context);
+        out.put("ok", true);
+        out.put("session", record == null ? JSONObject.NULL : record);
+        return out;
+    }
+
+    private static JSONObject nativeCapability(Context context, JSONObject out) throws Exception {
+        out.put("ok", true);
+        out.put("native", VlcPlayerActivity.available(context));
+        out.put("abi", VlcPlayerActivity.abi());
+        return out;
+    }
+
     private static JSONObject player(Context context, String body, JSONObject out) {
         try {
             String action = body;
@@ -1939,6 +2048,16 @@ public final class UserSource {
 
             if ("brightness".equals(action)) return brightness(context, param(query, "value"), out);
             if ("variants".equals(action)) return variants(param(query, "url"), out);
+            // 交给系统播放器（MX / VLC / 自带图库）：WebView 解不了的编码
+            // （HEVC、10bit、冷门封装）只有设备自己的解码链能放，这条路是最后的兜底。
+            if ("external".equals(action)) return externalPlayer(context, param(query, "url"), out);
+            // 内置播放器（libVLC）。这是「别的手机放不了」的正面解法：解码链搬进
+            // App，不再跟着 WebView 版本和设备的硬解能力走。
+            if ("native".equals(action)) return nativePlayer(context, param(query, "payload"), out);
+            // 从内置播放器回来时取一次现场（位置/是否播完），取完就清。
+            if ("last".equals(action)) return lastNativeSession(context, out);
+            // 这台设备上到底有没有内置播放器可用（APK 只带了 arm64-v8a）。
+            if ("capability".equals(action)) return nativeCapability(context, out);
             return fail(out, "不认识的播放指令：" + action);
         } catch (Throwable e) {
             return fail(out, "播放指令失败：" + e.getClass().getSimpleName() + " " + e.getMessage());

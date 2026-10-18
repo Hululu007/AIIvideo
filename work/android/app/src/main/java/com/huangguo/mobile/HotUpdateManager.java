@@ -40,7 +40,25 @@ import org.json.JSONObject;
 
 final class HotUpdateManager {
     static final int BRIDGE_VERSION = 1;
-    private static final long BUNDLED_UI_REVISION = 15;
+    /**
+     * **这个 APK 内置的界面是哪个 revision。**
+     *
+     * 发版时填「当前 hot/ 里最新的那个 revision」。它有三个用处：
+     *
+     *   1. requireCompatible()：低于它的热更包一律判不兼容 —— 那些包的界面比
+     *      APK 里带的还旧，装上去是倒退。
+     *   2. check()：只有 revision 比它高的包才值得下载。装完新 APK 之后，
+     *      远程那份「和内置界面一样旧」的包不该被重新拉下来盖住新界面。
+     *   3. status()：让设置页那行能显示「内置界面 r…」，和热更包的 revision
+     *      用同一套编号，用户能自己比对谁新谁旧。
+     *
+     * ── 它**不是**「挡住旧 APK 界面」的开关 ──
+     * 2026-10-18 上午它被临时抬到 20261018120000 去顶掉设备上的旧设置页包，
+     * 那是错位用法：靠「revision 太小」间接实现「换了 APK 就别用旧包」，忘改
+     * 一次就失效。后者现在由 activeBelongsToAnotherApk() 按 apkVersionCode
+     * 自动判断，不依赖任何人记得改常量。
+     */
+    private static final long BUNDLED_UI_REVISION = 20261018120000L;
     /**
      * 热更清单的候选地址。2026-10-18 起全部指向 GitHub 仓库的 hot/ 目录，
      * 不再依赖自己的服务器 —— 理由见 Endpoints.HOT_RAW 的注释。
@@ -135,6 +153,49 @@ final class HotUpdateManager {
         return new File(this.root, Long.toString(j));
     }
 
+    /**
+     * 当前 APK 的 versionCode。每次启动读一次，安装包换了它必然变。
+     */
+    private int currentVersionCode() {
+        try {
+            return this.context.getPackageManager().getPackageInfo(this.context.getPackageName(), 0).versionCode;
+        } catch (Exception unused) {
+            return -1;
+        }
+    }
+
+    /**
+     * 热更层是「叠在 assets 之上」：包里有的文件用包里的，没有的才回落到 APK。
+     * 所以只要包还在，它就会盖住 APK 里更新的界面。
+     *
+     * 而 requireCompatible() 只看 minVersionCode / maxVersionCode —— 那对数字
+     * 描述的是「这个包能不能跑在这个 APK 上」，不是「这个包的界面是不是比 APK
+     * 里的新」。结果是：发一版带新界面的 APK，设备上那份旧包照样合格、照样优先，
+     * 用户装完新 APK 看到的还是旧界面 —— 除非发版时记得把 BUNDLED_UI_REVISION
+     * 抬到旧包之上。那是个需要人肉对拍的约定，忘一次就出事（2026-10-18 就忘了）。
+     *
+     * 现在改成看**事实**：这份包是在哪个 versionCode 上启用的（记在 state.json，
+     * 那是我们自己的文件，不受签名约束）。APK 一换，这份包对「当前这个 APK 的
+     * 界面」就没有发言权了 —— 它的界面是给上一个 APK 准备的，而当前 APK 的
+     * assets 是随它一起打出来的、必然更新。这时退回内置。
+     *
+     * 注意区分两种「失效」：
+     *   · 包不兼容（minVersionCode 太高 / bridgeVersion 变了）→ 标 blocked，永久不用
+     *   · 包是旧 APK 的（这里）→ 只是**不用**，不标 blocked。用户降级回旧 APK
+     *     时它还能接着用；下次热更发了更高的 revision 也会正常替换。
+     */
+    private boolean activeBelongsToAnotherApk(JSONObject jSONObjectState) {
+        long active = jSONObjectState.optLong("active");
+        if (active == 0) {
+            return false;
+        }
+        // 老版本没有这个字段（0 = 从没记过）。那一次按「属于当前 APK」处理，
+        // 免得升级 APK 时把所有人正在用的热更包一次性作废；记下来之后就准了。
+        int recorded = jSONObjectState.optInt("apkVersionCode", 0);
+        int current = currentVersionCode();
+        return recorded != 0 && current != -1 && recorded != current;
+    }
+
     private JSONObject metadata(long j) throws Exception {
         return verifyEnvelope(read(new FileInputStream(new File(directory(j), "envelope.json")), 262144));
     }
@@ -186,12 +247,33 @@ final class HotUpdateManager {
                     jOptLong = jSONObjectState.optLong("pending");
                     long jOptLong2 = jSONObjectState.optLong("active");
                     z = true;
+                    // 换了 APK 就把生效中那份热更包放掉。
+                    //
+                    // 热更叠在 assets 之上，所以只要包还在就会盖住 APK 里的新界面。
+                    // 而「包合格」只看 minVersionCode 那对数字，不看界面新旧 ——
+                    // 装一版带新界面的 APK，旧包照样合格、照样优先，用户看到的
+                    // 还是旧界面。这条判断就是补上那个缺口：包是在别的 versionCode
+                    // 上启用的，它的界面就不是给这个 APK 准备的。
+                    //
+                    // 不标 blocked：它本身没坏，只是对当前 APK 过期了。用户降级
+                    // 回旧 APK 时还能用；下一次热更发了更高的 revision 也会正常替换。
+                    if (activeBelongsToAnotherApk(jSONObjectState)) {
+                        android.util.Log.d("AIIvideo", "[hot] APK 已更新（"
+                                + jSONObjectState.optInt("apkVersionCode") + " → " + currentVersionCode()
+                                + "），生效中的 r" + jOptLong2 + " 是旧 APK 的界面，退回内置");
+                        jSONObjectState.put("previous", 0).put("active", 0).put("trial", 0).put("apkVersionCode", 0);
+                        save(jSONObjectState);
+                        jOptLong2 = 0;
+                    }
                     if (jOptLong <= jOptLong2 || jOptLong == jSONObjectState.optLong("blocked")) {
                         jOptLong = jOptLong2;
                     } else {
                         try {
                             load(jOptLong, true);
                             jSONObjectState.put("previous", jOptLong2).put("active", jOptLong).put("pending", 0).put("trial", jOptLong);
+                            // 记下这份包是在哪个 APK 上启用的 —— 下次 APK 一换，
+                            // 上面那段判断就能立刻发现它过期了。
+                            jSONObjectState.put("apkVersionCode", currentVersionCode());
                             save(jSONObjectState);
                         } catch (Exception e) {
                             android.util.Log.w("AIIvideo", "[hot] 新版本 " + jOptLong + " 加载失败，标记 blocked", e);
@@ -202,6 +284,15 @@ final class HotUpdateManager {
                     }
                     if (jSONObjectState.optLong("trial") != jOptLong || jOptLong == 0) {
                         z = false;
+                    }
+                    // 老版本没有 apkVersionCode 这个字段（装在 1.0.24 之前的热更包
+                    // 从没记过）。那一次按「属于当前 APK」放行，同时把当前值补记上 ——
+                    // 否则每一次升级都会被判成「包是旧 APK 的」，热更层等于永久失效。
+                    //
+                    // 记的位置在 active 确定之后：这里 active 已经是最终要用的那份。
+                    if (jOptLong != 0 && jSONObjectState.optInt("apkVersionCode", 0) == 0) {
+                        jSONObjectState.put("apkVersionCode", currentVersionCode());
+                        save(jSONObjectState);
                     }
                 } catch (Exception e) {
                     android.util.Log.w("AIIvideo", "[hot] 会话初始化失败，回滚到 active", e);
@@ -219,7 +310,27 @@ final class HotUpdateManager {
         try {
             return load(jOptLong, z);
         } catch (Exception e) {
-            throw new IllegalStateException(e);
+            // 这条路径以前是直接抛 IllegalStateException 的，而它在 onCreate 里，
+            // 抛出去就是「装完新版 APK 一启动就闪退」。
+            //
+            // 触发条件很具体：**已经生效的那份热更包变得不兼容了**。上面那一段
+            // 只在 pending > active 时才试加载并兜底，而「active 自己不再合格」
+            // （BUNDLED_UI_REVISION 抬高、versionCode 变了、contentModeVersion
+            // 变了）走的正是这一条 —— 没有任何 catch。
+            //
+            // 正确反应和 pending 加载失败时一样：把这份标 blocked，退回内置界面。
+            // 内置那份永远和当前 APK 匹配，它不会也不该跟着热更包一起死。
+            android.util.Log.w("AIIvideo", "[hot] 生效中的资源包 r" + jOptLong + " 已不兼容，退回内置界面", e);
+            try {
+                JSONObject cleared = state();
+                cleared.put("blocked", jOptLong).put("pending", 0).put("active", 0).put("trial", 0);
+                save(cleared);
+            } catch (Exception ignored) {}
+            try {
+                return load(0L, false);
+            } catch (Exception fallbackFailed) {
+                throw new IllegalStateException(fallbackFailed);
+            }
         }
     }
 
@@ -261,7 +372,16 @@ final class HotUpdateManager {
                 string = "内置";
             }
         }
-        return new JSONObject().put("revision", jOptLong).put("version", string).put("pending", jOptLong2).put("checking", this.checking.get()).put("blocked", jSONObjectState.optLong("blocked")).put("bridgeVersion", 1);
+        return new JSONObject()
+                .put("revision", jOptLong)
+                .put("version", string)
+                // 内置界面是哪一版。active 为 0 时 revision 就是它 —— 设置页那行
+                // 用同一套编号显示，用户能自己比对「内置 rX」和「热更 rY」谁新。
+                .put("bundled", BUNDLED_UI_REVISION)
+                .put("pending", jOptLong2)
+                .put("checking", this.checking.get())
+                .put("blocked", jSONObjectState.optLong("blocked"))
+                .put("bridgeVersion", 1);
     }
 
     boolean hasPending() {
@@ -293,7 +413,16 @@ final class HotUpdateManager {
                 long j = jSONObjectVerifyEnvelope.getLong("revision");
                 synchronized (this) {
                     JSONObject jSONObjectState = state();
-                    if (j <= Math.max(Math.max(jSONObjectState.optLong("active"), jSONObjectState.optLong("pending")), jSONObjectState.optLong("blocked"))) {
+                    // 门槛里要算上**内置界面**那一版。
+                    //
+                    // 原来只比 active / pending / blocked 三个数。装完新 APK、旧包
+                    // 被 activeBelongsToAnotherApk 放掉之后，这三个都是 0，于是远程
+                    // 那份「和内置界面一样旧」的包会被重新下载并盖上来 —— 新界面
+                    // 又变回旧的。把 BUNDLED_UI_REVISION 算进下限就没有这个洞。
+                    long floor = Math.max(
+                            Math.max(jSONObjectState.optLong("active"), jSONObjectState.optLong("pending")),
+                            Math.max(jSONObjectState.optLong("blocked"), BUNDLED_UI_REVISION));
+                    if (j <= floor) {
                         jSONObjectPut = status().put("checking", false);
                     } else {
                         stage(bArrDownload, downloadFirst(Endpoints.mirrorsOf(jSONObjectVerifyEnvelope.getString("url")), 12582912));

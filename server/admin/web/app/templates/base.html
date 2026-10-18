@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}AIIvideo 后台{% endblock %}</title>
+<link rel="stylesheet" href="{{ mount }}/static/app.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="side">
+    <div class="brand">AIIvideo<span>后台</span></div>
+    <nav>
+      <a href="{{ mount }}/" class="{{ 'on' if request.url.path == '/admin/' else '' }}">总览</a>
+      <a href="{{ mount }}/sources" class="{{ 'on' if '/sources' in request.url.path else '' }}">源文件</a>
+      <a href="{{ mount }}/market" class="{{ 'on' if '/market' in request.url.path else '' }}">市场清单</a>
+      <a href="{{ mount }}/users" class="{{ 'on' if '/users' in request.url.path else '' }}">App 用户</a>
+      <a href="{{ mount }}/audit" class="{{ 'on' if '/audit' in request.url.path else '' }}">审计日志</a>
+      <a href="{{ mount }}/account" class="{{ 'on' if '/account' in request.url.path else '' }}">我的账号</a>
+    </nav>
+    <form method="post" action="{{ mount }}/logout" class="logout">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <span class="who">{{ session.username }}</span>
+      <button type="submit">退出</button>
+    </form>
+  </aside>
+  <main class="main">
+    {% if ok %}<div class="flash ok">{{ ok }}</div>{% endif %}
+    {% if err %}<div class="flash bad">{{ err }}</div>{% endif %}
+    {% block body %}{% endblock %}
+  </main>
+</div>
+</body>
+</html>

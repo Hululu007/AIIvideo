@@ -154,29 +154,6 @@ public final class AiiHttp {
 
     private AiiHttp() {}
 
-    // ── 原生库集成探针（临时，验证完删掉）────────────────────────────
-    //
-    // 要验证的事：cz_repack/lib/arm64-v8a/*.so 能不能被打进 APK、并且真的加载起来。
-    // 这个项目是 apktool 重打包、没有 Gradle，从来没塞过原生库；而 manifest 里
-    // 写着 extractNativeLibs="false" —— 那要求 .so **不压缩 + 4KB 页对齐**，
-    // 任何一条不满足都会在加载时失败，报错还很难懂（通常只是一句
-    // "couldn't find library"）。
-    //
-    // 探针挂在第一次请求上，而不是去改 MainActivity 的 smali：这里够早，
-    // 而且 AiiHttp 在 java-src 里，改动可逆。测完整块删掉。
-    private static volatile boolean nativeProbed = false;
-
-    private static void probeNativeOnce() {
-        if (nativeProbed) return;
-        nativeProbed = true;
-        try {
-            System.loadLibrary("testprobe");
-            log("原生库探针 OK：libtestprobe 已加载");
-        } catch (Throwable e) {
-            log("原生库探针失败：" + e.getClass().getSimpleName() + " " + e.getMessage());
-        }
-    }
-
     // ── 对外入口 ──────────────────────────────────────────────────────
 
     /**
@@ -184,7 +161,6 @@ public final class AiiHttp {
      * 签名与改造前的 SiteRepository.fetch 对齐，异常语义也一样（抛 Exception）。
      */
     public static byte[] get(String url, SiteProfile profile) throws Exception {
-        probeNativeOnce();
         // 按适配器分流。cms 那类源的地址是「CMS 接口」，不是「origin + 路径」，
         // 走不了下面的解析/DoH 那一套 —— 由 CmsAdapter 自己拼 URL、自己映射形状。
         // 它返回的必须是**我们内部的 JSON 形状**，这样前端的 adapters.js 不用改。
@@ -277,15 +253,44 @@ public final class AiiHttp {
         return fetchUncached(url, profile);
     }
 
+    /**
+     * 判定「这条连接被中途掐断」。2026-10-17 实测：api.agedm.io 走 Cloudflare，
+     * 手机网络上 HTTP/2 会在 1.5 秒左右被重置（unexpected end of stream），而同一条
+     * 网络里 HTTP/1.1 完全正常 —— 典型是中间设备不认 h2。这类错误重试同一协议
+     * 没有意义，只能换协议。
+     */
+    static boolean isStreamBreak(Throwable error) {
+        Throwable t = error;
+        while (t != null) {
+            // SocketTimeoutException 也算：h2 的连接池里挂着一条其实已经死掉的链路时，
+            // 表现就是读完超时（实测 AGE 的播放解析被这个卡住，同一条网络 curl 0.2 秒）。
+            if (t instanceof java.net.SocketTimeoutException) return true;
+            String m = t.getMessage() == null ? "" : t.getMessage().toLowerCase();
+            if (m.contains("unexpected end of stream") || m.contains("stream was reset")
+                    || m.contains("connection reset") || m.contains("broken pipe")
+                    || m.contains("protocol error") || m.contains("timeout")) return true;
+            t = t.getCause();
+        }
+        return false;
+    }
+
     /** 真正的网络取数。get() 负责分流、预热命中、然后调它。 */
     private static byte[] fetchUncached(String url, SiteProfile profile) throws Exception {
         log("GET " + hostOfUrl(url) + pathOfUrl(url));
-        OkHttpClient http = client(profile);
+        try {
+            return getWith(client(profile), url, profile);
+        } catch (IOException e) {
+            if (!isStreamBreak(e)) throw e;
+            log("HTTP/2 被重置，降级 HTTP/1.1 重试 " + pathOfUrl(url));
+            return getWith(http1Client(profile), url, profile);
+        }
+    }
+
+    private static byte[] getWith(OkHttpClient http, String url, SiteProfile profile) throws Exception {
         Request.Builder builder = new Request.Builder().url(url);
         applyHeaders(builder, profile, url);
         // 不要压缩。这条链路本来就慢，多一次解压不值当，也让响应体大小可预期。
         builder.header("Accept-Encoding", "identity");
-
         Response response = http.newCall(builder.build()).execute();
         try {
             int code = response.code();
@@ -528,7 +533,17 @@ public final class AiiHttp {
                 .url(url)
                 .header("Accept-Encoding", "identity")
                 .build();
-        Response response = plainClient(timeoutSeconds).newCall(request).execute();
+        try {
+            return rawWith(plainClient(timeoutSeconds), request, url);
+        } catch (IOException e) {
+            if (!isStreamBreak(e)) throw e;
+            log("HTTP/2 被重置，降级 HTTP/1.1 重试 " + pathOfUrl(url));
+            return rawWith(plainHttp1Client(timeoutSeconds), request, url);
+        }
+    }
+
+    private static byte[] rawWith(OkHttpClient http, Request request, String url) throws Exception {
+        Response response = http.newCall(request).execute();
         try {
             if (!response.isSuccessful()) throw new IOException("HTTP " + response.code() + " @ " + url);
             ResponseBody body = response.body();
@@ -547,12 +562,13 @@ public final class AiiHttp {
             for (java.util.Map.Entry<String, String> e : headers.entrySet()) builder.header(e.getKey(), e.getValue());
         }
         log("GET " + hostOfUrl(url) + pathOfUrl(url));
-        Response response = plainClient(timeoutSeconds).newCall(builder.build()).execute();
+        Request request = builder.build();
         try {
-            ResponseBody body = response.body();
-            return body == null ? new byte[0] : body.bytes();
-        } finally {
-            response.close();
+            return rawWith(plainClient(timeoutSeconds), request, url);
+        } catch (IOException e) {
+            if (!isStreamBreak(e)) throw e;
+            log("HTTP/2 被重置，降级 HTTP/1.1 重试 " + pathOfUrl(url));
+            return rawWith(plainHttp1Client(timeoutSeconds), request, url);
         }
     }
 
@@ -573,13 +589,13 @@ public final class AiiHttp {
             for (java.util.Map.Entry<String, String> e : headers.entrySet()) builder.header(e.getKey(), e.getValue());
         }
         log("POST " + hostOfUrl(url) + pathOfUrl(url));
-        Response response = plainClient(timeoutSeconds).newCall(builder.build()).execute();
+        Request request = builder.build();
         try {
-            if (!response.isSuccessful()) throw new IOException("HTTP " + response.code() + " @ " + url);
-            ResponseBody body = response.body();
-            return body == null ? new byte[0] : body.bytes();
-        } finally {
-            response.close();
+            return rawWith(plainClient(timeoutSeconds), request, url);
+        } catch (IOException e) {
+            if (!isStreamBreak(e)) throw e;
+            log("HTTP/2 被重置，降级 HTTP/1.1 重试 " + pathOfUrl(url));
+            return rawWith(plainHttp1Client(timeoutSeconds), request, url);
         }
     }
 
@@ -606,6 +622,33 @@ public final class AiiHttp {
                 appliedProxy = want;
             }
             return client;
+        }
+    }
+
+    /** 只谈 HTTP/1.1 的同一套客户端。给「h2 被中间设备重置」的场景兜底用。 */
+    private static volatile OkHttpClient http1Client;
+    private static volatile String http1AppliedProxy = null;
+
+    private static OkHttpClient http1Client(SiteProfile profile) {
+        final String want = proxyRaw();
+        OkHttpClient existing = http1Client;
+        if (existing != null && want.equals(http1AppliedProxy)) return existing;
+        synchronized (AiiHttp.class) {
+            if (http1Client == null || !want.equals(http1AppliedProxy)) {
+                OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                        .dns(new SmartDns(profile))
+                        .protocols(java.util.Collections.singletonList(okhttp3.Protocol.HTTP_1_1))
+                        .connectTimeout(CONNECT_TIMEOUT, TimeUnit.SECONDS)
+                        .readTimeout(READ_TIMEOUT, TimeUnit.SECONDS);
+                Route route = parseProxy(want);
+                if (route != null) {
+                    builder.proxy(route.proxy);
+                    attachAuth(builder, route);
+                }
+                http1Client = builder.build();
+                http1AppliedProxy = want;
+            }
+            return http1Client;
         }
     }
 
@@ -638,6 +681,32 @@ public final class AiiHttp {
                 plainAppliedProxy = want;
             }
             return plainClient;
+        }
+    }
+
+    /** plain 客户端的 HTTP/1.1 变体，用途同上：h2 被掐时的兜底。 */
+    private static volatile OkHttpClient plainHttp1;
+    private static volatile String plainHttp1AppliedProxy = null;
+
+    private static OkHttpClient plainHttp1Client(int timeoutSeconds) {
+        final String want = proxyRaw();
+        OkHttpClient existing = plainHttp1;
+        if (existing != null && want.equals(plainHttp1AppliedProxy)) return existing;
+        synchronized (AiiHttp.class) {
+            if (plainHttp1 == null || !want.equals(plainHttp1AppliedProxy)) {
+                OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                        .protocols(java.util.Collections.singletonList(okhttp3.Protocol.HTTP_1_1))
+                        .connectTimeout(timeoutSeconds, TimeUnit.SECONDS)
+                        .readTimeout(timeoutSeconds, TimeUnit.SECONDS);
+                Route route = parseProxy(want);
+                if (route != null) {
+                    builder.proxy(route.proxy);
+                    attachAuth(builder, route);
+                }
+                plainHttp1 = builder.build();
+                plainHttp1AppliedProxy = want;
+            }
+            return plainHttp1;
         }
     }
 

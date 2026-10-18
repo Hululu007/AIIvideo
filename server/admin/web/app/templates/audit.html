@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}审计日志 · AIIvideo 后台{% endblock %}
+{% block body %}
+<h1>审计日志</h1>
+<p class="muted">最近 300 条。只记动作与目标，不记内容。</p>
+<table>
+  <thead><tr><th>时间</th><th>账号</th><th>动作</th><th>目标</th><th>说明</th><th>IP</th></tr></thead>
+  <tbody>
+  {% for row in rows %}
+  <tr>
+    <td class="muted">{{ row.at }}</td>
+    <td>{{ row.actor }}</td>
+    <td><code>{{ row.action }}</code></td>
+    <td>{{ row.target }}</td>
+    <td class="muted">{{ row.detail }}</td>
+    <td class="muted">{{ row.ip }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

@@ -391,15 +391,85 @@ const icon = name => {
   const paths = {
     play: '<path d="m8 5 11 7-11 7z"/>',
     arrow: '<path d="m9 5 7 7-7 7"/>',
-    back: '<path d="m15 5-7 7 7 7"/>'
+    back: '<path d="m15 5-7 7 7 7"/>',
+    // 设置页每一行左边那个「这是哪一类」的符号。全部 1.9 描边、圆角端点，
+    // 和 dock 那排同一种手感 —— 混用粗细会让分组看起来像两个人画的。
+    account: '<circle cx="12" cy="8" r="3.6"/><path d="M4.8 20.4c.6-4 3.2-6 7.2-6s6.6 2 7.2 6"/>',
+    source: '<path d="M10.5 13.5a4 4 0 0 0 5.7 0l2.6-2.6a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M13.5 10.5a4 4 0 0 0-5.7 0l-2.6 2.6a4 4 0 0 0 5.7 5.7l1-1"/>',
+    proxy: '<path d="M12 3.2 5 6v6c0 4.2 2.9 7.4 7 8.8 4.1-1.4 7-4.6 7-8.8V6z"/><path d="m9.2 12 2 2 3.6-3.8"/>',
+    player: '<circle cx="12" cy="12" r="8.6"/><path d="m10.2 8.6 5.4 3.4-5.4 3.4z" fill="currentColor" stroke="none"/>',
+    theme: '<circle cx="12" cy="12" r="8.4"/><path d="M12 3.6v16.8" /><path d="M12 3.6a8.4 8.4 0 0 1 0 16.8z" fill="currentColor" stroke="none" opacity=".9"/>',
+    market: '<path d="M4.4 9.6h15.2l-1 9.2a1.8 1.8 0 0 1-1.8 1.6H7.2a1.8 1.8 0 0 1-1.8-1.6z"/><path d="M8.6 9.6V7.4a3.4 3.4 0 0 1 6.8 0v2.2"/>',
+    storage: '<path d="M5 7.4h14M6.4 7.4 7.6 19a1.8 1.8 0 0 0 1.8 1.6h5.2A1.8 1.8 0 0 0 16.4 19l1.2-11.6"/><path d="M9.6 11v6M14.4 11v6"/>',
+    update: '<path d="M12 3.8v10.4"/><path d="m8 10.6 4 4 4-4"/><path d="M4.6 17.4v1.6a1.6 1.6 0 0 0 1.6 1.6h11.6a1.6 1.6 0 0 0 1.6-1.6v-1.6"/>',
+    check: '<path d="m5.4 12.6 4.2 4.2 9-9.4"/>',
+    chevron: '<path d="m9 5 7 7-7 7"/>',
+    library: '<rect x="3.6" y="5" width="16.8" height="14" rx="2.4"/><path d="M8.6 5v14"/>',
+    reset: '<path d="M4.8 12a7.2 7.2 0 1 0 2.2-5.2"/><path d="M4.6 4.6v4h4"/>'
   };
-  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name]}</svg>`;
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || ''}</svg>`;
 };
+
+// ── 按下去要有东西发生 ────────────────────────────────────────────────
+//
+// 三件事必须同时发生，缺一件就会「感觉没点上」：
+//   ① 手指落下的那一帧就震一下（不是等 click、更不是等请求回来）
+//   ② 被按的那个面上漾开一圈涟漪，起点就是手指的位置
+//   ③ 松开时那一下回弹（CSS :active，见 app.css 的 .press）
+//
+// 震动走 AndroidHost.haptic 而不是桥指令：桥是异步回包，等一个来回再震，
+// 手指早抬起来了。原生侧有 24ms 去重，一帧里叠两个事件也只震一次。
+function haptic(kind = 'light') {
+  try { window.AndroidHost?.haptic?.(kind); } catch (error) {}
+}
+
+// 涟漪。只在 pointerdown 时插一个 span，animationend 自己删 —— 不挂全局状态，
+// 连续快速点按不会互相干扰。
+const RIPPLE_HOSTS = [
+  // 设置页 v2
+  'button.settings-row', '.settings-mini', '.settings-cta', '.settings-quiet',
+  '.settings-danger-button', '.settings-seg-item', '.settings-row button',
+  // 设置页的二级页（内容源 / 代理 / 播放器）
+  '.player-options button', '.source-pick', '.source-note', '.source-drop',
+  '.speed-item', '.source-refetch', '.settings-account button',
+  '.settings-storage button', '.listing-back',
+  // 全站
+  '#dock button', '.segmented button', '.more', '.filter-row button',
+  '.theme-choice-item'
+].join(',');
+
+function spawnRipple(target, event) {
+  if (!target || target.disabled) return;
+  if (reducedMotionQuery && reducedMotionQuery.matches) return;
+  const box = target.getBoundingClientRect();
+  if (!box.width || !box.height) return;
+  // 涟漪半径取到最远的那个角，圆才盖得住整个按钮。
+  const x = (event && event.clientX ? event.clientX : box.left + box.width / 2) - box.left;
+  const y = (event && event.clientY ? event.clientY : box.top + box.height / 2) - box.top;
+  const radius = Math.hypot(Math.max(x, box.width - x), Math.max(y, box.height - y));
+  const ripple = document.createElement('span');
+  ripple.className = 'press-ripple';
+  ripple.style.cssText = `left:${x}px;top:${y}px;width:${radius * 2}px;height:${radius * 2}px`;
+  target.classList.add('press-host');
+  target.appendChild(ripple);
+  ripple.addEventListener('animationend', () => ripple.remove(), { once: true });
+  // 兜底：动画被系统跳过（省电模式 / 后台标签）时也要清掉，别越堆越多。
+  window.setTimeout(() => ripple.remove(), 700);
+}
+
+document.addEventListener('pointerdown', event => {
+  const target = event.target.closest?.(RIPPLE_HOSTS);
+  if (!target || target.disabled) return;
+  haptic(target.closest('#dock') ? 'medium' : 'light');
+  spawnRipple(target, event);
+}, { capture: true, passive: true });
 
 function toast(message, info = false) {
   // 每条提示都落到 logcat（MainActivity 的 onConsoleMessage 会转发），
   // 真机上"一闪而过的红条"只能靠这个抓 —— 事后看 DOM 分不清是这次弹的还是上次留的。
   console.log('[toast] ' + message);
+  // 提示条一闪就没了，眼睛可能正看着别处。补一记触感，让结果不依赖「有没有看到」。
+  haptic(info ? 'error' : 'success');
   clearTimeout(toastTimer);
   toastHost.innerHTML = `<div class="toast ${info ? 'info' : ''}"><i></i><span>${esc(message)}</span></div>`;
   toastHost.classList.add('visible');
@@ -441,7 +511,7 @@ function setAccount(profile) {
   avatarButton.classList.toggle('is-signed-in', Boolean(profile?.loggedIn));
   avatarButton.setAttribute('aria-label', profile?.loggedIn ? `打开${profile.username}的账号管理` : '登录账号');
   if (state.route === 'library') renderLibrary();
-  if (state.route === 'settings') renderSettings();
+  if (state.route === 'settings') renderSettingsKeepScroll();
   if (state.route === 'account-management' && !content.querySelector('#password-form')?.contains(document.activeElement)) renderAccountManagement();
   if (state.route === 'proxy-settings' && !content.querySelector('#proxy-form')?.contains(document.activeElement)) renderProxySettings();
   if (state.route === 'player-settings') renderPlayerSettings();
@@ -584,12 +654,13 @@ function setThemeMode(mode) {
     try { document.startViewTransition(commit); } catch (error) { commit(); }
   } else commit();
   if (state.route === 'settings') {
-    const top = scroll.scrollTop;
-    renderSettings();
-    scroll.scrollTop = top;
+    renderSettingsKeepScroll();
+    // 焦点留在刚选中的那一格上，键盘/读屏用户连点三个不用重新找位置。
     requestAnimationFrame(() => content.querySelector(`[data-theme-mode="${mode}"]`)?.focus({ preventScroll: true }));
   }
-  toast(`外观已切换为${mode === 'system' ? '跟随系统' : mode === 'dark' ? '深色' : '浅色'}`);
+  // 主题切换的反馈就是屏幕本身（整屏交叉淡化），不再补 toast ——
+  // 弹一条「外观已切换为深色」去解释一件已经看见的事，纯属噪音。
+  haptic('light');
 }
 // 系统深色变化时原生会调这个。用户明确选了浅/深就尊重用户的选择。
 window.hgTheme = dark => {
@@ -616,16 +687,15 @@ let hotNeedsNewApp = '';
 let hotNoticeRevision = 0;
 let hotHealthyMarked = false;
 
-function hotUpdateLabel(status = hotStatus) {
-  if (!status) return '读取中…';
-  const revision = Number(status.revision) || 0;
-  if (!revision) return '内置界面';
-  return `热更新 r${revision}${status.version ? ` · ${status.version}` : ''}`;
+/** 「内置界面」还是「r20261018103000」。设置页那行副标题只要这一句。 */
+function uiRevisionLabel(status = hotStatus) {
+  const revision = Number(status?.revision) || 0;
+  return revision ? `界面 r${revision}` : '内置界面';
 }
 function syncHotStatus(status) {
   if (!status || typeof status !== 'object') return;
   hotStatus = status;
-  if (state.route === 'settings') renderSettings();
+  if (state.route === 'settings') renderSettingsKeepScroll();
   const pending = Number(status.pending) || 0;
   if (pending && pending !== hotNoticeRevision) {
     hotNoticeRevision = pending;
@@ -638,27 +708,70 @@ window.hgHotUpdateStatus = syncHotStatus;
 window.hgCanApplyHotUpdate = () => Boolean(hotStatus && Number(hotStatus.pending) > 0)
   && state.route === 'settings' && !document.hidden;
 
-function hotUpdateSection() {
+// 更新这一块：**一行**。
+//
+// 旧版是两个 section 各带一段解释（界面文件走签名包、当前运行哪一版、有没有
+// 待应用的更新……），一屏塞不下。用户真正要知道的只有：现在是什么版本、
+// 要不要点。所以压成一行 —— 左边图标 + 「版本」+ 副标题，右边一个状态胶囊，
+// 检查按钮只在需要动作时出现（renderUpdateCheck 换的是这一行的尾巴）。
+function updateSection() {
   const status = hotStatus;
   const pending = Number(status?.pending) || 0;
   const blocked = Number(status?.blocked) || 0;
-  const showBlocked = blocked > (Number(status?.revision) || 0);
-  const checking = hotCheckPending || Boolean(status?.checking);
-  return `<section class="settings-hot"><h2>前端热更新</h2>
-    <p>界面文件（HTML / CSS / JS）走签名包更新，改版不用重装 APK。当前运行：${esc(hotUpdateLabel(status))}。</p>
-    <div class="hot-update-meta"><i class="${pending ? 'is-ready' : ''}"></i><span>${pending ? `已下载 r${pending}，下次启动自动生效` : checking ? '正在检查更新…' : (hotNeedsNewApp || '没有待应用的更新')}</span></div>
-    <div class="hot-update-actions">
-      <button type="button" data-hot-check="1" ${checking ? 'disabled' : ''}>${checking ? '正在检查…' : '检查更新'}</button>
-      ${pending ? '<button type="button" class="hot-apply" data-hot-apply="1">立即应用并重启</button>' : ''}
+  const revision = Number(status?.revision) || 0;
+  const bundled = Number(status?.bundled) || 0;
+  const showBlocked = blocked > revision && revision > 0;
+  // 正在跑的界面到底是哪一版。revision 为 0 = 用的 APK 内置那份，这时要说的是
+  // 「内置 rX」而不是含糊的「内置界面」—— 和热更包用同一套编号，用户才能自己
+  // 比对谁新谁旧（也解释了为什么装完新 APK 界面就变了）。
+  const uiLabel = revision ? `热更 r${revision}` : bundled ? `内置 r${bundled}` : '内置界面';
+  return `<section class="settings-card" aria-label="版本与更新">
+    <div class="settings-row is-static" id="update-check-area">
+      <button type="button" class="settings-icon" data-secret-entry aria-label="当前版本 ${esc(appVersion || '读取中')}，${esc(uiLabel)}">${icon('update')}</button>
+      <span class="settings-body"><strong>版本</strong><small>${appVersion ? `v${esc(appVersion)}` : '读取中…'} · ${esc(uiLabel)}</small></span>
+      <span class="settings-tail" id="update-check-tail">${updateTailMarkup()}</span>
     </div>
-    ${hotNeedsNewApp ? '<div class="hot-update-actions"><button type="button" class="hot-apply" data-goto-app-update="1">去更新应用</button></div>' : ''}
-    ${showBlocked ? `<p class="hot-update-note">r${blocked} 没能正常启动，已回退到上一版；发一个更高的 revision 即可覆盖。</p>` : ''}
+    ${pending ? `<div class="settings-row is-action"><button type="button" class="settings-cta" data-hot-apply="1">立即应用新界面</button></div>` : ''}
+    ${hotNeedsNewApp ? `<div class="settings-row is-action"><button type="button" class="settings-cta" data-goto-app-update="1">去更新应用</button></div>` : ''}
+    ${showBlocked ? `<div class="settings-row is-static"><small class="settings-note">r${blocked} 没能启动，已回退到内置界面</small></div>` : ''}
   </section>`;
 }
+
+/**
+ * 版本行右边那一格。
+ *
+ * 三种形态，宽度都控制在一颗胶囊 / 一个按钮之内，所以这一行的高度永远不变 ——
+ * 旧版是整块 innerHTML 替换（提示句 / 进度条 / 按钮各一种高度），每换一次页面
+ * 就抖一下。
+ */
+function updateTailMarkup() {
+  const u = updateCheck;
+  const status = hotStatus;
+  const pending = Number(status?.pending) || 0;
+  const checking = hotCheckPending || Boolean(status?.checking);
+  if (u.phase === 'downloading') {
+    const pct = Math.min(100, Math.floor(u.progress));
+    const speed = u.progress < 100 ? fmtSpeed(updateSpeed.bps) : '';
+    return `<span class="update-progress"><span class="update-progress-bar"><i style="width:${pct}%"></i></span><small>${pct}%${speed ? ' · ' + speed : ''}</small></span>`;
+  }
+  if (u.phase === 'checking' || checking) return '<span class="settings-chip">检查中</span>';
+  if (u.phase === 'error') {
+    return `<button type="button" class="settings-mini" data-check-update="1">重试</button>`;
+  }
+  if (u.phase === 'available') {
+    const version = esc(u.info?.version || '');
+    return `<button type="button" class="settings-mini is-primary" data-download-update="1">更新到 v${version}</button>`;
+  }
+  if (pending) return `<span class="settings-chip is-ok">r${pending} 待应用</span>`;
+  if (hotNeedsNewApp) return '<span class="settings-chip is-warn">需要新版</span>';
+  if (u.phase === 'none') return '<span class="settings-chip is-ok">已是最新</span>';
+  return '<button type="button" class="settings-mini" data-check-update="1">检查</button>';
+}
+
 async function checkHotUpdate() {
   if (hotCheckPending) return;
   hotCheckPending = true;
-  if (state.route === 'settings') renderSettings();
+  if (state.route === 'settings') renderSettingsKeepScroll();
   try {
     const status = await api('check-hot-update');
     hotStatus = status;
@@ -675,7 +788,7 @@ async function checkHotUpdate() {
     }
   } finally {
     hotCheckPending = false;
-    if (state.route === 'settings') renderSettings();
+    if (state.route === 'settings') renderSettingsKeepScroll();
   }
 }
 function applyHotUpdate() {
@@ -1072,18 +1185,23 @@ function renderLibrary() {
   cover.hydrate();
 }
 
+// 外观。原来是一段说明 + 三张带副标题的卡片，现在压成一张卡里的一条分段控件：
+// 三个色块本身就是说明，选中态给实心描边 + 顶部一颗小勾，不靠文字确认。
+// 点一下整屏交叉淡化（setThemeMode 里的 View Transition），反馈直接落在屏幕上。
 function appearanceSection() {
   const mode = themeMode();
-  const choices = [
-    ['system', '跟随系统', '随手机切换'],
-    ['light', '浅色', '暖纸白'],
-    ['dark', '深色', '夜间低亮']
-  ];
-  return `<section class="settings-appearance"><h2>外观</h2><p>给眼睛挑一个舒服的亮度。跟随系统会随手机的深色模式自动切换。</p>
-    <div class="theme-choice" role="radiogroup" aria-label="界面主题">${choices.map(([value, label, hint]) => `<button type="button" role="radio" aria-checked="${mode === value}" class="theme-choice-item ${mode === value ? 'selected' : ''}" data-theme-mode="${value}">
-      <span class="theme-swatch swatch-${value}" aria-hidden="true"><i></i><b></b></span>
-      <span class="theme-choice-copy"><strong>${label}</strong><small>${hint}</small></span>
-    </button>`).join('')}</div></section>`;
+  const choices = [['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']];
+  return `<section class="settings-card" aria-label="外观">
+    <div class="settings-row is-static">
+      <span class="settings-icon">${icon('theme')}</span>
+      <span class="settings-body"><strong>外观</strong></span>
+    </div>
+    <div class="settings-seg" role="radiogroup" aria-label="界面主题">${choices.map(([value, label]) => `
+      <button type="button" role="radio" aria-checked="${mode === value}" class="settings-seg-item ${mode === value ? 'selected' : ''}" data-theme-mode="${value}">
+        <span class="theme-swatch swatch-${value}" aria-hidden="true"><i></i><b></b></span>
+        <span class="settings-seg-label">${label}</span>
+      </button>`).join('')}</div>
+  </section>`;
 }
 
 // ── 应用内 APK 更新 ─────────────────────────────────────────────────
@@ -1124,35 +1242,9 @@ function restoreUpdatePhase() {
 restoreUpdatePhase();
 
 function renderUpdateCheck() {
-  const area = document.getElementById('update-check-area');
-  if (!area) return;
-  const u = updateCheck;
-  if (u.phase === 'checking') { area.innerHTML = '<p class="update-note">正在检查更新…</p>'; return; }
-  if (u.phase === 'none') { area.innerHTML = '<p class="update-note">已是最新版本</p>'; return; }
-  if (u.phase === 'error') {
-    area.innerHTML = `<p class="update-note">${esc(u.message || '检查失败')}</p><button type="button" data-check-update="1">重试</button>`;
-    return;
-  }
-  if (u.phase === 'available') {
-    const size = u.info?.size ? ` · ${(u.info.size / 1048576).toFixed(1)} MB` : '';
-    area.innerHTML = `<div class="update-available"><div class="update-available-head"><strong>新版本 v${esc(u.info?.version || '')}</strong><small>${esc(size)}</small></div>${u.info?.notes ? `<p>${esc(u.info.notes)}</p>` : ''}<button type="button" data-download-update="1">下载并安装</button></div>`;
-    return;
-  }
-  if (u.phase === 'downloading') {
-    const pct = Math.min(100, Math.floor(u.progress));
-    let detail = `下载中 ${pct}%`;
-    if (u.progress < 100) {
-      // 速度和剩余时间是「等下值不值」的唯一线索。60MB 的包在 400KB/s 下要
-      // 两分半，只给百分比的话用户分不清是在下还是卡死了。
-      const speed = fmtSpeed(updateSpeed.bps);
-      if (speed) detail += ` · ${speed}`;
-      const left = remainingSeconds(pct);
-      if (left > 0) detail += ` · 约 ${fmtLeft(left)}`;
-    }
-    area.innerHTML = `<div class="update-progress"><div class="update-progress-bar"><i style="width:${pct}%"></i></div><small>${u.progress >= 100 ? '下载完成，正在拉起安装…' : detail}</small></div>`;
-    return;
-  }
-  area.innerHTML = '<button type="button" data-check-update="1">检查更新</button>';
+  const tail = document.getElementById('update-check-tail');
+  if (!tail) return;
+  tail.innerHTML = updateTailMarkup();
 }
 
 async function checkAppUpdate() {
@@ -1250,22 +1342,79 @@ window.hgUpdateFailed = () => {
 window.hgUpdateInstallPermissionDenied = () => toast('没有「安装未知应用」权限，请在系统设置里允许本应用', true);
 
 function renderSettings() {
-  content.innerHTML = `<div class="settings-page"><button type="button" class="listing-back" data-back="1">${icon('back')} 返回我的</button><h1>设置</h1>
-    <section><button type="button" class="settings-link" data-account-management="1"><span><strong>账号管理</strong><small>${state.account.loggedIn ? esc(state.account.username) : '登录或注册账号'}</small></span>${icon('arrow')}</button></section>
+  const account = state.account;
+  const net = proxyChip();
+  const player = playerChip();
+  const historyCount = asArray(state.library?.progress).length;
+  const bookmarkCount = asArray(state.library?.bookmarks).length;
+
+  content.innerHTML = `<div class="settings-page">
+    <button type="button" class="listing-back" data-back="1">${icon('back')} 返回我的</button>
+    <h1>设置</h1>
+
+    <section class="settings-card" aria-label="内容">
+      ${settingsRow('data-source-settings="1"', 'source', '内容源', state.sourceName || '还没有源',
+        state.sourceName ? (state.sourceCount > 1 ? `${state.sourceCount} 个` : '已启用') : '未配置',
+        state.sourceName ? 'is-ok' : 'is-warn')}
+      ${settingsRow('data-market="1"', 'market', '源市场', '点一下换一个源', '', '')}
+    </section>
+
+    <section class="settings-card" aria-label="播放与网络">
+      ${settingsRow('data-proxy-settings="1"', 'proxy', '网络代理', '', net.text, net.tone)}
+      ${settingsRow('data-player-settings="1"', 'player', '播放器', '', player.text, player.tone)}
+    </section>
+
     ${appearanceSection()}
-    ${hotUpdateSection()}
-    <section class="settings-library"><h2>片单管理</h2><p>${state.account.loggedIn ? '清空后会同步到当前账号的其他设备。' : '清空当前设备保存的片单。'}</p>
-      <button type="button" data-clear="history" ${asArray(state.library?.progress).length ? '' : 'disabled'}>清空观看历史</button>
-      <button type="button" data-clear="bookmarks" ${asArray(state.library?.bookmarks).length ? '' : 'disabled'}>清空我的收藏</button></section>
-    <section class="update-settings"><div><h2>应用更新</h2><button type="button" class="app-version" data-secret-entry aria-label="当前版本 ${esc(appVersion)}"><span class="app-version-text">版本 ${appVersion ? `v${esc(appVersion)}` : '读取中…'}</span></button><p>当前安装包版本。</p></div><div class="update-check-area" id="update-check-area"><button type="button" data-check-update="1">检查更新</button></div></section>
-    <section class="settings-storage"><h2>本地存储</h2><button type="button" data-clear="cache">清理内容缓存</button></section>
-      <section><button type="button" class="settings-link" data-market="1"><span><strong>源市场</strong><small>粘一个源清单地址，点卡片就能用</small></span>${icon('arrow')}</button></section>
-      <section><button type="button" class="settings-link" data-source-settings="1"><span><strong>内容源</strong><small>${state.sourceName ? esc(state.sourceName + '（' + state.sourceCount + ' 个已保存）') : '未配置'}</small></span>${icon('arrow')}</button></section>
-      <section><button type="button" class="settings-link" data-proxy-settings="1"><span><strong>网络代理</strong><small>${esc(proxySummary())}</small></span>${icon('arrow')}</button></section>
-      <section><button type="button" class="settings-link" data-player-settings="1"><span><strong>播放器</strong><small>${playerSummary()}</small></span>${icon('arrow')}</button></section>
-    <section class="settings-reset"><h2>恢复出厂设置</h2>
-      <p>退出登录，并清掉这台设备上的收藏、观看历史、内容缓存、内容源和代理，回到刚装好、还没填源的样子。账号本身和云端的片单不受影响，重新登录还能拿回来。</p>
-      <button type="button" data-factory-reset="1">恢复出厂设置</button></section></div>`;
+
+    <section class="settings-card" aria-label="账号">
+      ${settingsRow('data-account-management="1"', 'account', '账号',
+        account.loggedIn ? esc(account.username) : '登录后同步片单',
+        account.loggedIn ? '已登录' : '登录', account.loggedIn ? 'is-ok' : '')}
+    </section>
+
+    ${updateSection()}
+
+    <section class="settings-card" aria-label="片单与缓存">
+      <div class="settings-row is-static">
+        <span class="settings-icon">${icon('library')}</span>
+        <span class="settings-body"><strong>片单</strong><small>历史 ${historyCount} · 收藏 ${bookmarkCount}</small></span>
+        <span class="settings-tail">
+          <button type="button" class="settings-mini" data-clear="history" ${historyCount ? '' : 'disabled'}>清历史</button>
+          <button type="button" class="settings-mini" data-clear="bookmarks" ${bookmarkCount ? '' : 'disabled'}>清收藏</button>
+        </span>
+      </div>
+      <div class="settings-row is-static">
+        <span class="settings-icon">${icon('storage')}</span>
+        <span class="settings-body"><strong>缓存</strong><small>目录、封面、接口响应</small></span>
+        <span class="settings-tail"><button type="button" class="settings-mini" data-clear="cache">清理</button></span>
+      </div>
+    </section>
+
+    <section class="settings-card is-danger" aria-label="恢复出厂设置">
+      <div class="settings-row is-static">
+        <span class="settings-icon">${icon('reset')}</span>
+        <span class="settings-body"><strong>恢复出厂设置</strong><small>退出登录，清空内容源、代理、片单和缓存</small></span>
+      </div>
+      <div class="settings-row is-action">
+        <button type="button" class="settings-danger-button" data-factory-reset="1">恢复出厂设置</button>
+      </div>
+    </section>
+  </div>`;
+}
+
+/**
+ * 设置页的一行。整行是一个按钮：左边类别图标，中间标题，右边状态胶囊 + 箭头。
+ *
+ * 这里刻意不留说明段落 —— 原来每一块都是「h2 + 三行解释 + 按钮」，一屏塞不下，
+ * 用户得读三段话才知道点哪儿。状态改用胶囊（已连接 / 未配置 / 硬解）直接说结论，
+ * 解释挪进 aria-label 和二级页。
+ */
+function settingsRow(attributes, iconName, title, sub, chip, tone) {
+  return `<button type="button" class="settings-row" ${attributes}>
+    <span class="settings-icon">${icon(iconName)}</span>
+    <span class="settings-body"><strong>${esc(title)}</strong>${sub ? `<small>${esc(sub)}</small>` : ''}</span>
+    <span class="settings-tail">${chip ? `<span class="settings-chip ${tone || ''}">${esc(chip)}</span>` : ''}${icon('chevron')}</span>
+  </button>`;
 }
 
 // 网络代理。实测直连那条链六次里四次 9~18 秒（cf-ray 落在 LAX），而换路由
@@ -1427,16 +1576,18 @@ function tvboxSection() {
     : box && box.items
       ? '<p class="field-hint">这份配置里没有能直接用的苹果CMS源（spider 类不支持）。</p>'
       : '';
-  return `<div class="tvbox-block">
-    <h2>导入 TVBox 配置</h2>
-    <p>粘贴一个 TVBox 单仓地址。只导入其中的苹果CMS源（type 0/1），需要下载执行的 spider 会跳过。</p>
-    ${box && box.error ? `<p class="auth-error" role="alert">${esc(box.error)}</p>` : ''}
-    <form id="tvbox-form" class="password-form${box && box.loading ? ' is-loading' : ''}">
-      <input id="tvbox-value" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://example.com/tvbox.json" value="${esc(box?.url || '')}">
+  return `<section class="settings-card" aria-label="TVBox 导入">
+    <div class="settings-row is-static">
+      <span class="settings-icon">${icon('update')}</span>
+      <span class="settings-body"><strong>TVBox 配置</strong><small>只导入苹果CMS源，spider 类会跳过</small></span>
+    </div>
+    <form id="tvbox-form" class="password-form settings-form${box && box.loading ? ' is-loading' : ''}">
+      <input id="tvbox-value" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://example.com/tvbox.json" value="${esc(box?.url || '')}" aria-label="TVBox 地址">
+      ${box && box.error ? `<p class="auth-error" role="alert">${esc(box.error)}</p>` : ''}
       <button type="submit" ${box && box.loading ? 'disabled' : ''}>${box && box.loading ? '正在解析…' : '解析配置'}</button>
     </form>
     ${rows}
-  </div>`;
+  </section>`;
 }
 
 function renderSourceSettings() {
@@ -1468,26 +1619,37 @@ function renderSourceSettings() {
       <button type="button" class="source-drop" data-source-forget="${esc(url)}" aria-label="删除 ${esc(label)}">×</button>
     </li>`;
   }).join('');
-  content.innerHTML = `<div class="settings-page"><button type="button" class="listing-back" data-back="1">${icon('back')} 返回设置</button><h1>内容源</h1>
-    <section class="settings-account">
-      <button type="button" class="source-refetch" data-market="1">打开源市场<small>粘一份清单地址，点一下就能加</small></button>
-      <p>切换源会重启应用。第二次之后走本地缓存，不用再等网络。</p>
-      <ul class="source-list">${rows || '<li class="source-empty">还没有保存过任何源</li>'}</ul>
-      ${active ? `<button type="button" class="source-refetch" data-source-refetch="${esc(String(active.url || ''))}">
-        重新拉取这个源的配置
-        <small>服务器上改了配置、这边一直用旧的，点这里。要联网，会重启。</small>
-      </button>` : ''}
-      <form id="source-form" class="password-form">
-        <label for="source-value">添加一个源</label>
-        <input id="source-value" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://example.com/source.json">
-        <label for="source-alias">备注（可留空）</label>
-        <input id="source-alias" type="text" maxlength="40" autocomplete="off" placeholder="给这个源起个名字，比如「量子」">
-        <p class="field-hint">地址必须以 https:// 开头。支持我们自己的 JSON 和苹果CMS 的接口地址。备注只是给人看的，随时能改。</p>
+
+  content.innerHTML = `<div class="settings-page">
+    <button type="button" class="listing-back" data-back="1">${icon('back')} 返回设置</button>
+    <h1>内容源</h1>
+
+    <section class="settings-card" aria-label="已保存的源">
+      <div class="settings-row is-static">
+        <span class="settings-icon">${icon('source')}</span>
+        <span class="settings-body"><strong>已保存</strong><small>${items.length ? `${items.length} 个 · 点一个切过去` : '还没有保存过任何源'}</small></span>
+        <span class="settings-tail"><button type="button" class="settings-mini" data-market="1">源市场</button></span>
+      </div>
+      ${items.length ? `<ul class="source-list">${rows}</ul>` : ''}
+      <p class="settings-form-hint">切换源会重启应用。第二次之后走本地缓存，不用再等网络。</p>
+      ${active ? `<div class="settings-row is-action"><button type="button" class="settings-quiet" data-source-refetch="${esc(String(active.url || ''))}">重新拉取这个源的配置</button></div>` : ''}
+    </section>
+
+    <section class="settings-card" aria-label="添加源">
+      <div class="settings-row is-static">
+        <span class="settings-icon">${icon('market')}</span>
+        <span class="settings-body"><strong>添加一个源</strong><small>地址必须以 https:// 开头</small></span>
+      </div>
+      <form id="source-form" class="password-form settings-form">
+        <input id="source-value" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://example.com/source.json" aria-label="源地址">
+        <input id="source-alias" type="text" maxlength="40" autocomplete="off" placeholder="备注（可留空），比如「量子」" aria-label="备注">
         <p id="source-error" class="auth-error" role="alert" hidden></p>
         <button type="submit">添加并切换</button>
       </form>
-      ${tvboxSection()}
-    </section></div>`;
+    </section>
+
+    ${tvboxSection()}
+  </div>`;
 }
 
 /** 写/清一个源的备注。空串 = 清掉，退回自动取的名字。 */
@@ -1579,7 +1741,23 @@ function applyProxyCore(status) {
   Object.keys(status || {}).forEach(key => { if (status[key] !== undefined) patch[key] = status[key]; });
   state.proxyCore = { ...proxyState(), ...patch, loaded: true };
   if (state.route === 'proxy-settings') renderProxySettings();
+  // 设置页那一行的胶囊也是从这里来的。不重画的话，用户在代理页连上节点、
+  // 退回设置，看到的还是进来时那个「未启动」。
+  else if (state.route === 'settings') renderSettingsKeepScroll();
   return state.proxyCore;
+}
+
+/**
+ * 重画设置页但保住滚动位置。
+ *
+ * 设置页的胶囊会跟着后台状态自己变（代理连上了、播放器探测回来了、源列表刷新了），
+ * 那些都是**异步**回来的。直接 renderSettings() 会整块换 innerHTML，滚动条跟着
+ * 跳回顶部 —— 用户刚滚到「恢复出厂设置」，一刷新就被扔回标题。
+ */
+function renderSettingsKeepScroll() {
+  const top = scroll.scrollTop;
+  renderSettings();
+  scroll.scrollTop = top;
 }
 
 // 冷启动恢复一次：盘上是「内置核心」就顺手拉起，不然用户重启完 App 会发现
@@ -1599,16 +1777,30 @@ function bootProxyCore(force) {
   return core.booting;
 }
 
-/** 设置页那一行的副标题。三种模式 + 核心在不在跑，一句话说完。 */
-function proxySummary() {
+/** 播放器那一行的胶囊。内核已经是 VLC 了，用户能选的实际只有硬解 / 软解。 */
+function playerChip() {
+  const info = state.nativeInfo;
+  if (info == null) return { text: '检测中', tone: '' };
+  if (!info.native) return { text: '不支持', tone: 'is-warn' };
+  return playerPrefs().decode === 'sw' ? { text: '软解', tone: 'is-ok' } : { text: '硬解', tone: 'is-ok' };
+}
+
+/**
+ * 设置页那一行右侧的状态胶囊。
+ *
+ * 返回 {text, tone}，text 控制在 2~5 个字 —— 那一格只有约 90px 宽，
+ * 塞一句「内置核心 · 127.0.0.1:39693 已连接」会把标题挤成省略号。
+ * 详细状态（端口、节点、出口）在代理页里，那儿有地方展开。
+ */
+function proxyChip() {
   const core = proxyState();
   const mode = core.mode || 'direct';
   if (mode === 'builtin') {
-    if (core.running) return '内置核心 · ' + (core.host || '') + ' 已连接' + (core.node ? ' · ' + core.node : '');
-    return core.error ? '内置核心没能启动：' + core.error : '内置核心 · 未启动';
+    if (core.running) return { text: '已连接', tone: 'is-ok' };
+    return { text: core.error ? '启动失败' : '未启动', tone: 'is-warn' };
   }
-  if (mode === 'external') return core.external ? '外部地址 · ' + core.external : '外部地址 · 还没填';
-  return '直连。有机场或自建代理的话在这儿换一条路';
+  if (mode === 'external') return core.external ? { text: '外部地址', tone: 'is-ok' } : { text: '未填地址', tone: 'is-warn' };
+  return { text: '直连', tone: '' };
 }
 
 /**
@@ -1786,154 +1978,118 @@ function renderProxySettings() {
   const core = proxyState();
   const sub = subState();
   const mode = core.mode || 'direct';
-  const option = (item, on) =>
-    `<button type="button" data-proxy-mode="${item.value}" aria-checked="${on ? 'true' : 'false'}" class="${on ? 'is-on' : ''}">${item.label}</button>`;
+  const modePill = (item, on) =>
+    `<button type="button" role="radio" aria-checked="${on ? 'true' : 'false'}" class="settings-seg-pill ${on ? 'selected' : ''}" data-proxy-mode="${item.value}">${item.label}</button>`;
 
-  // 状态行。核心在跑时给端口，没跑时给原因 —— 「未启动」和「起不来」对用户是两件事。
-  let statusLine;
+  // 状态。核心在跑时给出口，没跑时给原因 ——「未启动」和「起不来」是两件事，
+  // 但都只用一句短话说，细节（端口、节点、实际出口）收进第二行小字。
+  let chip, chipTone, detail;
   if (mode === 'builtin') {
-    if (core.running) statusLine = `${esc(core.host || '127.0.0.1')} 已连接${esc(core.node ? ' · ' + core.node : '')}`;
-    else if (core.unavailable) statusLine = '这台设备跑不了内置核心：' + esc(core.unavailable);
-    else if (core.error) statusLine = esc(core.error);
-    else statusLine = '未启动';
+    if (core.running) {
+      chip = '已连接'; chipTone = 'is-ok';
+      detail = (core.host || '127.0.0.1') + (core.node ? ' · ' + core.node : '');
+    } else if (core.unavailable) {
+      chip = '不支持'; chipTone = 'is-warn'; detail = '这台设备跑不了内置核心：' + core.unavailable;
+    } else if (core.error) {
+      chip = '启动失败'; chipTone = 'is-warn'; detail = core.error;
+    } else {
+      chip = '未启动'; chipTone = 'is-warn'; detail = '保存一条分享链接就会启动';
+    }
   } else if (mode === 'external') {
-    statusLine = core.external ? '走 ' + esc(core.external) : '还没填地址，等于直连';
+    chip = core.external ? '外部地址' : '未填地址';
+    chipTone = core.external ? 'is-ok' : 'is-warn';
+    detail = core.external ? core.external : '填一个地址，所有请求都走它';
   } else {
-    statusLine = '直连';
+    chip = '直连'; chipTone = '';
+    detail = '所有请求都不走代理';
   }
-  const statusTone = core.running && mode === 'builtin' ? ' is-live' : (core.error && mode === 'builtin' ? ' is-bad' : '');
 
-  content.innerHTML = `<div class="settings-page"><button type="button" class="listing-back" data-back="1">${icon('back')} 返回设置</button><h1>网络代理</h1>
-    <section class="settings-player">
-      <h2>连接方式</h2>
-      <p>${esc(PROXY_MODES.find(item => item.value === mode)?.note || '')}</p>
-      <div class="player-options">${PROXY_MODES.map(item => option(item, item.value === mode)).join('')}</div>
-      <p class="field-hint${statusTone}">状态：${statusLine}</p>
-      ${core.effective ? `<p class="field-hint">当前实际出口：${esc(core.effective)}</p>` : ''}
+  const activeModeNote = PROXY_MODES.find(item => item.value === mode)?.note || '';
+
+  content.innerHTML = `<div class="settings-page">
+    <button type="button" class="listing-back" data-back="1">${icon('back')} 返回设置</button>
+    <h1>网络代理</h1>
+
+    <section class="settings-card" aria-label="连接方式">
+      <div class="settings-row is-static">
+        <span class="settings-icon">${icon('proxy')}</span>
+        <span class="settings-body"><strong>连接方式</strong></span>
+        <span class="settings-tail"><span class="settings-chip ${chipTone}">${esc(chip)}</span></span>
+      </div>
+      <div class="settings-row is-action">
+        <div class="settings-seg-control" role="radiogroup" aria-label="代理模式">${PROXY_MODES.map(item => modePill(item, item.value === mode)).join('')}</div>
+      </div>
+      <div class="settings-row is-static"><small class="settings-note">${esc(activeModeNote)}　${esc(detail)}</small></div>
       <p id="proxy-core-error" class="auth-error" role="alert" hidden></p>
     </section>
-    ${mode === 'builtin' ? `<section class="settings-player">
-      <h2>节点配置</h2>
-      <p>粘一条分享链接（vmess / vless / trojan / ss 都行）。核心只在本机 127.0.0.1 开一个 SOCKS5，不接管系统流量，别的 App 不受影响。</p>
-      <form id="proxy-core-form" class="password-form">
-        <label for="proxy-link">分享链接</label>
-        <input id="proxy-link" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="vmess:// 、vless:// 、trojan:// 、ss://" value="${esc(core.link || '')}">
-        <p class="field-hint">这一条会存在 App 的私有目录里，包含 uuid / 密码，卸载即清。</p>
+
+    ${mode === 'builtin' ? `<section class="settings-card" aria-label="节点">
+      <div class="settings-row is-static">
+        <span class="settings-icon">${icon('source')}</span>
+        <span class="settings-body"><strong>节点</strong><small>分享链接 · vmess / vless / trojan / ss</small></span>
+        <span class="settings-tail">
+          <button type="button" class="settings-mini" data-proxy-core="test"${core.running ? '' : ' disabled'}>测速</button>
+          <button type="button" class="settings-mini" data-proxy-core="stop"${core.running ? '' : ' disabled'}>停止</button>
+        </span>
+      </div>
+      <form id="proxy-core-form" class="password-form settings-form">
+        <input id="proxy-link" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="vmess:// 、vless:// 、trojan:// 、ss://" value="${esc(core.link || '')}" aria-label="分享链接">
         <p id="proxy-core-form-error" class="auth-error" role="alert" hidden></p>
         <button type="submit">保存并启动</button>
       </form>
-      <div class="player-options">
-        <button type="button" data-proxy-core="stop"${core.running ? '' : ' disabled'}>停止</button>
-        <button type="button" data-proxy-core="test"${core.running ? '' : ' disabled'}>测试连通性</button>
-      </div>
-      <p id="proxy-core-test" class="field-hint" hidden></p>
-      <p class="field-hint">核心会一直跑到你手动停止或重启手机。切到后台不停 —— 后台可能在放音频。</p>
+      <p class="settings-form-hint" id="proxy-core-test" hidden></p>
+      <p class="settings-form-hint">链接存在 App 私有目录，含 uuid / 密码，卸载即清。核心会一直跑到手动停止或重启手机。</p>
     </section>
-    <section class="settings-player">
-      <h2>免费节点</h2>
-      <p>App 自带一组公开共享节点。点一下测速，挑快的直接连 —— 不用注册、不用填任何东西。</p>
-      <p class="field-hint">${nodesLine(sub.nodes)}</p>
-      <div class="player-options">
-        <button type="button" data-proxy-sub="speed"${sub.busy ? ' disabled' : ''}>${sub.testing ? '测速中…' : '测速并挑选'}</button>
-        <button type="button" data-proxy-sub="nodes-refresh"${sub.busy ? ' disabled' : ''}>${sub.nodesBusy ? '检查中…' : '检查更新'}</button>
+
+    <section class="settings-card" aria-label="免费节点">
+      <div class="settings-row is-static">
+        <span class="settings-icon">${icon('market')}</span>
+        <span class="settings-body"><strong>免费节点</strong><small>${esc(nodesLine(sub.nodes).replace(/^节点库：/, ''))}</small></span>
+        <span class="settings-tail">
+          <button type="button" class="settings-mini" data-proxy-sub="nodes-refresh"${sub.busy ? ' disabled' : ''}>${sub.nodesBusy ? '检查中' : '换一批'}</button>
+        </span>
       </div>
-      ${sub.nodesNote ? `<p class="field-hint">${esc(sub.nodesNote)}</p>` : ''}
-      <p id="proxy-sub-speed" class="field-hint"${sub.speedNote ? '' : ' hidden'}>${esc(sub.speedNote || '')}</p>
+      <div class="settings-row is-action">
+        <button type="button" class="settings-cta" data-proxy-sub="speed"${sub.busy ? ' disabled' : ''}>${sub.testing ? '测速中…' : '测速并挑选'}</button>
+      </div>
+      ${sub.nodesNote ? `<div class="settings-row is-static"><small class="settings-note">${esc(sub.nodesNote)}</small></div>` : ''}
+      ${sub.speedNote ? `<div class="settings-row is-static"><small class="settings-note">${esc(sub.speedNote)}</small></div>` : ''}
       ${renderSpeedList(sub)}
-      <p class="field-hint">公开共享节点，随时可能失效；流量会经过陌生人的服务器，别用来登录重要账号。连不上就点「检查更新」换一批，或者往下面用自己的订阅。</p>
+      <p class="settings-form-hint">公开共享节点随时可能失效，流量会经过陌生人的服务器 —— 别用来登录重要账号。</p>
     </section>
-    <section class="settings-player">
-      <h2>用自己的订阅</h2>
-      <p>有机场的话，粘它的订阅地址，App 会拉下来测速，比免费节点稳得多。</p>
-      <form id="proxy-sub-form" class="password-form">
-        <label for="proxy-sub-url">订阅地址</label>
-        <input id="proxy-sub-url" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://…/sub" value="${esc(sub.url || '')}">
-        <p class="field-hint">支持节点列表和 base64 两种格式。Clash 的 YAML 不支持，用机场后台的「V2Ray 订阅」链接。</p>
+
+    <section class="settings-card" aria-label="自己的订阅">
+      <div class="settings-row is-static">
+        <span class="settings-icon">${icon('update')}</span>
+        <span class="settings-body"><strong>用自己的订阅</strong><small>${sub.url ? esc(sub.summary || '已配置') : '有机场的话比免费节点稳得多'}</small></span>
+        ${sub.url ? '<span class="settings-tail"><button type="button" class="settings-mini" data-proxy-sub="clear">改回免费</button></span>' : ''}
+      </div>
+      <form id="proxy-sub-form" class="password-form settings-form">
+        <input id="proxy-sub-url" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://…/sub（V2Ray 订阅链接）" value="${esc(sub.url || '')}" aria-label="订阅地址">
         <button type="submit">拉取并测速</button>
       </form>
-      <p id="proxy-sub-status" class="field-hint"${sub.summary ? '' : ' hidden'}>${esc(sub.summary || '')}</p>
-      ${sub.url ? '<div class="player-options"><button type="button" data-proxy-sub="clear">改回用免费节点</button></div>' : ''}
+      <p id="proxy-sub-status" class="field-hint settings-form-hint"${sub.summary ? '' : ' hidden'}>${esc(sub.summary || '')}</p>
     </section>` : ''}
-    ${mode === 'external' ? `<section class="settings-account">
-      <h2>代理地址</h2>
-      <p>填了之后所有请求都走它。适合有代理的人用来绕开慢链路。</p>
-      <form id="proxy-form" class="password-form">
-        <label for="proxy-value">代理地址</label>
-        <input id="proxy-value" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="127.0.0.1:7890 或 socks5://127.0.0.1:7891" value="${esc(state.proxy || '')}">
-        <p class="field-hint">支持 host:port、http://host:port、socks5://host:port。留空表示直连。</p>
+
+    ${mode === 'external' ? `<section class="settings-card" aria-label="代理地址">
+      <div class="settings-row is-static">
+        <span class="settings-icon">${icon('proxy')}</span>
+        <span class="settings-body"><strong>代理地址</strong><small>所有请求都走它，留空等于直连</small></span>
+      </div>
+      <form id="proxy-form" class="password-form settings-form">
+        <input id="proxy-value" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="127.0.0.1:7890 或 socks5://127.0.0.1:7891" value="${esc(state.proxy || '')}" aria-label="代理地址">
         <p id="proxy-error" class="auth-error" role="alert" hidden></p>
         <button type="submit">保存</button>
       </form>
     </section>` : ''}
-    ${mode === 'direct' ? `<section class="settings-player">
-      <p class="field-hint">直接连。之前配过的节点和地址都还留着，切回去就能用。</p>
+
+    ${mode === 'direct' ? `<section class="settings-card" aria-label="直连">
+      <div class="settings-row is-static">
+        <span class="settings-icon">${icon('check')}</span>
+        <span class="settings-body"><strong>直连</strong><small>之前配过的节点和地址都还留着，切回去就能用</small></span>
+      </div>
     </section>` : ''}
   </div>`;
-}
-
-function playerSummary() {
-  const prefs = playerPrefs();
-  const core = prefs.core === 'native' ? '内置（VLC）' : '网页';
-  const decode = prefs.core === 'native' && prefs.decode === 'sw' ? ' · 软解' : '';
-  return core + decode + (prefs.autoFallback ? ' · 失败自动切内置' : '');
-}
-
-/**
- * 播放器设置。
- *
- * 这一页存在的理由就是「不要在设置里没得选」：编码解不了这件事，用户能做的
- * 只有换播放器，而换播放器不该等于去外面装一个 App。
- */
-function renderPlayerSettings() {
-  const prefs = playerPrefs();
-  const info = state.nativeInfo;
-  const nativeState = info == null
-    ? '正在检测…'
-    : info.native
-      ? '可用（' + esc(info.abi || 'arm64-v8a') + '）'
-      : '这个安装包没带本机架构的解码库，只会用网页播放器';
-  const option = (key, value, label, on, disabled) =>
-    `<button type="button" data-player-set="${key}:${value}" aria-checked="${on ? 'true' : 'false'}"${disabled ? ' disabled' : ''} class="${on ? 'is-on' : ''}">${label}</button>`;
-  content.innerHTML = `<div class="settings-page"><button type="button" class="listing-back" data-back="1">${icon('back')} 返回设置</button><h1>播放器</h1>
-    <section class="settings-player">
-      <h2>播放内核</h2>
-      <p>只用内置播放器（libVLC，自带完整软解）。网页播放器那条路已经移除 —— 它靠系统解码器，同一个片在有的手机上就是放不出来。</p>
-      <p class="field-hint">解码库：${nativeState}</p>
-    </section>
-    <section class="settings-player">
-      <h2>解码方式</h2>
-      <p>自动会优先用设备的硬件解码，失败时再退回软解。画面花屏、绿屏、或者能出声没画面时改成软解试试。</p>
-      <div class="player-options">
-        ${option('decode', 'auto', '自动（推荐）', prefs.decode === 'auto')}
-        ${option('decode', 'sw', '一律软解', prefs.decode === 'sw')}
-      </div>
-      <p class="field-hint">只对内置播放器生效。网页播放器的解码器是系统给的，改不了。</p>
-    </section>
-    <section class="settings-player">
-      <h2>网络缓存</h2>
-      <p>缓存越大越抗抖动，但拖动进度条时反应会慢一点。</p>
-      <div class="player-options">
-        ${option('cache', '800', '起播优先', prefs.cache === 800)}
-        ${option('cache', '1500', '标准（推荐）', prefs.cache === 1500)}
-        ${option('cache', '3000', '抗抖优先', prefs.cache === 3000)}
-      </div>
-      <p class="field-hint">只对内置播放器生效。</p>
-    </section>
-    <section class="settings-player">
-      <h2>操作</h2>
-      <p>点任意一集直接进播放器。上下滑切下一集 / 上一集，左右滑拖进度，单击出控件，倍速在最右边那个胶囊里选。</p>
-      <p class="field-hint">进度会写回观看历史，下次进来接着看。</p>
-    </section></div>`;
-}
-
-function goPlayerSettings() {
-  if (state.route === 'player-settings') return;
-  if (state.route !== 'settings') goSettings();
-  state.playerReturn = captureScreen();
-  setRoute('player-settings');
-  renderPlayerSettings();
-  // 页面先用「正在检测…」渲染出来，探测结果回来再补一次 —— 不让这一页等 so 加载。
-  nativePlayerInfo().then(() => { if (state.route === 'player-settings') renderPlayerSettings(); });
 }
 
 function goProxySettings() {
@@ -1948,6 +2104,72 @@ function goProxySettings() {
   loadNodesStatus();
   // 只有「外部地址」模式下才有那个输入框 —— 别的模式下别抢焦点弹键盘。
   content.querySelector('#proxy-value')?.focus();
+}
+
+function renderPlayerSettings() {
+  const prefs = playerPrefs();
+  const info = state.nativeInfo;
+  // 这一页原来有四段解释（播放内核是什么、自动和软解的区别、缓存和抖动的关系、
+  // 手势怎么用），一屏全是字。现在每个开关都是一条分段控件 + 一句「这样会怎样」，
+  // 说明跟着当前选中项变 —— 用户读到的是后果，不是设计背景。
+  const decodeHint = prefs.decode === 'sw'
+    ? '所有片都走 CPU 解，最稳，但高清片更费电、更容易发热。'
+    : '先试硬件解码，花屏或只有声音没画面时自动换软解。';
+  const cacheHint = prefs.cache === 800 ? '起播最快，网络一抖就容易卡。'
+    : prefs.cache === 3000 ? '最抗抖动，但拖进度条要等更久才出画面。'
+      : '起播和抗抖动之间的折中，大多数情况够用。';
+  const seg = (key, items, current) => `<div class="settings-seg-control" role="radiogroup">${items.map(([value, label]) =>
+    `<button type="button" role="radio" aria-checked="${current === value}" class="settings-seg-pill ${current === value ? 'selected' : ''}" data-player-set="${key}:${value}">${label}</button>`).join('')}</div>`;
+
+  content.innerHTML = `<div class="settings-page">
+    <button type="button" class="listing-back" data-back="1">${icon('back')} 返回设置</button>
+    <h1>播放器</h1>
+
+    <section class="settings-card" aria-label="解码">
+      <div class="settings-row is-static">
+        <span class="settings-icon">${icon('player')}</span>
+        <span class="settings-body"><strong>解码方式</strong><small>${esc(decodeHint)}</small></span>
+      </div>
+      <div class="settings-row is-action">
+        ${seg('decode', [['auto', '自动'], ['sw', '一律软解']], prefs.decode)}
+      </div>
+    </section>
+
+    <section class="settings-card" aria-label="缓存">
+      <div class="settings-row is-static">
+        <span class="settings-icon">${icon('storage')}</span>
+        <span class="settings-body"><strong>网络缓存</strong><small>${esc(cacheHint)}</small></span>
+      </div>
+      <div class="settings-row is-action">
+        ${seg('cache', [['800', '小'], ['1500', '中'], ['3000', '大']], String(prefs.cache))}
+      </div>
+    </section>
+
+    <section class="settings-card" aria-label="解码库状态">
+      <div class="settings-row is-static">
+        <span class="settings-icon">${icon('check')}</span>
+        <span class="settings-body"><strong>解码库</strong><small>${info == null ? '正在检测…' : info.native ? '内置 VLC 可用（' + esc(info.abi || 'arm64-v8a') + '）' : '这个安装包没带本机架构的解码库'}</small></span>
+        <span class="settings-tail"><span class="settings-chip ${info == null ? '' : info.native ? 'is-ok' : 'is-warn'}">${info == null ? '检测中' : info.native ? '可用' : '不可用'}</span></span>
+      </div>
+    </section>
+
+    <section class="settings-card" aria-label="手势">
+      <div class="settings-row is-static">
+        <span class="settings-icon">${icon('play')}</span>
+        <span class="settings-body"><strong>手势</strong><small>上下滑切集 · 左右滑拖进度 · 单击出控件</small></span>
+      </div>
+    </section>
+  </div>`;
+}
+
+function goPlayerSettings() {
+  if (state.route === 'player-settings') return;
+  if (state.route !== 'settings') goSettings();
+  state.playerReturn = captureScreen();
+  setRoute('player-settings');
+  renderPlayerSettings();
+  // 页面先用「正在检测…」渲染出来，探测结果回来再补一次 —— 不让这一页等 so 加载。
+  nativePlayerInfo().then(() => { if (state.route === 'player-settings') renderPlayerSettings(); });
 }
 
 function renderAccountManagement() {
@@ -2721,6 +2943,12 @@ function goSettings() {
   state.settingsReturn = captureScreen();
   setRoute('settings'); state.tab = 'library'; setNav('library');
   renderSettings();
+  // 设置页上那几个胶囊（已连接 / 硬解 / 已启用）是**读出来的事实**，不是偏好。
+  // 只靠启动时那一次，用户从代理页连上节点再退回来，胶囊还写着「未启动」。
+  // 这里补一次静默刷新：两个都不联网，几毫秒回来，回来才重画。
+  bootProxyCore(true).catch(() => {});
+  nativePlayerInfo().then(() => { if (state.route === 'settings') renderSettingsKeepScroll(); }).catch(() => {});
+  refreshSources().then(() => { if (state.route === 'settings') renderSettingsKeepScroll(); }).catch(() => {});
 }
 
 function goAccountManagement() {
@@ -3111,9 +3339,11 @@ document.addEventListener('submit', async event => {
       const result = await proxyCoreCommand('sub?url=' + encodeURIComponent(url));
       if (result.ok === false) throw new Error(result.error || '订阅没拉到');
       // 换了订阅，上一次的测速结果整套作废 —— 下标对不上了。
+      // busy 必须是 false：runSpeedTest() 第一行就是 `if (sub.busy) return`，
+      // 这里改成 true 等于让它直接返回 —— 界面停在「测速中」再也不动。
       state.proxySub = { url: result.url || url, count: result.count || 0,
                          summary: result.summary || '', speedNote: '正在测速，最多 20 秒…',
-                         speed: [], testing: true, busy: true };
+                         speed: [], testing: true, busy: false };
       renderProxySettingsKeepScroll();
       // 拉完直接测，用户不用再点一次 —— 「拉取」这个动作的意图就是要连上。
       runSpeedTest();
@@ -3186,8 +3416,7 @@ document.addEventListener('click', async event => {
   }
   if (event.target.closest('[data-hot-check]')) { checkHotUpdate(); return; }
   if (event.target.closest('[data-goto-app-update]')) {
-    const area = document.getElementById('update-check-area');
-    area?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // 这条链已经并成一行了，不用再滚动定位；直接查。
     checkAppUpdate();
     return;
   }
@@ -3511,7 +3740,7 @@ document.addEventListener('click', async event => {
       if (!await askConfirmation(history ? '清空观看历史' : '清空我的收藏', history ? '所有观看记录会被删除，我的收藏会保留。' : '所有收藏作品会被移除，观看历史会保留。')) return;
       await api(history ? 'clear-history' : 'clear-bookmarks');
       state.library = await api('library');
-      renderSettings();
+      renderSettingsKeepScroll();
       toast(history ? '观看历史已清空' : '收藏已清空');
     }
   }

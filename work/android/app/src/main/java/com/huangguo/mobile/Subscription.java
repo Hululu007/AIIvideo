@@ -149,9 +149,18 @@ final class Subscription {
 
         // Clash 的 YAML：能认出来但明确说不支持，比让它当成「0 个节点」好 ——
         // 后者用户会以为是订阅坏了。
+        // Clash YAML：以前直接拒（「请在机场后台改用 V2Ray 订阅」），但很多公开
+        // 订阅只给 YAML。转成我们自己的链接格式再走下面同一套解析 —— 不引 YAML
+        // 库，只认 proxies: 下面那几个字段。
         if (looksLikeClash(text)) {
-            result.firstError = "这是 Clash 配置（YAML），请在机场后台改用「V2Ray 订阅」链接";
-            return result;
+            List<String> converted = clashToLinks(text, result);
+            if (converted.isEmpty()) {
+                result.firstError = "这是 Clash 配置（YAML），但里面没有能识别的代理";
+                return result;
+            }
+            StringBuilder joined = new StringBuilder();
+            for (String link : converted) joined.append(link).append('\n');
+            text = joined.toString();
         }
 
         // 整段 base64：解开后如果出现协议前缀，就当节点列表重走一遍。
@@ -202,9 +211,14 @@ final class Subscription {
 
     private static boolean containsScheme(String text) {
         String t = text.toLowerCase(Locale.ROOT);
+        // https:// 必须在这里出现。looksLikeLink() 认它，但这一版漏了 ——
+        // 于是一份**全是 https 代理**的节点池会被当成「不是节点列表」，
+        // 走 base64 解码那条路然后报「内容既不是节点列表也不是 base64」。
+        // 2026-10-18 把免费节点全换成 https 代理之后当场踩中。
         return t.contains("vmess://") || t.contains("vless://")
                 || t.contains("trojan://") || t.contains("ss://")
-                || t.contains("socks5://") || t.contains("http://");
+                || t.contains("socks5://") || t.contains("http://")
+                || t.contains("https://");
     }
 
     /** `xxx://...` 里的 `xxx`，取不到返回 null。 */
@@ -225,6 +239,117 @@ final class Subscription {
                 || t.startsWith("trojan://") || t.startsWith("ss://")
                 || t.startsWith("socks5://") || t.startsWith("http://")
                 || t.startsWith("https://");
+    }
+
+    /**
+     * Clash YAML → 我们的链接格式。
+     *
+     * 只解 `proxies:` 这一段，字段也只认这几个：type / server / port / tls /
+     * username / password / cipher。**不是 YAML 解析器** —— 不处理锚点、多行、
+     * 引号转义那套，遇到不认识的行直接跳过。够用就好：公开订阅的 proxies
+     * 段就是一堆扁平的 key: value。
+     *
+     * 认得的 type：
+     *   http / https  → http:// 或 https://host:port     （TLS 的就是 https://）
+     *   socks5        → socks5://host:port
+     *   ss            → ss://method:pass@host:port
+     *   trojan        → trojan://pass@host:port?security=tls
+     * vmess / vless 在 YAML 里字段更多（ws-opts / grpc-opts 嵌套），这一版不做，
+     * 会计进 unsupported，让用户知道「有 N 条没认」。
+     */
+    static List<String> clashToLinks(String yaml, Result result) {
+        List<String> out = new ArrayList<String>();
+        boolean inProxies = false;
+        java.util.Map<String, String> cur = null;
+
+        for (String rawLine : yaml.split("\r?\n")) {
+            String line = rawLine;
+            if (line.trim().isEmpty() || line.trim().startsWith("#")) continue;
+
+            if (!inProxies) {
+                if (line.trim().startsWith("proxies:")) inProxies = true;
+                continue;
+            }
+            // 顶格的别的键（proxy-groups: / rules: …）意味着 proxies 段结束
+            if (!line.isEmpty() && !Character.isWhitespace(line.charAt(0))
+                    && !line.startsWith("-")) {
+                inProxies = false;
+                continue;
+            }
+
+            String t = line.trim();
+            if (t.startsWith("- ")) {
+                if (cur != null) addClashLink(out, cur, result);
+                cur = new java.util.LinkedHashMap<String, String>();
+                t = t.substring(2).trim();
+            }
+            if (cur == null || t.isEmpty()) continue;
+
+            int colon = t.indexOf(':');
+            if (colon <= 0) continue;
+            String key = t.substring(0, colon).trim();
+            String value = t.substring(colon + 1).trim();
+            if (value.length() >= 2 && ((value.startsWith("'") && value.endsWith("'"))
+                    || (value.startsWith("\"") && value.endsWith("\"")))) {
+                value = value.substring(1, value.length() - 1);
+            }
+            cur.put(key, value);
+        }
+        if (cur != null) addClashLink(out, cur, result);
+        return out;
+    }
+
+    private static void addClashLink(List<String> out, java.util.Map<String, String> p, Result result) {
+        String type = lower(p.get("type"));
+        String server = p.get("server");
+        String port = p.get("port");
+        if (type.isEmpty() || server == null || server.isEmpty() || port == null) return;
+
+        String name = p.get("name");
+        String hash = (name == null || name.isEmpty()) ? "" : "#" + urlEncode(name);
+        boolean tls = "true".equalsIgnoreCase(p.get("tls"));
+        String user = p.get("username");
+        String pass = p.get("password");
+        String cred = "";
+        if (pass != null && !pass.isEmpty() && !"None".equals(pass)) {
+            cred = (user == null || user.isEmpty() ? "" : urlEncode(user) + ":") + urlEncode(pass) + "@";
+        }
+
+        if ("http".equals(type) || "https".equals(type) || "http-proxy".equals(type)) {
+            String scheme = (tls || "https".equals(type)) ? "https" : "http";
+            out.add(scheme + "://" + cred + server + ":" + port + hash);
+            return;
+        }
+        if ("socks5".equals(type) || "socks".equals(type)) {
+            out.add("socks5://" + cred + server + ":" + port + hash);
+            return;
+        }
+        if ("ss".equals(type)) {
+            String cipher = p.get("cipher");
+            if (cipher == null || cipher.isEmpty()) return;
+            out.add("ss://" + cipher + ":" + (pass == null ? "" : pass) + "@" + server + ":" + port + hash);
+            return;
+        }
+        if ("trojan".equals(type)) {
+            out.add("trojan://" + (pass == null ? "" : pass) + "@" + server + ":" + port
+                    + "?security=tls" + hash);
+            return;
+        }
+        // 认得出类型但这一版不转的（vmess / vless / hysteria2 / tuic …）
+        result.unsupported++;
+        if (result.unsupportedNames.size() < 3) result.unsupportedNames.add(type);
+    }
+
+    private static String lower(String v) {
+        return v == null ? "" : v.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static String urlEncode(String v) {
+        try {
+            return java.net.URLEncoder.encode(v, "UTF-8").replace("+", "%20");
+        } catch (Exception e) {
+            return v;
+        }
     }
 
     private static boolean looksLikeClash(String text) {

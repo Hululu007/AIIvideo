@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}源文件 · AIIvideo 后台{% endblock %}
+{% block body %}
+<h1>源文件</h1>
+<p class="muted">这里改的就是 App 直接读取的那份文件，保存即生效（用户下次刷新/切源时吃到）。</p>
+<table>
+  <thead><tr><th>文件</th><th>类型</th><th>来源</th><th>大小</th><th>修改</th><th></th></tr></thead>
+  <tbody>
+  {% for f in files %}
+  <tr>
+    <td><a href="{{ mount }}/sources/{{ f.name }}/edit">{{ f.name }}</a>
+      {% if f.readonly %}<em>只读</em>{% endif %}
+      {% if f.error %}<div class="bad-text">{{ f.error }}</div>{% endif %}</td>
+    <td>{{ '市场清单' if f.kind == 'market' else (f.adapter or '自定义') }}</td>
+    <td class="muted">{{ f.origin or f.api }}</td>
+    <td class="muted">{{ (f.size / 1024) | round(1) }} KB</td>
+    <td class="muted">{{ f.mtime }}</td>
+    <td class="right">
+      <form method="post" action="{{ mount }}/sources/{{ f.name }}/delete" onsubmit="return confirm('删除 {{ f.name }}？会留一份备份。')">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="ghost danger" {% if f.readonly or f.kind == 'market' %}disabled{% endif %}>删除</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<h2 class="section">新建源文件</h2>
+<form class="row" method="post" action="{{ mount }}/sources/new">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input name="name" placeholder="例如 my-source.json" required pattern="[A-Za-z0-9._-]+\.json">
+  <button type="submit">新建</button>
+</form>
+{% endblock %}

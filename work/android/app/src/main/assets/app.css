@@ -708,7 +708,7 @@ html[data-theme=dark] .error-icon{background:transparent;color:#409cff}
 
 /* ── 应用内 APK 更新 ─────────────────────────────────────────────── */
 .update-check-area{flex:none}
-.update-check-area button{min-height:40px;padding:0 14px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text);font-size:12px;font-weight:700}
+.update-settings .update-check-area button{min-height:40px;padding:0 14px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text);font-size:12px;font-weight:700}
 .update-note{margin:0;color:var(--muted);font-size:12px;line-height:1.6}
 .update-available{width:100%;display:flex;flex-direction:column;gap:8px}
 .update-available-head{display:flex;align-items:baseline;gap:8px}
@@ -721,6 +721,10 @@ html[data-theme=dark] .update-available button{color:#fff}
 .update-progress-bar{flex:1;height:5px;border-radius:3px;background:var(--line);overflow:hidden}
 .update-progress-bar i{display:block;height:100%;border-radius:3px;background:var(--accent);transition:width .2s ease}
 .update-progress small{flex:none;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+/* 设置页里的那一条：进度条吃掉中间那段宽度，行高不跟着内容变。 */
+.settings-row .update-progress{flex:1;min-width:0}
+.settings-row .update-progress small{flex:none;max-width:58%}
+.settings-row .update-progress-bar{min-width:56px}
 
 /* ── 源市场 / TVBox 导入 ───────────────────────────────────────── */
 .market-list,.tvbox-list{list-style:none;margin:16px 0 0;padding:0;display:flex;flex-direction:column;gap:10px}
@@ -812,3 +816,342 @@ html[data-theme=dark] .settings-player .field-hint.is-bad{color:#ff6b5e}
 .speed-ms{flex:0 0 auto;min-width:56px;font-variant-numeric:tabular-nums;font-weight:600;color:#1f9d55}
 html[data-theme=dark] .speed-ms{color:#4ade80}
 .speed-node{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ════════════════════════════════════════════════════════════════════
+   设置页 v2（2026-10-18）：少字，多反馈
+   ────────────────────────────────────────────────────────────────────
+   旧版每一块都是「h2 + 三行解释 + 按钮」，一屏放不下、读三段才找到点哪儿。
+   新版把整页收成「分组卡片 + 一整行就是一个按钮」：
+
+     ┌───────────────────────────────┐
+     │ [icon] 内容源        [已启用] ›│  ← 整行可点，状态是胶囊不是句子
+     │ [icon] 源市场                 ›│
+     └───────────────────────────────┘
+
+   反馈优先于文字，所以这一层里最重要的一条是 .press-host / .press-ripple：
+   手指落下那一帧，被按的面上就漾开一圈从指尖出发的光，同时原生震一下。
+   顺序上它写在最后，覆盖前面所有针对同一批控件的旧规则。
+   ════════════════════════════════════════════════════════════════════ */
+
+/* ── 分组卡片 ─────────────────────────────────────────────────────── */
+.settings-page{padding:0 16px 30px}
+.settings-page h1{font-size:32px;letter-spacing:-.028em;margin:14px 0 18px;font-weight:800}
+.settings-page .settings-card{
+  margin:0 0 14px;padding:0;border:1px solid var(--line);border-radius:18px;
+  background:var(--panel);overflow:hidden;
+  /* 旧规则 .settings-page section 给了 padding 和上边框，这里必须收掉 ——
+     卡片自己的圆角会把那条直线上边框切出两个直角。 */
+  border-top:1px solid var(--line);
+}
+.settings-page .settings-card.is-danger{border-color:rgba(255,59,48,.28)}
+html[data-theme=dark] .settings-page .settings-card{background:#1c1c1e;border-color:rgba(84,84,88,.5)}
+html[data-theme=dark] .settings-page .settings-card.is-danger{border-color:rgba(255,69,58,.36)}
+
+/* ── 一行 = 一个按钮 ─────────────────────────────────────────────── */
+.settings-row{
+  position:relative;display:flex;align-items:center;gap:13px;width:100%;
+  min-height:60px;padding:12px 14px;margin:0;
+  border:0;background:transparent;color:var(--text);
+  text-align:left;font:inherit;
+  /* 行与行之间那条线：只画在「不是第一行」的上面，且缩进到文字起点。 */
+  transition:background-color .16s ease;
+}
+.settings-row+.settings-row,.settings-row+.settings-seg{border-top:1px solid var(--line)}
+html[data-theme=dark] .settings-row+.settings-row,
+html[data-theme=dark] .settings-row+.settings-seg{border-top-color:rgba(84,84,88,.42)}
+.settings-row.is-static{cursor:default}
+.settings-row.is-action{padding:10px 14px 14px}
+button.settings-row:active{background:rgba(118,118,128,.13)}
+html[data-theme=dark] button.settings-row:active{background:rgba(118,118,128,.22)}
+
+/* 图标：一个 30px 的圆角方块，浅灰底，图标本身用强调色。
+   它不是装饰 —— 每一类的符号固定，扫一眼就知道这行管什么。 */
+.settings-icon{
+  display:grid;place-items:center;flex:none;width:30px;height:30px;
+  border-radius:9px;background:rgba(118,118,128,.13);color:var(--text);
+}
+.settings-icon svg{width:17px;height:17px}
+html[data-theme=dark] .settings-icon{background:rgba(118,118,128,.24)}
+.settings-card.is-danger .settings-icon{background:rgba(255,59,48,.12);color:#ff3b30}
+html[data-theme=dark] .settings-card.is-danger .settings-icon{color:#ff6961}
+
+.settings-body{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.settings-body strong{font-size:15px;font-weight:600;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.settings-body small{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.settings-tail{display:flex;align-items:center;gap:8px;flex:none;color:var(--muted)}
+.settings-tail>svg{width:15px;height:15px;opacity:.55}
+
+/* 状态胶囊：已连接 / 未配置 / 硬解。文字压到 2~4 个字，颜色承担语义。 */
+.settings-chip{
+  display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:11px;
+  background:rgba(118,118,128,.14);color:var(--muted);
+  font-size:11px;font-weight:600;white-space:nowrap;
+}
+.settings-chip.is-ok{background:rgba(52,199,89,.16);color:#1a8f3f}
+.settings-chip.is-warn{background:rgba(255,159,10,.16);color:#a35c00}
+html[data-theme=dark] .settings-chip{background:rgba(118,118,128,.26)}
+html[data-theme=dark] .settings-chip.is-ok{background:rgba(48,209,88,.2);color:#5be07c}
+html[data-theme=dark] .settings-chip.is-warn{background:rgba(255,159,10,.22);color:#ffb340}
+
+/* 状态点：给「版本」那行用，一个 7px 的圆，绿色 = 有新东西待应用。 */
+.settings-dot{width:7px;height:7px;flex:none;border-radius:50%;background:var(--line);transition:background-color .25s ease,box-shadow .25s ease}
+.settings-dot.is-ready{background:#34c759;box-shadow:0 0 0 3px rgba(52,199,89,.18)}
+.settings-dot.is-bad{background:#ff453a;box-shadow:0 0 0 3px rgba(255,69,58,.16)}
+.settings-state{font-size:11px;color:var(--muted);white-space:nowrap;max-width:38vw;overflow:hidden;text-overflow:ellipsis}
+
+.settings-note{flex:1;min-width:0;font-size:12px;color:var(--muted);line-height:1.45}
+.settings-note.is-bad{color:#ff3b30}
+html[data-theme=dark] .settings-note.is-bad{color:#ff6961}
+
+/* 行内小按钮：清历史 / 清收藏 / 清理 / 检查更新。 */
+.settings-mini{
+  min-height:30px;padding:0 11px;border:1px solid var(--line);border-radius:15px;
+  background:transparent;color:var(--text);font-size:12px;font-weight:600;
+  white-space:nowrap;transition:transform .14s var(--ease-out,ease),background-color .16s ease,opacity .16s ease;
+}
+.settings-mini:active{transform:scale(.94);background:rgba(118,118,128,.16)}
+.settings-mini:disabled{opacity:.36}
+.settings-mini.is-primary{background:#007aff;border-color:#007aff;color:#fff}
+.settings-mini.is-primary:active{background:#0a6fe0}
+html[data-theme=dark] .settings-mini.is-primary{background:#0a84ff;border-color:#0a84ff}
+
+/* 整行宽的强调按钮：立即应用新界面 / 去更新应用。 */
+.settings-cta{
+  width:100%;min-height:42px;border:0;border-radius:12px;
+  background:#007aff;color:#fff;font-size:14px;font-weight:700;
+  transition:transform .14s var(--ease-out,ease),background-color .16s ease;
+}
+.settings-cta:active{transform:scale(.985);background:#0a6fe0}
+html[data-theme=dark] .settings-cta{background:#0a84ff}
+
+/* 弱化按钮：检查界面更新。它排在版本那行下面，不该抢「检查更新」的位置。 */
+.settings-quiet{
+  min-height:28px;padding:0;border:0;background:none;color:var(--muted);
+  font-size:12px;font-weight:500;text-decoration:underline;text-underline-offset:3px;
+  text-decoration-color:rgba(118,118,128,.4);
+}
+.settings-quiet:active{color:var(--text)}
+.settings-quiet:disabled{opacity:.5}
+
+/* ── 外观：三个色块，选中态是勾 + 描边 ───────────────────────────── */
+.settings-seg{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;padding:0 14px 14px}
+.settings-seg-item{
+  position:relative;display:flex;flex-direction:column;gap:7px;min-width:0;
+  padding:8px;border:1.5px solid transparent;border-radius:14px;
+  background:rgba(118,118,128,.1);color:var(--text);font:inherit;
+  transition:transform .16s var(--ease-out,ease),border-color .2s ease,background-color .2s ease;
+}
+.settings-seg-item:active{transform:scale(.96)}
+.settings-seg-item.selected{
+  border-color:#007aff;background:rgba(0,122,255,.08);
+  box-shadow:0 0 0 3px rgba(0,122,255,.1);
+}
+html[data-theme=dark] .settings-seg-item{background:rgba(118,118,128,.22)}
+html[data-theme=dark] .settings-seg-item.selected{border-color:#0a84ff;background:rgba(10,132,255,.16);box-shadow:0 0 0 3px rgba(10,132,255,.16)}
+.settings-seg-item .theme-swatch{height:38px;border-radius:9px}
+.settings-seg-label{font-size:11.5px;font-weight:600;text-align:center;letter-spacing:-.01em}
+.settings-seg-item.selected .settings-seg-label{color:#007aff}
+html[data-theme=dark] .settings-seg-item.selected .settings-seg-label{color:#409cff}
+/* 勾：选中才有，落在这个色块右上角，动画从 0.6 缩放弹出来。 */
+.settings-seg-item.selected:after{
+  content:"";position:absolute;top:6px;right:6px;width:15px;height:15px;border-radius:50%;
+  background:#007aff;animation:seg-check .26s cubic-bezier(.2,.9,.3,1.2) both;
+  background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 12.6 4 4 8-9'/%3E%3C/svg%3E");
+  background-size:11px 11px;background-position:center;background-repeat:no-repeat;
+}
+html[data-theme=dark] .settings-seg-item.selected:after{background-color:#0a84ff}
+@keyframes seg-check{from{transform:scale(.4);opacity:0}to{transform:scale(1);opacity:1}}
+
+/* ── 危险动作 ─────────────────────────────────────────────────────── */
+.settings-danger-button{
+  width:100%;min-height:42px;border:1px solid rgba(255,59,48,.35);border-radius:12px;
+  background:rgba(255,59,48,.08);color:#ff3b30;font-size:14px;font-weight:700;
+  transition:transform .14s var(--ease-out,ease),background-color .16s ease;
+}
+.settings-danger-button:active{transform:scale(.985);background:rgba(255,59,48,.16)}
+.settings-danger-button:disabled{opacity:.6}
+.settings-danger-button.is-loading{display:inline-flex;align-items:center;justify-content:center;gap:9px}
+.settings-danger-button.is-loading:before{
+  content:"";width:15px;height:15px;flex:none;border:2px solid currentColor;
+  border-right-color:transparent;border-radius:50%;animation:auth-spin .7s linear infinite;
+}
+html[data-theme=dark] .settings-danger-button{color:#ff6961;border-color:rgba(255,69,58,.45)}
+@media(prefers-reduced-motion:reduce){
+  .settings-danger-button.is-loading:before{animation:none}
+}
+
+/* ── 按下去的那一下：涟漪 + 缩放 ──────────────────────────────────── */
+.press-host{position:relative;overflow:hidden;isolation:isolate}
+.press-ripple{
+  position:absolute;z-index:0;pointer-events:none;border-radius:50%;
+  transform:translate(-50%,-50%) scale(0);opacity:.5;
+  background:radial-gradient(circle,currentColor 0%,currentColor 55%,transparent 72%);
+  animation:press-ripple .52s cubic-bezier(.2,.7,.2,1) forwards;
+}
+@keyframes press-ripple{
+  0%{transform:translate(-50%,-50%) scale(0);opacity:.34}
+  60%{opacity:.16}
+  100%{transform:translate(-50%,-50%) scale(1);opacity:0}
+}
+/* 涟漪要压在内容底下，不能盖住文字。按钮里的直接子元素统一提一层。 */
+.press-host>*:not(.press-ripple){position:relative;z-index:1}
+/* 深色底上的涟漪颜色要反过来，不然看不见。 */
+html[data-theme=dark] .press-ripple{opacity:.32}
+@media(prefers-reduced-motion:reduce){
+  .press-ripple{display:none}
+  .settings-seg-item.selected:after{animation:none}
+}
+
+/* ── 旧设置页遗留选择器的收口 ─────────────────────────────────────
+   旧结构（h2 + p + 散按钮）已经不再渲染，但 `.settings-page section` 那条
+   「padding 18px 0 + 上边框」还在，会作用到新的卡片上，把圆角切出直角。
+   这里只针对卡片本身收掉，二级页（代理/播放器/内容源）仍沿用那套间距。 */
+.settings-page>.settings-card{padding:0;border-top:1px solid var(--line)}
+
+/* ── 设置页 v2 · 第二轮收口（真机看过之后改的）─────────────────────
+   ① 「版本」那行的红点原本在「旧热更包被版本门槛挡下」时也亮 —— 那是正常
+      迁移，不是故障。现在红点只留给「需要装新版 APK」，代码侧改了，
+      这里把颜色的语义收窄到同一件事。
+   ② 应用更新那一行被 `.update-check-area button` 那条旧规则接住了，
+      「检查」被撑成一个 40px 高的灰色方块，跟右边的胶囊完全不是一套。
+      新结构里按钮一律 .settings-mini，所以这里把旧规则的生效范围限死在
+      真正的旧结构（.update-settings）里。 */
+.settings-row .settings-mini{min-height:30px;padding:0 11px}
+.settings-row .settings-body small.is-bad{color:#ff3b30}
+html[data-theme=dark] .settings-row .settings-body small.is-bad{color:#ff6961}
+.update-settings .update-check-area button{min-height:40px}
+
+/* ── 设置页 v2 · 版本行 ─────────────────────────────────────────────
+   合并成一行之后，左边那个图标本身是「连点五下进隐藏页」的入口（data-secret-entry），
+   所以它得是个按钮 —— 但看起来必须还是一个图标，不能有边框、不能有 padding。 */
+button.settings-icon{padding:0;border:0;font:inherit;cursor:pointer;transition:transform .14s var(--ease-out,ease),background-color .16s ease}
+button.settings-icon:active{transform:scale(.9);background:rgba(118,118,128,.28)}
+.settings-row .settings-tail .update-progress{width:auto;gap:8px}
+.settings-row .settings-tail .update-progress small{max-width:90px}
+
+/* ── 设置页 v2 · 底部留白 ───────────────────────────────────────────
+   #content 的 padding-bottom 是 110px，那是给旧设置页（最后一块是
+   「恢复出厂设置」的说明段落）算的。新页面最后一张卡是危险动作卡，
+   加上 #dock 是 62px + 12px 的浮层，110px 只够露出半行 —— 真机上
+   「缓存」和「恢复出厂设置」被底栏压住了。这里单独给设置页加到 150px。 */
+#app[data-route=settings] #content{padding-bottom:150px}
+
+/* ── 设置页 v2 · 二级页的分段控件 ──────────────────────────────────
+   播放器页的解码 / 缓存是一个「二选一 / 三选一」，不是一排并列按钮。
+   用 iOS 那种分段控件：整条一个灰底，选中项浮起来成白胶囊，点哪个哪块
+   滑过去 —— 位置本身就是反馈，不用再写「已选择」。
+   滑块用 background 的伪元素做，避免额外 DOM。 */
+.settings-seg-control{
+  display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:3px;
+  padding:3px;border-radius:11px;background:rgba(118,118,128,.14);
+  width:100%;
+}
+html[data-theme=dark] .settings-seg-control{background:rgba(118,118,128,.26)}
+.settings-seg-pill{
+  position:relative;min-height:34px;padding:0 10px;border:0;border-radius:9px;
+  background:transparent;color:var(--text);font-size:13px;font-weight:600;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  transition:background-color .2s cubic-bezier(.2,.72,.2,1),color .2s ease,box-shadow .2s ease,transform .14s ease;
+}
+.settings-seg-pill:active{transform:scale(.96)}
+.settings-seg-pill.selected{
+  background:#fff;color:#1c1c1e;
+  box-shadow:0 3px 8px rgba(0,0,0,.14),0 1px 1px rgba(0,0,0,.04);
+}
+html[data-theme=dark] .settings-seg-pill.selected{background:#636366;color:#fff;box-shadow:0 3px 8px rgba(0,0,0,.5)}
+.settings-seg-pill.selected:active{transform:scale(.96)}
+@media(prefers-reduced-motion:reduce){
+  .settings-seg-pill{transition:none}
+  .settings-seg-pill:active,.settings-seg-pill.selected:active{transform:none}
+}
+
+/* ── 设置页 v2 · 二级页里的表单 ────────────────────────────────────
+   这些表单原来直接套 .password-form，那是给登录弹窗用的：输入框 45px、
+   下方 16px 外边距、提交按钮满宽深色。放进卡片里之后，输入框贴着卡片边缘、
+   上下留白把一行撑到 90px。这里给它们一套「卡片内表单」的间距。 */
+.settings-form{display:flex;flex-direction:column;gap:0;padding:2px 14px 14px}
+.settings-form label{margin:0 0 7px;font-size:12px;font-weight:600;color:var(--muted)}
+.settings-form input{
+  height:42px;margin:0 0 10px;padding:0 12px;
+  border:1px solid var(--line);border-radius:11px;
+  background:rgba(118,118,128,.1);color:var(--text);font-size:13px;
+  transition:border-color .18s ease,background-color .18s ease,box-shadow .18s ease;
+}
+.settings-form input::placeholder{color:var(--muted);font-size:12px}
+.settings-form input:focus{
+  outline:none;border-color:#007aff;background:rgba(0,122,255,.06);
+  box-shadow:0 0 0 3px rgba(0,122,255,.12);
+}
+html[data-theme=dark] .settings-form input{background:rgba(118,118,128,.2)}
+html[data-theme=dark] .settings-form input:focus{border-color:#0a84ff;background:rgba(10,132,255,.12);box-shadow:0 0 0 3px rgba(10,132,255,.18)}
+.settings-form button[type=submit]{
+  min-height:42px;border:0;border-radius:11px;
+  background:#007aff;color:#fff;font-size:14px;font-weight:700;
+  transition:transform .14s var(--ease-out,ease),background-color .16s ease;
+}
+.settings-form button[type=submit]:active{transform:scale(.985);background:#0a6fe0}
+.settings-form button[type=submit]:disabled{opacity:.55}
+html[data-theme=dark] .settings-form button[type=submit]{background:#0a84ff}
+.settings-form-hint{padding:0 14px 12px;margin:0!important;font-size:12px;line-height:1.5;color:var(--muted)}
+.settings-form-hint.is-bad{color:#ff3b30}
+
+/* 测速结果那一列在卡片里也要缩进，否则会贴到卡片边上。 */
+.settings-card .speed-list{padding:0 14px 12px;margin:0}
+.settings-card .speed-item{background:rgba(118,118,128,.1);border-color:transparent}
+.settings-card .speed-item:active{background:rgba(0,122,255,.14)}
+
+/* ── 设置页 v2 · 二级页的空行 ──────────────────────────────────────
+   .settings-row.is-static 最小高度 60px，里面只放一句小字时，那句字贴着
+   上边缘、下面空出一大片（代理页「节点」卡里就有这么一块）。
+   纯说明行应该按内容高度走。 */
+.settings-row.is-static:has(> .settings-note){min-height:0;padding-top:10px;padding-bottom:10px;align-items:flex-start}
+.settings-row.is-static:has(> .settings-note) .settings-note{line-height:1.55}
+
+/* ── 设置页 v2 · 内容源列表 ────────────────────────────────────────
+   源列表是「一张卡片里的几行」，不是一组独立按钮。缩进对齐到图标右边缘，
+   每行之间用一条细线，选中项整行染成蓝色调（不是实心块 —— 实心块在这一页
+   会和上面的卡片撞色）。 */
+.settings-card .source-list{list-style:none;margin:0;padding:0 14px 6px;display:flex;flex-direction:column;gap:6px}
+.settings-card .source-row{display:flex;align-items:stretch;gap:6px}
+.settings-card .source-pick{
+  flex:1;min-width:0;display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:10px 12px;border:1px solid var(--line);border-radius:12px;
+  background:rgba(118,118,128,.08);color:var(--text);text-align:left;font:inherit;
+  transition:transform .14s var(--ease-out,ease),background-color .16s ease;
+}
+.settings-card .source-pick:active{transform:scale(.99);background:rgba(118,118,128,.16)}
+.settings-card .source-pick span{min-width:0;display:flex;flex-direction:column;gap:2px}
+.settings-card .source-pick strong{font-size:13.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.settings-card .source-pick small{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.settings-card .source-pick em{font-style:normal;font-size:11px;font-weight:700;color:#007aff;white-space:nowrap}
+.settings-card .source-row.is-active .source-pick{
+  border-color:rgba(0,122,255,.4);background:rgba(0,122,255,.1);
+}
+html[data-theme=dark] .settings-card .source-row.is-active .source-pick{
+  border-color:rgba(10,132,255,.5);background:rgba(10,132,255,.14);
+}
+html[data-theme=dark] .settings-card .source-row.is-active .source-pick em{color:#409cff}
+.settings-card .source-note,.settings-card .source-drop{
+  flex:0 0 auto;min-width:44px;padding:0 8px;border:1px solid var(--line);border-radius:12px;
+  background:rgba(118,118,128,.08);color:var(--muted);font-size:12px;
+  transition:transform .14s var(--ease-out,ease),background-color .16s ease,color .16s ease;
+}
+.settings-card .source-drop{min-width:40px;font-size:17px;line-height:1}
+.settings-card .source-note:active,.settings-card .source-drop:active{transform:scale(.94);background:rgba(118,118,128,.2);color:var(--text)}
+.settings-card .source-drop:active{background:rgba(255,59,48,.16);color:#ff3b30}
+.settings-card .source-empty{padding:14px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);font-size:12.5px;text-align:center;margin:0 14px 8px}
+/* TVBox 导入那一块也是同一套卡片。 */
+.settings-card .tvbox-block{padding:0 14px 14px}
+.settings-card .tvbox-block h2{font-size:14px;margin:0 0 4px}
+.settings-card .tvbox-block>p{margin:0 0 10px;font-size:12px;color:var(--muted);line-height:1.5}
+
+/* TVBox 那一块挪进卡片之后，列表也要跟着缩进。 */
+.settings-card .tvbox-list{list-style:none;margin:0;padding:0 14px 12px;display:flex;flex-direction:column;gap:6px}
+.settings-card .tvbox-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;background:rgba(118,118,128,.08)}
+.settings-card .tvbox-copy{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.settings-card .tvbox-copy strong{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.settings-card .tvbox-copy small{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.settings-card .tvbox-add{flex:none;min-height:30px;padding:0 11px;border:0;border-radius:15px;background:#007aff;color:#fff;font-size:12px;font-weight:600}
+.settings-card .tvbox-add:active{background:#0a6fe0}
+.settings-card .field-hint{padding:0 14px 12px;margin:0!important;font-size:12px;color:var(--muted)}

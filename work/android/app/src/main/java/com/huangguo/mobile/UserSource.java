@@ -237,16 +237,11 @@ public final class UserSource {
      */
     private static String identity(JSONObject config) {
         if (config == null) return "";
-        String adapter = config.optString("adapter", "").trim();
-        String api = config.optString("api", "").trim();
-
-        if ("agedm".equals(adapter)) {
-            String base = api.length() > 0 ? api : "https://api.agedm.io";
-            return "hgsrc:agedm|" + trimSlash(base) + "/v2/detail/";
-        }
-        if ("cms".equals(adapter)) {
-            String cms = api.length() > 0 ? api : config.optString("playback", "").trim();
-            if (cms.length() > 0) return "hgsrc:cms|" + cms;
+        // 每站「id 翻到哪儿」的规矩归适配器自己，这里只管问 + 兜底。
+        SiteAdapter impl = Adapters.byId(config.optString("adapter", "").trim());
+        if (impl != null) {
+            String space = impl.identity(config);
+            if (space != null && space.length() > 0) return space;
         }
 
         String origin = config.optString("origin", "").trim();
@@ -267,7 +262,7 @@ public final class UserSource {
         return at < 0 ? template : template.substring(0, at) + template.substring(at + 4);
     }
 
-    private static String trimSlash(String url) {
+    static String trimSlash(String url) {
         String out = url;
         while (out.endsWith("/")) out = out.substring(0, out.length() - 1);
         return out;
@@ -985,61 +980,24 @@ public final class UserSource {
      *   {sites[]}            TVBox 单仓               → 二期
      */
     public static JSONObject load(String url) throws Exception {
-        // AGE动漫 先认，而且**认在 fetch 之前**：它的 www/m 都给 HTML（PC 是 Go 模板、
-        // 移动是 Vue SPA），数据在另一个域名的 /v2/ 下面。所以按**域名**认，不按响应
-        // 形状认 —— 走过去 fetch 一次只会拿到一坨 HTML，然后报「认不出这是什么配置」。
-        if (isAgedm(url)) return wrapAgedm();
-        // hanime1 同样按域名认，也**认在 fetch 之前** —— 它给的是 HTML，不是 JSON，
-        // 走过去 fetch 只会拿到 100~400KB 的页面然后报「认不出这是什么配置」。
-        // 而且它是本轮唯一一个「有适配器、但用户填的地址直接就是站点根」的源：
-        // origin 就是 hanime1.me，适配器自己往上面拼路径。
-        if (isHanime1(url)) return wrapHanime1(url);
+        // 第一轮：按地址认，**认在 fetch 之前**。AGE动漫 / hanime1 / mrds66 给的
+        // 都是 HTML，先 fetch 一次只会拿到几十万字节的页面，然后报「认不出这是什么
+        // 配置」。谁负责认、认完怎么生成配置，全在各自那个 SiteAdapter 里。
+        for (int i = 0; i < Adapters.ALL.size(); i++) {
+            SiteAdapter adapter = Adapters.ALL.get(i);
+            if (adapter.matchesUrl(url)) return adapter.probe(url);
+        }
 
         JSONObject fetched = fetch(url);
         if (fetched == null) throw new IOException("响应为空");
 
-        // 苹果CMS：code + list + class 同时出现才算数。
-        // 单看 code 不行 —— 我们自己的配置里将来也可能有别的 code 字段。
-        if (fetched.has("code") && fetched.has("list") && fetched.has("class")) {
-            // 两次探测的结果是**互补的**，实测（暴風源，2026-10-16）：
-            //
-            //   裸地址 / ?ac=list      list=20  class=49  封面域名=0
-            //   ?ac=detail&pg=1        list=20  class= 0  封面域名=1
-            //
-            // class[]（分类表）只在 list 那侧出现，vod_pic（封面）只在 detail 那侧。
-            // 少任何一边都不行：没有 class 就建不出分类表，没有 vod_pic 就提取不出
-            // 封面域名 —— 而空的 allowedHosts 会在 SiteProfile 构造时抛
-            // 「缺少封面域名」，那是 Activity.onCreate 里，表现是一装完就闪退。
-            //
-            // 所以拉两次合并：分类用第一份，列表用第二份。
-            JSONObject merged = new JSONObject(fetched.toString());
-            try {
-                JSONObject rich = fetch(withParams(url, "ac=detail&pg=1"));
-                if (rich.has("list")) merged.put("list", rich.getJSONArray("list"));
-                if (!merged.has("class") && rich.has("class")) merged.put("class", rich.getJSONArray("class"));
-            } catch (Exception e) {
-                // 第二次拉不动就用第一份。后面提取不到封面域名会明确报错，
-                // 不会把坏配置存进去。
-            }
-
-            // XML 那套接口（/at/xml/）的 <class> 里**只有 id 和名字，没有 type_pid**，
-            // 分类树读不出来 —— 结果就是底部导航只能退化成一个入口。同一台机器的
-            // JSON 接口有，而两者的地址只差一个 /at/xml/。
-            //
-            // 这里只把层级关系「补」进去，id 和名字还是用 XML 那份：两个接口本来就
-            // 是同一张 type 表，id 对得上；万一它的 class 变了，补不上的那些也只是
-            // 退回顶层，不会丢分类。整段失败无所谓 —— 没有 pid 就按一维处理。
-            if (!hasHierarchy(merged) && url.contains("/at/xml/")) {
-                try {
-                    JSONObject sibling = fetch(withParams(url.replace("/at/xml/", "/"), "ac=list"));
-                    int filled = mergeParents(merged.optJSONArray("class"), sibling.optJSONArray("class"));
-                    log("XML 接口没有分类层级，从同门 JSON 接口补到 " + filled + " 条");
-                } catch (Throwable e) {
-                    log("补问同门 JSON 接口失败，分类按一维处理：" + e);
-                }
-            }
-            return wrapCms(url, merged);
+        // 第二轮：按响应形状认。苹果CMS 没有固定域名，只能看字段 —— 两次探测、
+        // XML 补层级那些活也在 CmsSite 里，这里只负责转交。
+        for (int i = 0; i < Adapters.ALL.size(); i++) {
+            SiteAdapter adapter = Adapters.ALL.get(i);
+            if (adapter.matchesBody(fetched)) return adapter.probe(url, fetched);
         }
+
         if (fetched.has("urls")) {
             throw new IOException("这是 TVBox 多仓配置（列出的是子配置地址），二期才支持");
         }
@@ -1052,750 +1010,9 @@ public final class UserSource {
         throw new IOException("认不出这是什么配置 —— 既不像我们自己的 JSON，也不像苹果CMS 接口");
     }
 
-    /** 地址是不是 AGE动漫（含 api./m./www. 几个子域）。 */
-    private static boolean isAgedm(String url) {
-        try {
-            String host = new URI(url == null ? "" : url.trim()).getHost();
-            return host != null && (host.equals("agedm.io") || host.endsWith(".agedm.io"));
-        } catch (Exception e) {
-            return false;
-        }
-    }
 
-    /**
-     * 地址是不是 hanime1（含 m./www. 这类子域）。
-     *
-     * 只认 hanime1.me 这一个域。站点的镜像有几个（hanimeone.me 是它的漫画站、
-     * 别的镜像域不在我们的适配器覆盖范围内），**不跟着认** —— 认了一个对不上
-     * DOM 形状的镜像域，表现是首页一片空白而不是明确报错，那比不认还糟。
-     */
-    private static boolean isHanime1(String url) {
-        try {
-            String host = new URI(url == null ? "" : url.trim()).getHost();
-            if (host == null) return false;
-            return host.equals("hanime1.me") || host.endsWith(".hanime1.me");
-        } catch (Exception e) {
-            return false;
-        }
-    }
+    // ── 配置里的动作名 ────────────────────────────────────────────────
 
-    /**
-     * hanime1 → 我们的配置。
-     *
-     * 和 agedm 不一样的地方：这个站**没有接口可探**（/api/* 全 404），所以
-     * 「探通才存」这件事只能拿首页**页面本身**当探针 —— 拉一次 GET /，确认
-     * 里面能抠出卡片链接，才认为这个源可用。
-     *
-     * 探针失败就抛，不留一份点了没反应的配置。这正是 UserSource 那套
-     * 「切换走完整校验」的规矩要的效果。
-     */
-    private static JSONObject wrapHanime1(String url) throws Exception {
-        String base = "https://hanime1.me";
-        JSONArray probe = probeHanime1(base);
-        if (probe == null) {
-            throw new IOException("hanime1 首页里没找到任何影片卡片，站点可能改版或该地区被墙");
-        }
-        log("hanime1 探测通过：首页卡片 " + probe.length() + " 条");
-
-        JSONObject config = new JSONObject();
-        config.put("adapter", "hanime1");
-        config.put("origin", base);
-
-        JSONObject cover = new JSONObject();
-        cover.put("mode", "plain");
-        JSONArray hosts = new JSONArray();
-        hosts.put("vdownload.hembed.com");
-        cover.put("allowedHosts", hosts);
-        cover.put("hostRewrites", new JSONObject());
-        config.put("cover", cover);
-
-        JSONObject web = new JSONObject();
-        web.put("firstPageSize", 24);
-        web.put("pageSize", 40);
-
-        JSONObject paths = new JSONObject();
-        paths.put("home", "/api/home");
-        paths.put("detail", "/api/videos/{id}");
-        paths.put("episode", "/api/videos/{id}/play?ep={episode}");
-        paths.put("search", "/api/search?q={keyword}&page={page}");
-        paths.put("category", "/api/videos?cate_id={cateId}&page={page}&size={size}");
-        // ── tag-list 走 tag=，不走 cate_id ──────────────────────────────
-        // 这两个参数在站点那边是**两套东西**：
-        //   cate_id → genre（10 个大方向：裏番 / 3DCG / MMD …）
-        //   tag     → tags[]（标签面板上那 240 个多选框：巨乳 / NTR / 校園 …）
-        // 走错了不会有报错，只会「点标签出来的还是默认列表」，看着像没过滤。
-        // Hanime1Adapter 那边按参数名分流，见它的 fetch()。
-        paths.put("tag-list", "/api/videos?tag={slug}&page={page}&size={size}");
-        paths.put("tags", "/api/tags");
-        web.put("paths", paths);
-
-        JSONObject categories = new JSONObject();
-        JSONArray labels = new JSONArray();
-        for (int i = 0; i < HANIME1_GENRES.length; i++) {
-            categories.put(HANIME1_GENRES[i], HANIME1_GENRES[i]);
-            labels.put(HANIME1_GENRES[i]);
-        }
-        web.put("categories", categories);
-
-        // ── 底部导航 ────────────────────────────────────────────────────
-        // 站点的十个 genre 里，前四个是量最大的（裏番 / 泡麵番 / 3DCG / 2D動畫），
-        // 剩下的合成一个「更多」。这和 wrapCms 那套「按子分类数量排序取前 4 个」
-        // 是同一个思路，只是这里的分类是固定的十个、没有层级，所以写死顺序。
-        JSONObject ui = new JSONObject();
-        JSONArray tabs = new JSONArray();
-        String[][] plan = {
-            {"裏番", "裏番", "film"},
-            {"泡麵番", "泡麵番", "sparkle"},
-            {"3DCG", "3DCG", "grid"},
-            {"2D動畫", "2D動畫", "tv"},
-            {"more", "更多", "grid"},
-        };
-        for (int i = 0; i < plan.length; i++) {
-            JSONObject tab = new JSONObject();
-            tab.put("key", plan[i][0]);
-            tab.put("label", plan[i][1]);
-            tab.put("icon", plan[i][2]);
-            tabs.put(tab);
-        }
-        ui.put("tabs", tabs);
-
-        JSONArray mainFour = new JSONArray();
-        mainFour.put("裏番");
-        mainFour.put("泡麵番");
-        mainFour.put("3DCG");
-        mainFour.put("2D動畫");
-        JSONArray rest = new JSONArray();
-        rest.put("Motion Anime");
-        rest.put("2.5D");
-        rest.put("AI生成");
-        rest.put("MMD");
-        rest.put("Cosplay");
-        rest.put("新番預告");
-
-        JSONObject cids = new JSONObject();
-        cids.put("裏番", oneArray("裏番"));
-        cids.put("泡麵番", oneArray("泡麵番"));
-        cids.put("3DCG", oneArray("3DCG"));
-        cids.put("2D動畫", oneArray("2D動畫"));
-        cids.put("more", rest);
-        ui.put("categoryIds", cids);
-
-        JSONObject clabels = new JSONObject();
-        clabels.put("裏番", oneArray("裏番"));
-        clabels.put("泡麵番", oneArray("泡麵番"));
-        clabels.put("3DCG", oneArray("3DCG"));
-        clabels.put("2D動畫", oneArray("2D動畫"));
-        clabels.put("more", rest);
-        ui.put("categoryLabels", clabels);
-
-        JSONObject ctitles = new JSONObject();
-        ctitles.put("裏番", "裏番");
-        ctitles.put("泡麵番", "泡麵番");
-        ctitles.put("3DCG", "3DCG");
-        ctitles.put("2D動畫", "2D動畫");
-        ctitles.put("more", "更多分类");
-        ui.put("categoryTitles", ctitles);
-
-        JSONObject cleads = new JSONObject();
-        cleads.put("裏番", "hanime1.me 主分类。");
-        cleads.put("泡麵番", "短篇。");
-        cleads.put("3DCG", "3DCG 作品。");
-        cleads.put("2D動畫", "2D 动画。");
-        cleads.put("more", "其余分类。");
-        ui.put("categoryLeads", cleads);
-
-        // ── 首页那排胶囊：从 240 个标签里挑 8 个有代表性的 ────────────────
-        // 挑法不是「从头截前 8 个」（那会全是「無碼 / AI解碼 / 中文字幕」这种
-        // 规格词，看着像一排设置项），而是**每个分区轮一个** —— 和 wrapCms
-        // 那套「每个频道轮流挑一个」是同一个思路。
-        //
-        // 顺序也刻意打散了：规格词放第一个（它最常用），剩下按分区铺开。
-        JSONArray popular = new JSONArray();
-        String[][] picks = {
-            { "中文字幕", "中文字幕" },   // 影片屬性里最常用的
-            { "巨乳",     "巨乳" },
-            { "JK",       "JK" },
-            { "純愛",     "純愛" },
-            { "NTR",      "NTR" },
-            { "校園",     "校園" },
-            { "後宮",     "後宮" },
-            { "3P",       "3P" },
-        };
-        for (int i = 0; i < picks.length; i++) {
-            JSONArray pair = new JSONArray();
-            pair.put(picks[i][0]);
-            pair.put(picks[i][1]);
-            popular.put(pair);
-        }
-        ui.put("popularTags", popular);
-        ui.put("publicPopularTags", new JSONArray());
-
-        // ── 「全部类型」页的分区：7 个 ───────────────────────────────────
-        // 这是这个站**最值钱的一层**。标签不分组的话，240 个挤在一页里没法看。
-        //
-        // ⚠️ 组名必须和适配器交上来的 `tag.group` 一字不差。对不上的组会被
-        //    前端**整组丢掉**——不报错，只是页面上少一块（见站点配置参考）。
-        //
-        // 分区表原来是从适配器那边取（Hanime1Adapter.tagSections()），好处是
-        // 「唯一来源」。但那个类现在不在仓库里（见 .gitignore），留着这行会让
-        // 整个文件编译不过 —— 而分区表本来就是**配置的一部分**，放在这里
-        // 反而更自洽：它是「这个源的界面长什么样」，不是「怎么解析响应」。
-        //
-        // 唯一的代价：改分区要同时动适配器的 TAG_SECTIONS。两处都留了指回来的
-        // 注释，对不上时表现为「某个分区的标签消失」，好排查。
-        JSONArray tagGroups = new JSONArray();
-        String[][] sections = HANIME1_TAG_SECTIONS;
-        for (int i = 0; i < sections.length; i++) {
-            JSONArray g = new JSONArray();
-            g.put(sections[i][1]);   // code，必须和 tag.group 一致
-            g.put(sections[i][2]);   // 界面上的标题
-            tagGroups.put(g);
-        }
-        // other 一定要留着：适配器认不出的分区名会折进这里（站点改字形就会发生）
-        JSONArray other = new JSONArray();
-        other.put("other");
-        other.put("其他");
-        tagGroups.put(other);
-        ui.put("tagGroups", tagGroups);
-
-        web.put("ui", ui);
-        config.put("web", web);
-
-        config.put("_note", "hanime1.me。数据全在 SSR 的 HTML 里（站点没有任何 JSON 接口，"
-                + "/api/* 全 404），播放地址是页面内联的 ?secure= 签名直链，"
-                + "**必须在点播放那一刻现抓详情页**，不能进缓存。"
-                + "适配器见 Hanime1Adapter.java；那个站的逆向笔记不在仓库里"
-                + "（内容是成人向，代码留、内容不留）。");
-        return config;
-    }
-
-    /** 站点的十个分类。值就是中文原词 —— 它的 URL 里就是中文，没有代码。 */
-    private static final String[] HANIME1_GENRES = {
-        "裏番", "泡麵番", "Motion Anime", "3DCG", "2.5D",
-        "2D動畫", "AI生成", "MMD", "Cosplay", "新番預告"
-    };
-
-    /**
-     * 标签面板的七个分区：{ 站点分区名, 我们的组 code, 界面上的标题 }。
-     *
-     * ⚠️ **必须和适配器里的 TAG_SECTIONS 一字不差。** 那边负责把 240 个标签
-     * 按分区打上 group，这边负责告诉前端「有哪些组要渲染」。两个表对不上的
-     * 那一组会被**整组丢掉** —— 不报错，只是页面上少一块。
-     *
-     * 为什么会分成两份而不是共用：适配器不在仓库里（见 .gitignore），
-     * 而这张表是**配置的一部分**（界面长什么样），不是解析逻辑。真要合并，
-     * 得先把适配器放回来。
-     */
-    private static final String[][] HANIME1_TAG_SECTIONS = {
-        { "影片屬性", "hanime-attr",  "影片属性" },
-        { "人物關係", "relationship", "人物关系" },
-        { "角色設定", "hanime-role",  "角色设定" },
-        { "外貌身材", "style",        "外貌身材" },
-        { "情境場所", "setting",      "情境场所" },
-        { "故事劇情", "plot",         "故事剧情" },
-        { "性交體位", "hanime-act",   "性交体位" },
-    };
-
-    private static JSONArray oneArray(String value) {
-        JSONArray a = new JSONArray();
-        a.put(value);
-        return a;
-    }
-
-    /**
-     * hanime1 的探针：拉一次首页，数里面的 watch 链接。
-     *
-     * **不用 JSON**（它没有），所以这里做的是「HTML 里有没有卡片」这个最基础的
-     * 存在性检查 —— 不用 Hanime1Adapter 那套完整解析，因为探针失败的原因不需要
-     * 区分（站点改版 / 被墙 / 返回错误页，对用户来说都是「这个源用不了」）。
-     *
-     * 数不出来返回 null。**不猜**：返回 0 条也当失败。
-     */
-    private static JSONArray probeHanime1(String base) {
-        try {
-            byte[] body = AiiHttp.getRaw(base + "/", 20);
-            if (body == null || body.length == 0) return null;
-            String html = new String(body, "UTF-8");
-            JSONArray hits = new JSONArray();
-            java.util.regex.Matcher m = java.util.regex.Pattern.compile(
-                    "/watch\\?v=(\\d+)").matcher(html);
-            java.util.HashSet<String> seen = new java.util.HashSet<String>();
-            while (m.find() && hits.length() < 5) {
-                if (seen.add(m.group(1))) hits.put(m.group(1));
-            }
-            return hits.length() == 0 ? null : hits;
-        } catch (Throwable e) {
-            log("hanime1 探针失败：" + e);
-            return null;
-        }
-    }
-
-    /**
-     * AGE动漫 → 我们的配置。
-     *
-     * 这个站没法按响应形状识别（页面是 HTML），所以按域名认。认出来之后不去 fetch
-     * 用户填的那个地址（那会拿到 HTML），直接去探它的数据接口 —— 探通了才存，
-     * 免得留一份点了没反应的配置。
-     */
-    private static JSONObject wrapAgedm() throws Exception {
-        final String api = "https://api.agedm.io";
-        JSONObject probe = fetch(api + "/v2/home-list");
-        if (probe.optJSONArray("latest") == null || probe.optJSONArray("recommend") == null) {
-            throw new IOException("AGE动漫 的接口没有返回预期数据，可能改版了");
-        }
-        log("AGE动漫 探测通过：latest " + probe.optJSONArray("latest").length()
-                + " 条 / recommend " + probe.optJSONArray("recommend").length() + " 条");
-
-        // 播放走同名采集源 —— 站点自己的地址是 age_ 密文 + Go/WASM 签名门，解不了。
-        // 默认给暴风（2026-10-16 实测同名作品在它上面是明文 m3u8）。匹配要求标题
-        // 完全一致，对不上就明确报错，不猜。想换源改这一个字段就行。
-        final String playback = "https://bfzyapi.com/api.php/provide/vod/";
-
-        JSONObject config = new JSONObject();
-        config.put("adapter", "agedm");
-        config.put("api", api);
-        config.put("playback", playback);
-        config.put("_note", "AGE动漫。数据来自 api.agedm.io/v2/（裸请求可拉，无鉴权）。"
-                + "播放地址站点自己是加密的，这里是拿标题去 playback 那个苹果CMS 采集站匹配同名作品"
-                + "（标题必须完全一致，对不上会明确报错）。");
-
-        JSONObject web = new JSONObject();
-        web.put("firstPageSize", 24);
-        web.put("pageSize", 24);
-
-        JSONObject paths = new JSONObject();
-        paths.put("home", "/api/home");
-        paths.put("detail", "/api/videos/{id}");
-        paths.put("episode", "/api/videos/{id}/play?ep={episode}");
-        paths.put("search", "/api/search?q={keyword}&page={page}");
-        paths.put("category", "/api/videos?cate_id={cateId}&order=time&page={page}&size={size}");
-        paths.put("recommend", "/api/videos?order=hits&page={page}&size={size}");
-        paths.put("newest", "/api/videos?order=time&page={page}&size={size}");
-        paths.put("tags", "/api/tags");
-        paths.put("tag-list", "/api/videos?cate_id={slug}&order=time&page={page}&size={size}");
-        web.put("paths", paths);
-
-        // 分类：AGE动漫 的「类型」是中文词（label=搞笑），没有数字 id。
-        // slug 和值都直接用那个词 —— 值会被填进 {cateId}，适配器拿去当 label 用。
-        JSONObject categories = new JSONObject();
-        JSONArray slugs = new JSONArray();
-        for (int i = 0; i < AgedmAdapter.LABELS.length; i++) {
-            categories.put(AgedmAdapter.LABELS[i], AgedmAdapter.LABELS[i]);
-            slugs.put(AgedmAdapter.LABELS[i]);
-        }
-        web.put("categories", categories);
-
-        JSONObject ui = new JSONObject();
-        JSONArray tabs = new JSONArray();
-        tabs.put(tab("all", "分类", "grid"));
-        ui.put("tabs", tabs);
-        JSONObject ids = new JSONObject();
-        ids.put("all", slugs);
-        ui.put("categoryIds", ids);
-        JSONObject labels = new JSONObject();
-        labels.put("all", slugs);
-        ui.put("categoryLabels", labels);
-        JSONObject titles = new JSONObject();
-        titles.put("all", "全部分类");
-        ui.put("categoryTitles", titles);
-        JSONObject leads = new JSONObject();
-        leads.put("all", "46 个类型词，来自这个站自己的筛选字典。");
-        ui.put("categoryLeads", leads);
-
-        // 首页那排胶囊：挑几个常见的类型。
-        JSONArray hot = new JSONArray();
-        String[] picks = {"热血", "奇幻", "恋爱", "战斗", "搞笑", "校园", "悬疑", "治愈"};
-        for (int i = 0; i < picks.length; i++) {
-            JSONArray pair = new JSONArray();
-            pair.put(picks[i]);
-            pair.put(picks[i]);
-            hot.put(pair);
-        }
-        ui.put("popularTags", hot);
-        ui.put("publicPopularTags", new JSONArray());
-        // tags 接口交给适配器合成（站点没有标签接口），分组名和它对上。
-        JSONArray groups = new JSONArray();
-        JSONArray one = new JSONArray();
-        one.put("agedm");
-        one.put("全部分类");
-        groups.put(one);
-        ui.put("tagGroups", groups);
-        web.put("ui", ui);
-
-        // 字段别名。**必须和适配器实际吐出来的键名对上** —— 前端 pick() 是按这张表
-        // 找值的，表里没有的键就等于没有。（第一版这里全部写成角色名本身，
-        // 而适配器吐的是 ep_num，于是剧集号解析成 undefined，集数按钮全是
-        // data-episode="undefined"，播放根本没开始。）
-        JSONObject fields = new JSONObject();
-        fields.put("id", arr("id"));
-        fields.put("title", arr("title"));
-        fields.put("cover", arr("cover"));
-        fields.put("score", arr("score"));
-        fields.put("tags", arr("tags"));
-        fields.put("description", arr("description"));
-        fields.put("category", arr2("category", "cate_id"));
-        fields.put("badge", arr("badge"));
-        fields.put("episodeCount", arr("episode_count"));
-        fields.put("episodeNumber", arr("ep_num"));
-        fields.put("source", arr("video_url"));
-        fields.put("duration", arr("duration"));
-        web.put("fields", fields);
-        config.put("web", web);
-
-        JSONObject cover = new JSONObject();
-        cover.put("mode", "plain");
-        // 封面是百度图床的代理地址（gimg0-4.baidu.com/gimg/…?src=真图），
-        // 白名单精确匹配、不支持通配符，所以五个都列上。
-        JSONArray hosts = new JSONArray();
-        hosts.put("gimg0.baidu.com");
-        hosts.put("gimg1.baidu.com");
-        hosts.put("gimg2.baidu.com");
-        hosts.put("gimg3.baidu.com");
-        hosts.put("gimg4.baidu.com");
-        cover.put("allowedHosts", hosts);
-        config.put("cover", cover);
-
-        return config;
-    }
-
-    /**
-     * 苹果CMS → 我们的配置。
-     *
-     * 存的只是「api 地址 + 从 class[] 生成出来的分类表」。真正的映射在 CmsAdapter 里 ——
-     * 它负责让 CMS 的响应看起来像我们的站，于是前端 adapters.js 一行不用改。
-     */
-    private static JSONObject wrapCms(String url, JSONObject probe) throws Exception {
-        JSONObject config = new JSONObject();
-        config.put("adapter", "cms");
-        String api = url.trim();
-        int q = api.indexOf('?');
-        config.put("api", q < 0 ? api : api.substring(0, q));
-
-        JSONObject web = new JSONObject();
-        JSONObject categories = CmsAdapter.categoriesOf(probe);
-        if (categories.length() == 0) throw new IOException("CMS 的分类表是空的，这个接口可能不能用了");
-        web.put("categories", categories);
-
-        JSONObject paths = new JSONObject();
-        paths.put("home", "/api/home");
-        paths.put("detail", "/api/videos/{id}");
-        paths.put("episode", "/api/videos/{id}/play?ep={episode}");
-        paths.put("search", "/api/search?q={keyword}&page={page}");
-        paths.put("category", "/api/videos?cate_id={cateId}&page={page}&size={size}");
-        paths.put("recommend", "/api/videos?page={page}&size={size}");
-        paths.put("newest", "/api/videos?sort=new&page={page}&size={size}");
-        paths.put("tags", "/api/tags");
-        // 标签走**分类**而不是搜索。CMS 的搜是标题匹配（wd=），拿「动作片」去搜
-        // 一个都搜不到 —— 上一版就是 /api/search?q={keyword}，点标签等于白点。
-        // 而标签的 slug 在 CMS 那边本来就是 type_id（见 CmsAdapter.tags），
-        // 直接当 cate_id 用，一次到位。
-        paths.put("tag-list", "/api/videos?cate_id={slug}&page={page}&size={size}");
-        web.put("paths", paths);
-
-        // CMS 每页固定 20 条（实测 limit=20），size 参数它不认 —— 这里写 20 只是
-        // 让前端的分页逻辑算出正确的结果。
-        web.put("firstPageSize", 20);
-        web.put("pageSize", 20);
-
-        // ── 底部导航那几格 ────────────────────────────────────────────
-        //
-        // 上一版是「两个 key 填同一份分类」：CMS 的分类是一维的，而界面只有两个
-        // 入口，于是剧场和 AI 长得一模一样，名字还跟内容没关系 —— 源里根本没有
-        // 「AI」这种东西。现在导航由配置出（web.ui.tabs），这里就按**源自己的
-        // 分类树**生成：class[] 里 type_pid 指向父类的就是二级类型，顶层那几个
-        // （电影片/连续剧/综艺片/动漫片）天然就是入口。
-        JSONArray classes = probe.optJSONArray("class");
-        LinkedHashMap<String, JSONObject> byId = new LinkedHashMap<String, JSONObject>();
-        ArrayList<String> order = new ArrayList<String>();
-        for (int i = 0; classes != null && i < classes.length(); i++) {
-            JSONObject c = classes.optJSONObject(i);
-            if (c == null) continue;
-            String id = plain(c.opt("type_id"));
-            if (id.length() == 0) continue;
-            if (!byId.containsKey(id)) order.add(id);
-            byId.put(id, c);
-        }
-        if (byId.isEmpty()) throw new IOException("CMS 的分类表是空的，这个接口可能不能用了");
-
-        ArrayList<String> roots = new ArrayList<String>();
-        LinkedHashMap<String, ArrayList<String>> children =
-                new LinkedHashMap<String, ArrayList<String>>();
-        for (String id : order) {
-            String pid = plain(byId.get(id).opt("type_pid"));
-            // 顶层 = pid 是 0、压根没有 pid、或者指到一个不存在的类。
-            // 最后那条是给「pid 乱填」的源兜底的 —— 不然那些类会凭空消失。
-            if (pid.length() == 0 || "0".equals(pid) || !byId.containsKey(pid)) {
-                roots.add(id);
-                children.put(id, new ArrayList<String>());
-            }
-        }
-        for (String id : order) {
-            String pid = plain(byId.get(id).opt("type_pid"));
-            ArrayList<String> kids = children.get(pid);
-            if (kids != null && !roots.contains(id)) kids.add(id);
-        }
-
-        // 顶层里**有子分类**的那些才是能当入口的频道。这个区分不是审美问题：
-        // 苹果CMS 查父类不出内容（实测 t=<父id> 返回 0 条），所以一个入口要能用，
-        // 必须把它下面的子分类列全；而本来就没有子分类的顶层（短剧/AI漫剧 这种）
-        // 自己就是一条能查的叶子分类。
-        ArrayList<String> channels = new ArrayList<String>();
-        ArrayList<String> bare = new ArrayList<String>();
-        for (String rootId : roots) {
-            if (children.get(rootId).isEmpty()) bare.add(rootId);
-            else channels.add(rootId);
-        }
-        // 子分类多的当入口。实测这比「取前几个」准：量子那个源按顺序第 5 个是
-        // 「体育」（4 个子分类），而「综艺片」也是 4 个 —— 按内容量排能稳定地把
-        // 电影/连续剧/动漫/综艺这四个主频道挑出来，体育、短剧那些进「其他」。
-        Collections.sort(channels, new Comparator<String>() {
-            @Override public int compare(String a, String b) {
-                return children.get(b).size() - children.get(a).size();
-            }
-        });
-
-        JSONArray tabList = new JSONArray();
-        JSONObject ids = new JSONObject();
-        JSONObject labels = new JSONObject();
-        JSONObject titles = new JSONObject();
-        JSONObject leads = new JSONObject();
-
-        if (!channels.isEmpty()) {
-            // dock 一行塞得下的上限：这里 4 个 + 首页 + 我的 = 6 格，再加一个「其他」
-            // 是 7 格。360dp 的机器上 365dp 宽的 dock 分成 7 份，每格 ~52dp ——
-            // 再多 label 就要被压成两个字了。
-            int picked = Math.min(4, channels.size());
-            for (int i = 0; i < picked; i++) {
-                String rootId = channels.get(i);
-                JSONObject root = byId.get(rootId);
-                JSONArray slugs = new JSONArray();
-                JSONArray names = new JSONArray();
-                for (String kid : children.get(rootId)) {
-                    slugs.put(kid);
-                    names.put(byId.get(kid).optString("type_name", "分类"));
-                }
-                String name = shortLabel(root.optString("type_name", "分类"));
-                tabList.put(tab(rootId, name, iconFor(name)));
-                ids.put(rootId, slugs);
-                labels.put(rootId, names);
-                titles.put(rootId, name);
-                leads.put(rootId, "分类来自这个源自己的接口。");
-            }
-            // 没当上入口的频道 + 本来就没有子分类的顶层，合成「其他」。不是收拾残局 ——
-            // 它们在 CMS 里都是有独立内容的分类，丢掉就是丢内容。
-            ArrayList<String> rest = new ArrayList<String>();
-            for (int i = picked; i < channels.size(); i++) {
-                rest.addAll(children.get(channels.get(i)));
-            }
-            rest.addAll(bare);
-            if (!rest.isEmpty()) {
-                JSONArray slugs = new JSONArray();
-                JSONArray names = new JSONArray();
-                for (String kid : rest) {
-                    slugs.put(kid);
-                    names.put(byId.get(kid).optString("type_name", "分类"));
-                }
-                tabList.put(tab("more", "其他", "grid"));
-                ids.put("more", slugs);
-                labels.put("more", names);
-                titles.put("more", "其他");
-                leads.put("more", "这个源里剩下的那些分类。");
-            }
-        } else {
-            // 一维分类（整棵树都没有 pid），或者顶层全是没有子分类的叶子：
-            // 一个入口，全部类型排在子分类条里，那条是横向滚动的。
-            JSONArray slugs = new JSONArray();
-            JSONArray names = new JSONArray();
-            for (String id : order) {
-                slugs.put(id);
-                names.put(byId.get(id).optString("type_name", "分类"));
-            }
-            tabList.put(tab("all", "影视库", "grid"));
-            ids.put("all", slugs);
-            labels.put("all", names);
-            titles.put("all", "影视库");
-            leads.put("all", "这个源没给出分类层级，全部类型都在下面这一条里。");
-        }
-
-        JSONObject ui = new JSONObject();
-        ui.put("tabs", tabList);
-        ui.put("categoryIds", ids);
-        ui.put("categoryLabels", labels);
-        // categoryTitles 是**一个字符串**（页面大标题），不是数组 —— 塞数组进去
-        // 会被插值成「电影片,连续剧,综艺片,…」四十个名字连成一串。
-        // 分类名由上面的 tab 按钮承载，大标题只要一个说法就行。
-        ui.put("categoryTitles", titles);
-        ui.put("categoryLeads", leads);
-
-        // ── 首页那排标签 + 「全部类型」页 ─────────────────────────────
-        //
-        // CMS 没有独立的标签体系，它的 type 分类表就是标签表 —— CmsAdapter.tags
-        // 把每个 type 打上 group="cms" 交上来。所以：
-        //
-        //   · tagGroups 必须留一组 "cms"。上一版把这几张表全清空了（那会儿是怕
-        //     黄果的「都市/校园/古风」漏过来），结果「全部类型」页整页空白 ——
-        //     首页那排胶囊也一个不剩。
-        //   · popularTags 挑几个叶子分类当快捷入口。**不能拿顶层**：苹果CMS 查
-        //     父类返回 0 条（见 docs 坑 19），点进去会是空的。
-        //
-        // 挑法是每个频道轮一个，不是从头截 8 个 —— 从头截出来的全是电影片的
-        // 子类（动作/喜剧/爱情/科幻…），首页那排看着像只有电影。
-        JSONArray tagGroups = new JSONArray();
-        JSONArray cmsGroup = new JSONArray();
-        cmsGroup.put("cms");
-        cmsGroup.put("全部分类");
-        tagGroups.put(cmsGroup);
-        ui.put("tagGroups", tagGroups);
-        ui.put("popularTags", hotTags(byId, channels, children, bare, order, 8));
-        // 公共模式那份（红果用的）留空，别让内置的黄果标签漏进来。
-        ui.put("publicPopularTags", new JSONArray());
-        web.put("ui", ui);
-
-        // ── 字段别名 ──────────────────────────────────────────────────
-        //
-        // 左边是我们内部的角色名（前端 pick() 用的），右边是**这个族的原始字段名**。
-        //
-        // 适配器不再认字段名了 —— 它只按这张表把命中的那个键**原样**搬过来，改名交给
-        // 前端的 pick()（按顺序取第一个有值的）。所以**同一个族里换字段名的站，改这
-        // 张表就行，不用碰 Java**。
-        //
-        // 上一版这里写的是 ["title"]，而 CmsAdapter 那边把 vod_name 改名成了 title ——
-        // 同一个概念写两遍，而且其中一遍在编译期。现在只有这一份。
-        //
-        // 顺序有讲究：适配器会自己产出的角色（id / score / description）排前面，
-        // 它没产出的时候才轮到原始字段兜底。
-        JSONObject fields = new JSONObject();
-        fields.put("id", arr2("id", "vod_id"));
-        fields.put("title", arr2("title", "vod_name"));
-        fields.put("cover", arr2("cover", "vod_pic"));
-        fields.put("score", arr2("score", "vod_score"));
-        fields.put("badge", arr2("badge", "vod_remarks"));
-        fields.put("description", arr2("description", "vod_content"));
-        fields.put("category", arr2("category", "type_id"));
-        // 下面这几个 CMS 没有对应字段，写空数组会被 validate() 拒（候选键列表为空），
-        // 所以给一个不会命中的名字 —— 拿不到就是 undefined，前端当空处理。
-        fields.put("tags", arr("tags"));
-        fields.put("episodeCount", arr("episode_count"));
-        fields.put("episodeNumber", arr("ep_num"));
-        fields.put("source", arr("video_url"));
-        fields.put("duration", arr("duration"));
-        web.put("fields", fields);
-
-        config.put("web", web);
-
-        // ── 封面 ──────────────────────────────────────────────────────
-        //
-        // 两块都必须显式覆盖，否则会从内置模板那边漏过来：
-        //
-        // ① mode：内置是 aes-cbc（黄果的封面是加密图），而 CMS 返回的是普通
-        //    JPEG。照内置那套解密会把图毁掉 —— 表现是封面全是占位图。
-        //
-        // ② allowedHosts：SiteProfile.coverUrl() 会拿它逐个精确比对 host，
-        //    不匹配直接抛「无效封面域名」。它是防 SSRF 的（拿固定密钥去解任意
-        //    地址），但 CMS 的封面域名我们事先不知道，只能从探测响应里现取。
-        //    实测每个源只用**一个**封面域名（三个源各 20/20 条一致），所以够用。
-        //    真出现第二个域名的那天，那部分封面会降级成占位图，frontend 的
-        //    日志里有域名，能看出来。
-        JSONArray hosts = coverHostsOf(probe);
-
-        // XML 接口（/at/xml/）的列表里**没有 <pic>** —— 封面只在详情响应里。
-        // 所以上面那一次提取必然是空的，得单独探一条详情把域名捞出来。
-        // 只探一条：同一个源的封面通常只用一个 CDN（实测三个源各 20/20 条一致）。
-        if (hosts.length() == 0) {
-            String firstId = firstVideoId(probe);
-            if (firstId.length() > 0) {
-                try {
-                    JSONObject one = fetch(withParams(url, "ac=detail&ids=" + firstId));
-                    hosts = coverHostsOf(one);
-                } catch (Exception ignored) {}
-            }
-        }
-
-        if (hosts.length() == 0) {
-            // 提取不到就当场说清楚。放一个空数组过去的话，SiteProfile 构造时会抛
-            // 「缺少封面域名」—— 那是在 Activity.onCreate 里，表现是一装完就闪退，
-            // 用户完全不知道哪里错了。
-            throw new IOException("从响应里提取不到封面域名 —— 这个接口的内容结构不标准，换一个源试试");
-        }
-        JSONObject cover = new JSONObject();
-        cover.put("mode", "plain");
-        cover.put("hostRewrites", new JSONObject());
-        cover.put("allowedHosts", hosts);
-        config.put("cover", cover);
-
-        return config;
-    }
-
-    /** 从探测响应里把所有 https 链接的域名捞出来，去重，限量。 */
-    /** 取探测响应里第一条的 id，用来单独探详情。 */
-    private static String firstVideoId(JSONObject probe) {
-        JSONArray list = probe == null ? null : probe.optJSONArray("list");
-        if (list == null || list.length() == 0) return "";
-        JSONObject first = list.optJSONObject(0);
-        if (first == null) return "";
-        String id = String.valueOf(first.opt("vod_id"));
-        return "null".equals(id) || "0".equals(id) ? "" : id;
-    }
-
-    /** 往地址上补查询参数，已经在带查询的用 & 接。 */
-    private static String withParams(String url, String query) {
-        String base = url.trim();
-        int q = base.indexOf('?');
-        String head = q < 0 ? base : base.substring(0, q);
-        return head + (head.indexOf('?') >= 0 ? "&" : "?") + query;
-    }
-
-    private static JSONArray coverHostsOf(JSONObject probe) {
-        java.util.LinkedHashSet<String> hosts = new java.util.LinkedHashSet<String>();
-        collectHosts(probe, hosts, 0);
-        JSONArray out = new JSONArray();
-        for (String h : hosts) {
-            if (out.length() >= 24) break;
-            out.put(h);
-        }
-        return out;
-    }
-
-    private static void collectHosts(Object node, java.util.LinkedHashSet<String> out, int depth) {
-        if (node == null || depth > 6 || out.size() >= 24) return;
-        if (node instanceof JSONObject) {
-            JSONObject o = (JSONObject) node;
-            java.util.Iterator<String> keys = o.keys();
-            while (keys.hasNext()) collectHosts(o.opt(keys.next()), out, depth + 1);
-        } else if (node instanceof JSONArray) {
-            JSONArray a = (JSONArray) node;
-            for (int i = 0; i < a.length(); i++) collectHosts(a.opt(i), out, depth + 1);
-        } else if (node instanceof String) {
-            String text = (String) node;
-            if (!text.startsWith("https://")) return;
-            try {
-                String host = new java.net.URI(text).getHost();
-                if (host != null && host.length() > 0) out.add(host);
-            } catch (Exception ignored) {}
-        }
-    }
-
-    private static JSONArray arr(String value) {
-        JSONArray a = new JSONArray();
-        a.put(value);
-        return a;
-    }
-
-    /**
-     * 一个角色的候选键列表，按顺序取第一个有值的。
-     * 苹果CMS 那边一个概念常有两三个名字，这张表就是那件事的唯一真相 ——
-     * Java 不认字段名，只按它把命中的键原样搬过去。
-     */
-    private static JSONArray arr2(String first, String second) {
-        JSONArray a = new JSONArray();
-        a.put(first);
-        a.put(second);
-        return a;
-    }
-
-    // ── 分类表的小工具 ───────────────────────────────────────────────
-
-    /** class[] 里有没有一条带 type_pid —— 有就说明这份接口能给出分类树。 */
     /** paths / shapes 里认得的动作名。shapes 的键只能从这里面挑。 */
     private static final String[] ACTIONS = {
         // list 不是 paths 里的动作名，但它是 shapes 里的一个合法段 ——
@@ -1819,135 +1036,6 @@ public final class UserSource {
         return false;
     }
 
-    private static boolean hasHierarchy(JSONObject config) {
-        JSONArray classes = config == null ? null : config.optJSONArray("class");
-        for (int i = 0; classes != null && i < classes.length(); i++) {
-            JSONObject c = classes.optJSONObject(i);
-            if (c != null && plain(c.opt("type_pid")).length() > 0) return true;
-        }
-        return false;
-    }
-
-    /**
-     * 把 donor 里的 type_pid 按 type_id 补进 target，只补缺的。
-     * 返回补上的条数 —— 0 多半意味着两边根本不是同一张表，那就不该硬套。
-     */
-    private static int mergeParents(JSONArray target, JSONArray donor) {
-        if (target == null || donor == null) return 0;
-        LinkedHashMap<String, String> pidById = new LinkedHashMap<String, String>();
-        for (int i = 0; i < donor.length(); i++) {
-            JSONObject c = donor.optJSONObject(i);
-            if (c == null) continue;
-            String id = plain(c.opt("type_id"));
-            String pid = plain(c.opt("type_pid"));
-            if (id.length() > 0 && pid.length() > 0) pidById.put(id, pid);
-        }
-        int filled = 0;
-        for (int i = 0; i < target.length(); i++) {
-            JSONObject c = target.optJSONObject(i);
-            if (c == null || plain(c.opt("type_pid")).length() > 0) continue;
-            String pid = pidById.get(plain(c.opt("type_id")));
-            if (pid == null) continue;
-            try { c.put("type_pid", pid); filled++; } catch (Exception ignored) {}
-        }
-        return filled;
-    }
-
-    /**
-     * 一个导航入口。key 同时是 categoryIds / categoryLabels / categoryTitles 的键，
-     * 也是前端 data-nav 的值 —— 三处必须一字不差，否则那个入口点进去是空的。
-     */
-    private static JSONObject tab(String key, String label, String icon) throws Exception {
-        JSONObject t = new JSONObject();
-        t.put("key", key);
-        t.put("label", label);
-        t.put("icon", icon);
-        return t;
-    }
-
-    /**
-     * JSONObject.opt() 拿不到时返回 null，String.valueOf(null) 是字符串 "null" ——
-     * 那个会当成合法的 type_id 用下去，最后变成一个点了没反应的空入口。
-     */
-    private static String plain(Object value) {
-        if (value == null) return "";
-        String text = String.valueOf(value).trim();
-        return "null".equals(text) ? "" : text;
-    }
-
-    /**
-     * 首页那排标签挑哪几个。每个频道轮流取一个，取满为止；还剩位置就补上那些没有
-     * 子分类的顶层，最后再按原顺序兜底。
-     *
-     * 为什么不从头截 8 个：`class[]` 是按 type_id 排的，前 8 个大概率全属于同一个
-     * 频道（电影片底下就一长串），首页那排看着像只有电影。轮流取出来的分布均匀。
-     *
-     * 返回 [[slug, 名字], …]。slug 在 CMS 那边就是 type_id —— 前端拿它填 tag-list
-     * 路径里的 {slug}，直接当 cate_id 用。
-     */
-    private static JSONArray hotTags(LinkedHashMap<String, JSONObject> byId,
-                                     ArrayList<String> channels,
-                                     LinkedHashMap<String, ArrayList<String>> children,
-                                     ArrayList<String> bare,
-                                     ArrayList<String> order,
-                                     int want) {
-        JSONArray out = new JSONArray();
-        LinkedHashSet<String> seen = new LinkedHashSet<String>();
-        int round = 0;
-        while (!channels.isEmpty() && out.length() < want && round < 64) {
-            boolean added = false;
-            for (int i = 0; i < channels.size() && out.length() < want; i++) {
-                ArrayList<String> kids = children.get(channels.get(i));
-                if (round >= kids.size()) continue;
-                String id = kids.get(round);
-                if (seen.add(id)) { out.put(pair(id, nameOf(byId, id))); added = true; }
-            }
-            if (!added) break;              // 所有频道的子分类都取完了
-            round++;
-        }
-        for (int i = 0; i < bare.size() && out.length() < want; i++) {
-            String id = bare.get(i);
-            if (seen.add(id)) out.put(pair(id, nameOf(byId, id)));
-        }
-        // 整棵树都没有层级（或者顶层全没有子分类）：只能按原顺序取。
-        for (int i = 0; i < order.size() && out.length() < want; i++) {
-            String id = order.get(i);
-            if (seen.add(id)) out.put(pair(id, nameOf(byId, id)));
-        }
-        return out;
-    }
-
-    private static String nameOf(LinkedHashMap<String, JSONObject> byId, String id) {
-        JSONObject c = byId.get(id);
-        return c == null ? id : c.optString("type_name", id);
-    }
-
-    /** [slug, 显示名] —— 标签表就是这个形状。 */
-    private static JSONArray pair(String slug, String name) {
-        JSONArray a = new JSONArray();
-        a.put(slug);
-        a.put(name);
-        return a;
-    }
-
-    /** 导航上的字要短。「电影片/综艺片/动漫片」去掉尾巴那个片更好看，也更塞得下。 */
-    private static String shortLabel(String name) {        String text = name == null ? "" : name.trim();
-        if (text.length() > 2 && text.endsWith("片")) text = text.substring(0, text.length() - 1);
-        return text.length() == 0 ? "分类" : text;
-    }
-
-    /**
-     * 按名字猜个图标 —— 猜不中就用 grid，不影响功能，只是几个入口长得不一样好认。
-     * 顺序有讲究：动漫片同时命中「动漫」和「片」，得先判动漫。
-     */
-    private static String iconFor(String name) {
-        if (name.contains("动漫") || name.contains("动画") || name.contains("漫画")) return "sparkle";
-        if (name.contains("综艺") || name.contains("娱乐") || name.contains("真人秀")) return "star";
-        if (name.contains("电影")) return "film";
-        if (name.contains("剧") || name.contains("电视")) return "tv";
-        if (name.contains("短")) return "fire";
-        return "grid";
-    }
 
     private static String param(String query, String key) {
         String[] pairs = query.split("&");
@@ -2236,7 +1324,32 @@ public final class UserSource {
      * 切后台不停核心：后台可能正在播音频，一停就是断流。进程被杀核心自然没了，
      * 不需要 onTerminate（它本来也不保证被调）。
      */
+    /**
+     * 老配置迁移：模式还是默认的 direct、盘上却存着手填地址。
+     *
+     * 那是「外部地址」这个模式出现之前的用法 —— 那时候手填一个地址就等于在用代理。
+     * 「直连」改成真直连之后，不迁移等于把他们的代理静默关掉，而设置页还会显示
+     * 「直连」，用户只会以为站点坏了。
+     *
+     * 迁移成 external：行为不变，地址也终于能在界面上看见。
+     * 由 AiiHttp.init() 在进程起来时调一次（不是等用户打开设置页才调）。
+     */
+    static void migrateProxyMode(Context context) {
+        if (context == null) return;
+        try {
+            if (!MODE_DIRECT.equals(proxyMode(context))) return;
+            if (AiiHttp.proxyRaw().length() == 0) return;
+            setProxyMode(context, MODE_EXTERNAL);
+            AiiHttp.invalidateClients();
+            log("代理：盘上有手填地址但模式是直连，迁移成「外部地址」");
+        } catch (Throwable e) {
+            // 迁移失败不该拦住任何东西：大不了这次还是直连，用户去设置页点一下就好。
+        }
+    }
+
     private static JSONObject proxyBoot(Context context, JSONObject out) throws Exception {
+        migrateProxyMode(context);
+
         if (MODE_BUILTIN.equals(proxyMode(context))
                 && !ProxyCore.get(context).isRunning()
                 && proxyLink(context).length() > 0) {
@@ -3163,6 +2276,16 @@ public final class UserSource {
         }
     }
 
+    /** 把名单拼成「a / b / c」。报错文案用。 */
+    private static String join(java.util.List<String> items) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < items.size(); i++) {
+            if (i > 0) sb.append(" / ");
+            sb.append(items.get(i));
+        }
+        return sb.toString();
+    }
+
     // ── 校验 ──────────────────────────────────────────────────────────
 
     /**
@@ -3184,28 +2307,15 @@ public final class UserSource {
         //    仍然能通过校验** —— 只有 adapter 名，不含任何站点信息。
         //    没有那个类的话，走到这一步的源会在 fetch 时分流失败，报「找不到符号」
         //    是编译期的事，运行时它就是一个认不出内容的源。
+        // 适配器名单与必填项都问注册表要 —— 这里原本是第四份手抄的名单，
+        // 已经漂过一次（porn91 有实现、有分流，却不在名单里，源根本加不进来）。
         String adapter = config.optString("adapter", "");
-        if (adapter.length() > 0 && !"cms".equals(adapter) && !"agedm".equals(adapter)
-                && !"hanime1".equals(adapter)) {
-            return "不认识的适配器：" + adapter + "（cms / agedm / 单站 HTML 型）";
-        }
-        if ("cms".equals(adapter) || "agedm".equals(adapter)) {
-            String api = config.optString("api", "").trim();
-            if (api.length() == 0) return "缺少 api 地址";
-            if (!api.startsWith("https://")) return "api 地址必须是 https 开头";
-            JSONObject cmsWeb = config.optJSONObject("web");
-            if (cmsWeb == null || cmsWeb.optJSONObject("paths") == null) return "缺少 web.paths";
-            return null;
-        }
-        // 单站 HTML 型不需要 api 字段 —— 它没有接口，适配器自己去 origin 抓 HTML。
-        // 用 origin 当站点地址，跟 REST 那套一样校验。
-        if ("hanime1".equals(adapter)) {
-            String origin = config.optString("origin", "").trim();
-            if (origin.length() == 0) return "缺少 origin（这个源要填站点地址）";
-            if (!origin.startsWith("https://")) return "origin 必须是 https 开头";
-            JSONObject hWeb = config.optJSONObject("web");
-            if (hWeb == null || hWeb.optJSONObject("paths") == null) return "缺少 web.paths";
-            return null;
+        if (adapter.length() > 0) {
+            SiteAdapter impl = Adapters.byId(adapter);
+            if (impl == null) {
+                return "不认识的适配器：" + adapter + "（" + join(Adapters.ids()) + "）";
+            }
+            return impl.check(config);
         }
 
         // web 块先看：origin 那几条校验要不要做，取决于 paths.home 长什么样。
@@ -3357,7 +2467,7 @@ public final class UserSource {
         }
     }
 
-    private static void log(String message) {
+    static void log(String message) {
         try { android.util.Log.d("AIIvideo", "[source] " + message); } catch (Throwable ignored) {}
     }
 }

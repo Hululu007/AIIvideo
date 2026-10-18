@@ -272,7 +272,7 @@ HTTP 层换 OkHttp + DoH、前端端点全配置化（`site-default.json` 单文
 ```text
 java-src/com/huangguo/mobile/CmsAdapter.java   约 340 行，三个动作 + 字段映射 + 线路选择
 java-src/com/huangguo/mobile/CmsXml.java       约 190 行，XML → JSON 同形
-java-src/com/huangguo/mobile/UserSource.java   detect / wrapCms / 干跑校验
+java-src/com/huangguo/mobile/UserSource.java   detect 派发 / 干跑校验（适配器已拆到 *Site.java）
 smali/com/huangguo/mobile/SiteProfile.smali    新增 rule(String)，读标量配置
 ```
 

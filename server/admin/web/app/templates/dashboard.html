@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}总览 · AIIvideo 后台{% endblock %}
+{% block body %}
+<h1>总览</h1>
+<div class="grid">
+  <section class="card">
+    <h2>App 用户</h2>
+    {% if user_error %}<p class="muted">读不到账号库：{{ user_error }}</p>{% else %}
+    <p class="big">{{ counts.users }}</p>
+    <p class="muted">会话 {{ counts.sessions }} · 对象 {{ counts.objects }}</p>
+    {% endif %}
+  </section>
+  <section class="card">
+    <h2>源文件</h2>
+    <p class="big">{{ files | length }}</p>
+    <p class="muted">{{ cfg_dir }}</p>
+  </section>
+  <section class="card">
+    <h2>最近动作</h2>
+    <ul class="mini">
+      {% for row in recent %}
+      <li><time>{{ row.at }}</time><span>{{ row.actor }} {{ row.action }} {{ row.target }}</span></li>
+      {% else %}<li class="muted">还没有记录</li>{% endfor %}
+    </ul>
+  </section>
+</div>
+<h2 class="section">源文件速览</h2>
+<table>
+  <thead><tr><th>文件</th><th>类型</th><th>来源</th><th>修改时间</th></tr></thead>
+  <tbody>
+  {% for f in files %}
+  <tr>
+    <td><a href="{{ mount }}/sources/{{ f.name }}/edit">{{ f.name }}</a>{% if f.readonly %} <em>只读</em>{% endif %}</td>
+    <td>{{ '市场清单' if f.kind == 'market' else (f.adapter or '自定义') }}</td>
+    <td class="muted">{{ f.error or f.origin or f.api }}</td>
+    <td class="muted">{{ f.mtime }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

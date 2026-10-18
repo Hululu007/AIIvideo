@@ -56,6 +56,19 @@ final class SpeedTest {
 
     private SpeedTest() {}
 
+    /** 日志里只留「协议 + 主机:端口」，不要把 uuid/密码写进 logcat。 */
+    static String shortLink(String link) {
+        if (link == null) return "";
+        String head = link.length() > 32 ? link.substring(0, 32) : link;
+        try {
+            int at = head.indexOf('@');
+            if (at > 0) head = head.substring(at + 1);
+            int hash = head.indexOf('#');
+            if (hash > 0) head = head.substring(0, hash);
+        } catch (Throwable ignored) {}
+        return head;
+    }
+
     /** 一条测速结果。 */
     static final class Item {
         final int index;
@@ -174,14 +187,17 @@ final class SpeedTest {
                 }
             });
             long ms = f.get(budget, TimeUnit.MILLISECONDS);
+            UserSource.log("测速 " + shortLink(link) + " → " + (ms > 0 ? ms + "ms" : "不通(" + ms + ")"));
             if (ms > 0) return new Item(index, node, link, ms, "");
             return new Item(index, node, link, -1, "不通");
         } catch (java.util.concurrent.TimeoutException e) {
             // 到点没回来就是不通。用户不需要知道「其实是 12 秒才放弃」。
+            UserSource.log("测速 " + shortLink(link) + " → 超时");
             return new Item(index, node, link, -1, "超时");
         } catch (Throwable e) {
             String m = e.getMessage();
             if (m == null || m.isEmpty()) m = e.getClass().getSimpleName();
+            UserSource.log("测速 " + shortLink(link) + " → " + m);
             return new Item(index, node, link, -1, trim(m));
         } finally {
             one.shutdownNow();

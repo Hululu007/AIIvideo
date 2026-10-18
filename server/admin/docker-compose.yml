@@ -1,0 +1,30 @@
+# 运维后台。端口只绑回环 —— 外面一律走 Caddy。
+#
+#   docker compose up -d --build
+#   docker compose logs -f web
+#
+# /srv/cfg 是**读写**挂载：后台保存的就是 App 真正读取的那份文件，
+# 不搞「临时目录 → 同步脚本」那一层，免得出现「后台显示已改、App 还是旧的」。
+services:
+  web:
+    build: ./web
+    restart: unless-stopped
+    # 和 Caddy 一样用 host 网络：账号库只绑在 127.0.0.1:5432，
+    # 走 bridge 网络是够不着的（也不该把数据库暴露到 compose 网络里）。
+    network_mode: host
+    environment:
+      ADMIN_USER: ${ADMIN_USER}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      SECRET: ${SECRET}
+      CFG_DIR: /srv/cfg
+      DATA_DIR: /data
+      DATABASE_URL: postgresql://aii:${POSTGRES_PASSWORD}@127.0.0.1:5432/aii
+      PUBLIC_BASE: ${PUBLIC_BASE}
+    volumes:
+      - /srv/cfg:/srv/cfg
+      - ./data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8091/healthz')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5

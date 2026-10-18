@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}市场清单 · AIIvideo 后台{% endblock %}
+{% block body %}
+<h1>市场清单</h1>
+<p class="muted">勾选要出现在 market.json 里的源。App 端不会内置这个地址，用户自己粘一串。</p>
+<form method="post" action="{{ mount }}/market">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <table>
+    <thead><tr><th>选</th><th>源</th><th>地址</th></tr></thead>
+    <tbody>
+    {% for f in registry %}
+    <tr>
+      <td><input type="checkbox" name="entry" value="{{ f.name }}|https://149.104.21.177.sslip.io/{{ f.name }}|{{ f.adapter or '自定义源' }}"
+        {% if ('https://149.104.21.177.sslip.io/' + f.name) in current_urls %}checked{% endif %}></td>
+      <td>{{ f.name }}<div class="muted">{{ f.adapter or '自定义' }}</div></td>
+      <td class="muted">https://149.104.21.177.sslip.io/{{ f.name }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <div class="row"><button type="submit">写入 market.json</button></div>
+</form>
+<h2 class="section">当前清单（{{ current | length }} 条）</h2>
+<table>
+  <thead><tr><th>名称</th><th>说明</th><th>地址</th></tr></thead>
+  <tbody>
+  {% for item in current %}
+  <tr><td>{{ item.name }}</td><td class="muted">{{ item.desc }}</td><td class="muted">{{ item.url }}</td></tr>
+  {% else %}<tr><td colspan="3" class="muted">还没有写清单</td></tr>{% endfor %}
+  </tbody>
+</table>
+<p class="muted small">要改描述或加第三方地址，直接到「源文件 → market.json」里编辑。</p>
+{% endblock %}

@@ -18,8 +18,8 @@ android {
         applicationId = "com.huangguo.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10024
-        versionName = "1.0.24"
+        versionCode = 10025
+        versionName = "1.0.25"
         vectorDrawables { useSupportLibrary = true }
     }
 
@@ -105,6 +105,12 @@ android {
             // 而不是抛异常。注意这不会让「真的依赖 Android 的代码」跑通 —— 那种要
             // Robolectric 或仪器测试，见 test/java 下各文件的注释。
             isReturnDefaultValues = true
+            // 联网用例默认不跑（CI 不能依赖外网）。手动验真站：
+            //   ./gradlew :app:testDebugUnitTest --tests '*Mrds66LiveTest*' -Dhg.live=1
+            all {
+                it.systemProperty("hg.live", System.getProperty("hg.live", ""))
+                it.systemProperty("hg.site", System.getProperty("hg.site", ""))
+            }
         }
     }
 }

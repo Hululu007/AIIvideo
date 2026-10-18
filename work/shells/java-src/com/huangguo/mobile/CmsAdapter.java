@@ -161,7 +161,7 @@ public final class CmsAdapter {
         return out;
     }
 
-    /** 某一集的播放地址。 */
+    /** 某一集的播放地址。多线路时交给 LineRace 择优。 */
     private static JSONObject play(String base, String id, int episode, SiteProfile profile) throws Exception {
         JSONObject item = DETAIL_CACHE.get(id);
         if (item == null) {
@@ -170,12 +170,17 @@ public final class CmsAdapter {
         }
         if (item == null) throw new Exception("拿不到这一集的播放地址：" + id);
 
-        List<String[]> eps = splitPlayUrl(item.optString("vod_play_url", ""));
+        String raw = item.optString("vod_play_url", "");
+        List<String[]> eps = splitPlayUrl(raw);
         int index = episode - 1;
         if (index < 0 || index >= eps.size()) {
             throw new Exception("第 " + episode + " 集不存在（共 " + eps.size() + " 集）");
         }
-        String url = eps.get(index)[1];
+
+        // 同一集的全部线路候选；只有一条时 LineRace 原样返回，开销为零。
+        List<String> candidates = LineRace.candidatesFrom(allLines(raw), index);
+        String url = candidates.isEmpty() ? eps.get(index)[1] : LineRace.pick(candidates);
+        if (url == null || url.length() == 0) url = eps.get(index)[1];
         if (url.length() == 0) throw new Exception("第 " + episode + " 集没有播放地址");
         // 分享页而不是直链时明确报错。这种情况要 parses[] 才能解，一期不支持 ——
         // 但不能静默失败，否则用户看到的是「点了没反应」。
@@ -346,15 +351,32 @@ public final class CmsAdapter {
     /**
      * 拆 vod_play_url。格式：`集名1$地址1#集名2$地址2#…`
      *
-     * 线路用 `$$$` 分隔多条，这里只取第一条 —— 多线路选择是一期之后的事。
+     * 线路用 `$$$` 分隔多条。这里挑一条（见 pickLine）；**全部线路**留给
+     * play() 交给 LineRace 测速择优（见 allLines）。
      * 集名可能是空的，用「第 N 集」兜底。
      */
     /** 包级可见：AgedmAdapter 匹配到同名采集源之后要复用同一套拆法。 */
     static List<String[]> splitPlayUrl(String raw) {
-        List<String[]> out = new ArrayList<String[]>();
+        return splitLine(pickLine(raw));
+    }
+
+    /** 全部线路，每项是一条 `集名$地址#集名$地址…`。给 LineRace 用。 */
+    static List<String> allLines(String raw) {
+        List<String> out = new ArrayList<String>();
         if (raw == null || raw.length() == 0) return out;
-        String first = pickLine(raw);
-        String[] parts = first.split("#");
+        String[] lines = raw.split("\\$\\$\\$");
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i].trim();
+            if (line.length() > 0) out.add(line);
+        }
+        return out;
+    }
+
+    /** 拆**单条线路**。splitPlayUrl 和 LineRace 共用这一段。 */
+    static List<String[]> splitLine(String line) {
+        List<String[]> out = new ArrayList<String[]>();
+        if (line == null || line.length() == 0) return out;
+        String[] parts = line.split("#");
         for (int i = 0; i < parts.length; i++) {
             String seg = parts[i];
             if (seg.length() == 0) continue;

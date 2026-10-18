@@ -7,8 +7,8 @@ import org.junit.Test;
 /**
  * 代理来源优先级的单元测试。
  *
- * 测的是 {@link AiiHttp#effectiveProxy(String, String)} 这个纯函数：两个入参分别是
- * 「内置核心给的地址」和「用户手填的代理串」，它只决定走哪条。真正去问 ProxyCore
+ * 测的是 {@link AiiHttp#effectiveProxy(String, String, String)} 这个纯函数：三个入参
+ * 分别是「当前模式」「内置核心给的地址」「用户手填的代理串」，它只决定走哪条。真正去问 ProxyCore
  * 的那层（effectiveProxy()）是两行胶水，在 JVM 里跑不了 —— .so 只有 arm64-v8a。
  *
  * 所以把纯函数抽出来就是为了这个：**优先级规则必须能在机器上断言**，
@@ -28,25 +28,25 @@ public class EffectiveProxyTest {
     /** 核心在跑 + 用户也填了 → 用核心的。 */
     @Test
     public void 内置核心在跑时压过用户手填的代理() {
-        assertEquals(BUILTIN, AiiHttp.effectiveProxy(BUILTIN, EXTERNAL));
+        assertEquals(BUILTIN, AiiHttp.effectiveProxy(UserSource.MODE_BUILTIN, BUILTIN, EXTERNAL));
     }
 
     /** 核心没跑（空串）+ 用户填了 → 回落，不是直连。 */
     @Test
     public void 核心没跑时回落到用户手填的代理() {
-        assertEquals(EXTERNAL, AiiHttp.effectiveProxy("", EXTERNAL));
+        assertEquals(EXTERNAL, AiiHttp.effectiveProxy(UserSource.MODE_BUILTIN, "", EXTERNAL));
     }
 
     /** 都没有 → 空串，也就是直连。 */
     @Test
     public void 两个都没有时是空串() {
-        assertEquals("", AiiHttp.effectiveProxy("", ""));
+        assertEquals("", AiiHttp.effectiveProxy(UserSource.MODE_BUILTIN, "", ""));
     }
 
     /** 核心在跑 + 用户没填 → 用核心的。这是最常见的组合（用户直接用内置节点）。 */
     @Test
     public void 用户没填过代理时直接用内置核心的() {
-        assertEquals(BUILTIN, AiiHttp.effectiveProxy(BUILTIN, ""));
+        assertEquals(BUILTIN, AiiHttp.effectiveProxy(UserSource.MODE_BUILTIN, BUILTIN, ""));
     }
 
     /**
@@ -56,14 +56,14 @@ public class EffectiveProxyTest {
      */
     @Test
     public void 内置返回null时也当没跑来处理() {
-        assertEquals(EXTERNAL, AiiHttp.effectiveProxy(null, EXTERNAL));
-        assertEquals("", AiiHttp.effectiveProxy(null, null));
+        assertEquals(EXTERNAL, AiiHttp.effectiveProxy(UserSource.MODE_BUILTIN, null, EXTERNAL));
+        assertEquals("", AiiHttp.effectiveProxy(UserSource.MODE_BUILTIN, null, null));
     }
 
     /** proxyRaw() 走的是 trim 过的值，正常不会是 null；这里确认它不被当成「有值」。 */
     @Test
     public void 用户代理是null时当没填() {
-        assertEquals("", AiiHttp.effectiveProxy("", null));
-        assertEquals(BUILTIN, AiiHttp.effectiveProxy(BUILTIN, null));
+        assertEquals("", AiiHttp.effectiveProxy(UserSource.MODE_BUILTIN, "", null));
+        assertEquals(BUILTIN, AiiHttp.effectiveProxy(UserSource.MODE_BUILTIN, BUILTIN, null));
     }
 }

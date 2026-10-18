@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · AIIvideo 后台</title>
+<link rel="stylesheet" href="{{ mount }}/static/app.css">
+</head>
+<body class="login-body">
+<form class="login-card" method="post" action="{{ mount }}/login" autocomplete="off">
+  <h1>AIIvideo 后台</h1>
+  <p>维护源清单与 App 用户。</p>
+  {% if error %}<div class="flash bad">{{ error }}</div>{% endif %}
+  <label for="login-username">账号</label>
+  <input id="login-username" name="username" type="text" autocomplete="username"
+         autocapitalize="off" spellcheck="false" placeholder="admin" autofocus>
+  <label for="login-password">口令</label>
+  <input id="login-password" name="password" type="password" autocomplete="current-password"
+         placeholder="登录口令">
+  <button type="submit">登录</button>
+</form>
+</body>
+</html>

@@ -119,9 +119,38 @@ public final class AiiHttp {
     //
     // 别把这段逻辑读进 proxyRaw()：它代表「用户填了什么」，是这个类对外唯一的
     // 那个事实来源，混进来之后阶段 4 就没法把两个概念分开显示了。
-    static String effectiveProxy(String builtin, String raw) {
-        if (builtin != null && builtin.length() > 0) return builtin;
-        return raw == null ? "" : raw;
+    /**
+     * 优先级：**直连 > 内置核心 > 外部地址**。
+     *
+     * 之前的实现只有一句「内置非空就用内置，否则用手填的」—— 它压根不看模式，
+     * 于是「直连」只是「把核心停掉」，盘上那个手填地址照样生效：
+     * 设置页写着「所有请求都不走代理」，实际每条请求都在往 127.0.0.1:7897 上撞。
+     * 拔了那台电脑 / 关掉那个客户端，全站请求失败，而界面还在说"直连"。
+     *
+     * 现在模式是开关，「直连」真的直连：
+     *   direct   → 空串。用户按了直连，就不该还有东西偷偷走代理
+     *   external → 手填地址
+     *   builtin  → 内置核心；核心没起来回落到手填地址（见 EffectiveProxyTest：
+     *              核心起不来不等于用户配的外部代理作废）
+     * 读不到模式（init 之前 / 老调用点）时退回老规矩：内置优先、否则手填。
+     */
+    static String effectiveProxy(String mode, String builtin, String raw) {
+        String core = builtin == null ? "" : builtin;
+        String manual = raw == null ? "" : raw;
+        if (UserSource.MODE_DIRECT.equals(mode)) return "";
+        if (UserSource.MODE_EXTERNAL.equals(mode)) return manual;
+        return core.length() > 0 ? core : manual;
+    }
+
+    /** 当前模式。拿不到 context 返回空串，让上面那条退回老规矩。 */
+    static String proxyModeOrEmpty() {
+        Context context = appContext;
+        if (context == null) return "";
+        try {
+            return UserSource.proxyMode(context);
+        } catch (Throwable e) {
+            return "";
+        }
     }
 
     /**
@@ -129,7 +158,7 @@ public final class AiiHttp {
      * invalidateClients()，否则旧客户端会一直用着上一个代理。
      */
     static String effectiveProxy() {
-        return effectiveProxy(builtinProxy(), proxyRaw());
+        return effectiveProxy(proxyModeOrEmpty(), builtinProxy(), proxyRaw());
     }
 
     /**
@@ -216,61 +245,20 @@ public final class AiiHttp {
      */
     public static byte[] get(String url, SiteProfile profile) throws Exception {
         // 按适配器分流。cms 那类源的地址是「CMS 接口」，不是「origin + 路径」，
-        // 走不了下面的解析/DoH 那一套 —— 由 CmsAdapter 自己拼 URL、自己映射形状。
+        // 走不了下面的解析/DoH 那一套 —— 由适配器自己拼 URL、自己映射形状。
         // 它返回的必须是**我们内部的 JSON 形状**，这样前端的 adapters.js 不用改。
+        //
         // 只接 /api/ 开头的 —— 那是我们内部的动作词汇表，交给适配器翻译。
         // 别的 URL（比如封面图的绝对地址，SiteRepository.coverData 会带着它走到
         // 这里）必须走正常的取字节那条路，不然适配器会以「不认识的路径」拒掉，
         // 表现是封面全部加载失败。
-        if (profile != null && "cms".equals(profile.rule("adapter")) && url.startsWith("/api/")) {
-            return CmsAdapter.fetch(url, profile);
-        }
-        // AGE动漫 走同一条路：origin 空 → 整条 /api/... 原样转给适配器。
-        // 为什么不用「绝对地址 + 前端转换」那条更干净的路：它的详情要把
-        // `{源: [[集名,地址]]}` 重排成一维剧集数组，声明层表达不了结构重排，
-        // 总得有一个地方写代码 —— 那就写在和苹果CMS 同一个位置上，别搞两套。
-        if (profile != null && "agedm".equals(profile.rule("adapter")) && url.startsWith("/api/")) {
-            return AgedmAdapter.fetch(url, profile);
-        }
-        // 第三个适配器（单站 HTML 型）走同一条路。它比前两个更极端：整个站
-        // **没有 JSON 接口**（/api/* 全 404），数据全在 SSR 的 HTML 里，
-        // 播放地址是页面内联的签名直链。放这里的理由和 agedm 一样 ——
-        // 结构重排（HTML → 我们的形状）总得有个地方写代码。
         //
-        // ⚠️ 那个适配器类**不在仓库里**（目标是成人内容站，代码和内容一起排除了，
-        //    见 .gitignore 末尾）。所以：
-        //      · clone 后编译会在这一行报「找不到符号 Hanime1Adapter」
-        //      · 那是有意的，不是漏提交 —— 删掉这一整个 if 分支即可，
-        //        cms / agedm 两条线完全不受影响
-        //      · 下面那条 stripOrigin 兜底同样只服务于这个分支，但**它的思路是
-        //        通用的**：任何 origin 非空的适配器源都会踩「detail 拼了 origin
-        //        导致分流落空」这个坑，别跟着一起删
-        if (profile != null && "hanime1".equals(profile.rule("adapter")) && url.startsWith("/api/")) {
-            return Hanime1Adapter.fetch(url, profile);
-        }
-        // ── 真机抓到的 bug：详情页 404，而 URL 里带着 origin ─────────────
-        //
-        // 报错长这样：`HTTP 404 @ https://<origin>/api/videos/408707`。
-        // 首页是好的（有卡片、分类栏也对），偏偏详情挂了 —— 因为**两条路不一样**：
-        //
-        //   首页  走 prefetchBody()，那里给适配器加了分支，路径原样进适配器
-        //   详情  走 SiteRepository.detail()，那段 smali 会把**相对路径拼上 origin**
-        //         再交给 AiiHttp.get() —— 于是进来的已经是绝对地址，
-        //         上面几条 startsWith("/api/") 全部落空，请求真的发到了
-        //         <origin>/api/videos/408707（站点上不存在的接口，当然 404）。
-        //
-        // 对 origin 为空的源（cms / agedm 那种）不会暴露，因为拼完还是 /api/...；
-        // **只有 origin 非空的适配器源才踩得到**。所以这条不是某个站的问题，
-        // 是「适配器分流」这套机制本身的洞。
-        //
-        // 修在这里而不是「让配置把 origin 留空」：那些配置多半是自动生成的，
-        // 用户改不了；而且 origin 还有别的用处（封面白名单、别的相对路径）。
-        // 归一化到相对路径再分流，是唯一能同时兜住两条路的地方。
-        if (profile != null && "hanime1".equals(profile.rule("adapter")) && url.startsWith("/api/") == false) {
-            String relative = stripOrigin(url, profile);
-            if (relative != null && relative.startsWith("/api/")) {
-                return Hanime1Adapter.fetch(relative, profile);
-            }
+        // origin 归一化也收到 Adapters.actionPath 里 —— 原来是每个适配器一段
+        // stripOrigin 兜底，三份一模一样的代码。那条洞是机制本身的，不是某个站的。
+        SiteAdapter adapter = Adapters.of(profile);
+        if (adapter != null) {
+            String actionPath = Adapters.actionPath(url, profile);
+            if (actionPath != null) return adapter.fetch(profile, actionPath);
         }
 
         // 每次请求都记下目标主机。SiteProfile 的 origin 到底有没有被用户配置换掉，
@@ -362,7 +350,13 @@ public final class AiiHttp {
      * 记住 application context —— 磁盘缓存要用它。幂等，每次启动调一次即可。
      */
     public static void init(Context context) {
-        if (context != null && appContext == null) appContext = context.getApplicationContext();
+        if (context != null && appContext == null) {
+            appContext = context.getApplicationContext();
+            // 进程起来就把老的「手填地址 + 默认直连」迁成 external。
+            // 不能等用户打开设置页才迁 —— 那之前所有请求都会变成直连，
+            // 用户看到的是「升级完就全站连不上了」。
+            UserSource.migrateProxyMode(appContext);
+        }
     }
 
     /**
@@ -469,21 +463,15 @@ public final class AiiHttp {
      */
     private static byte[] prefetchBody(SiteProfile profile) throws Exception {
         String path = warmPath(profile);
-        if (profile != null && "cms".equals(profile.rule("adapter"))) {
-            return CmsAdapter.fetch(path, profile);
-        }
-        if (profile != null && "agedm".equals(profile.rule("adapter"))) {
-            return AgedmAdapter.fetch(path, profile);
-        }
-        // 单站 HTML 型适配器的首页预热同理：路径是内部词汇，适配器自己去抓页面
-        // 再抠卡片。
+        // 适配器源：路径就是内部动作路径，交给适配器自己去抓页面/调接口。
         //
         // ⚠️ **只预热首页。** 有些站的播放地址带一次性签名、会过期，预热出来的
         //    地址等用户真去点的时候可能已经废了 —— 那种地址必须实时取。
         //    首页没有这个问题（它只是元数据），预热是安全的。
-        //    这条判断对任何源都成立，别按「反正首页都预热」一刀切。
-        if (profile != null && "hanime1".equals(profile.rule("adapter"))) {
-            return Hanime1Adapter.fetch(path, profile);
+        SiteAdapter adapter = Adapters.of(profile);
+        if (adapter != null) {
+            String actionPath = Adapters.actionPath(path, profile);
+            if (actionPath != null) return adapter.fetch(profile, actionPath);
         }
         // 绝对地址直接用，相对路径才拼 origin —— 和 SiteRepository.detail 那条规矩一致。
         if (path.startsWith("https://")) return fetchUncached(path, profile);
@@ -578,6 +566,21 @@ public final class AiiHttp {
      * 给 CMS 适配器用：那边要拼自己的查询参数，也不该继承「我们站点」的请求头。
      * DNS 走系统 —— CMS 地址是用户自己填的，我们没有它的 DoH 配置。
      */
+    /**
+     * 强行走 HTTP/1.1 的朴素 GET，**不尝试 HTTP/2**。
+     *
+     * 给探针用：mrds66 的 HTTP/2 会被反复重置，OkHttp 降级过程要花掉整个超时窗口，
+     * 导致探针在 20 秒内永远完不成。直接走 h1 省掉这一轮折腾。
+     */
+    public static byte[] getRawHttp1(String url, int timeoutSeconds) throws Exception {
+        log("GET(h1) " + hostOfUrl(url) + pathOfUrl(url));
+        Request request = new Request.Builder()
+                .url(url)
+                .header("Accept-Encoding", "identity")
+                .build();
+        return rawWith(plainHttp1Client(timeoutSeconds), request, url);
+    }
+
     public static byte[] getRaw(String url, int timeoutSeconds) throws Exception {
         log("GET " + hostOfUrl(url) + pathOfUrl(url));
         Request request = new Request.Builder()
@@ -624,12 +627,21 @@ public final class AiiHttp {
                 .header("Accept-Encoding", "identity")
                 .header("Connection", "close")
                 .build();
-        OkHttpClient one = new OkHttpClient.Builder()
+        OkHttpClient.Builder oneBuilder = new OkHttpClient.Builder()
                 .connectTimeout(Math.min(timeoutSeconds, 15), TimeUnit.SECONDS)
                 .readTimeout(timeoutSeconds, TimeUnit.SECONDS)
                 .retryOnConnectionFailure(false)
-                .dns(IPV4_FIRST)
-                .build();
+                .dns(IPV4_FIRST);
+        // **必须挂用户配的代理。** 之前这里 new 完就直接 build，整条订阅/节点池的
+        // 下载都绕过了代理去直连 GitHub —— 国内基本不通，表现是「节点池更新失败：
+        // Read timed out」和「订阅拉取失败：failed to connect ... from 192.168.x.x」。
+        // 这两个功能恰恰是最需要代理的：它们下载的地址就在墙外。
+        Route route = parseProxy(effectiveProxy());
+        if (route != null) {
+            oneBuilder.proxy(route.proxy);
+            attachAuth(oneBuilder, route);
+        }
+        OkHttpClient one = oneBuilder.build();
         Response response = one.newCall(request).execute();
         try {
             if (!response.isSuccessful()) throw new IOException("HTTP " + response.code() + " @ " + hostOfUrl(url));
@@ -671,6 +683,48 @@ public final class AiiHttp {
                 formBody == null ? "" : formBody,
                 okhttp3.MediaType.parse("application/x-www-form-urlencoded; charset=UTF-8"));
         Request.Builder builder = new Request.Builder().url(url).post(payload).header("Accept-Encoding", "identity");
+        if (headers != null) {
+            for (java.util.Map.Entry<String, String> e : headers.entrySet()) builder.header(e.getKey(), e.getValue());
+        }
+        log("POST " + hostOfUrl(url) + pathOfUrl(url));
+        Request request = builder.build();
+        try {
+            return rawWith(plainClient(timeoutSeconds), request, url);
+        } catch (IOException e) {
+            if (!isStreamBreak(e)) throw e;
+            log("HTTP/2 被重置，降级 HTTP/1.1 重试 " + pathOfUrl(url));
+            return rawWith(plainHttp1Client(timeoutSeconds), request, url);
+        }
+    }
+
+    /**
+     * 带 Range 的朴素 GET。用来验直链：音频动辄几十 MB，只要前 1KB 判断格式。
+     */
+    public static byte[] getRawRange(String url, long from, long to,
+                                     java.util.Map<String, String> headers, int timeoutSeconds) throws Exception {
+        Request.Builder builder = new Request.Builder().url(url)
+                .header("Accept-Encoding", "identity")
+                .header("Range", "bytes=" + from + "-" + to);
+        if (headers != null) {
+            for (java.util.Map.Entry<String, String> e : headers.entrySet()) builder.header(e.getKey(), e.getValue());
+        }
+        log("GET(range) " + hostOfUrl(url) + pathOfUrl(url));
+        return rawWith(plainHttp1Client(timeoutSeconds), builder.build(), url);
+    }
+
+    /**
+     * JSON 体的朴素 POST。
+     *
+     * AList / OpenList 那套接口（`/api/fs/list`、`/api/fs/get`、`/api/fs/search`）
+     * 只收 `application/json` —— 表单体过去它会当成空对象，返回「path 不能为空」。
+     */
+    public static byte[] postJsonRaw(String url, String json,
+                                     java.util.Map<String, String> headers, int timeoutSeconds) throws Exception {
+        okhttp3.RequestBody payload = okhttp3.RequestBody.create(
+                json == null ? "{}" : json,
+                okhttp3.MediaType.parse("application/json; charset=UTF-8"));
+        Request.Builder builder = new Request.Builder().url(url).post(payload)
+                .header("Accept-Encoding", "identity");
         if (headers != null) {
             for (java.util.Map.Entry<String, String> e : headers.entrySet()) builder.header(e.getKey(), e.getValue());
         }
@@ -1068,36 +1122,6 @@ public final class AiiHttp {
         try { return new java.net.URL(url).getPath(); } catch (Exception e) { return url; }
     }
 
-    /**
-     * 把「origin + 内部动作路径」还原成内部动作路径（带查询串）。
-     *
-     * 只对**同一个 origin** 的地址动手。别的域名原样返回 null —— 封面图的绝对
-     * 地址、外站接口都从这儿走过去，不该被误伤。
-     *
-     * ── 它补的是哪个洞 ──────────────────────────────────────────────
-     * `SiteRepository.detail()` 那段 smali 会**先把相对路径拼上 origin** 再交给
-     * `AiiHttp.get()`，于是上面那几条适配器分流的 `startsWith("/api/")` 全部落空，
-     * 请求真的发到 `https://<origin>/api/videos/408707` —— 一个站点上不存在的接口。
-     *
-     * 真机症状：首页正常、**详情页报 404 且 URL 里带着 origin**。
-     *
-     * 对 origin 为空的源（cms / agedm 那种）不会暴露，因为拼完还是 `/api/...`；
-     * 只有 origin 非空的适配器源才踩得到。所以这条修复**跟具体站点无关** ——
-     * 它属于「适配器分流」这个机制本身。
-     *
-     * 为什么修在这里而不是「让用户把 origin 留空」：配置多半是自动生成的，
-     * 用户改不了；而且 origin 还有别的用处（封面白名单、将来别的相对路径）。
-     * 归一化到相对路径再分流，是唯一能同时兜住两条路的地方。
-     */
-    private static String stripOrigin(String url, SiteProfile profile) {
-        if (url == null || profile == null) return null;
-        String origin = profile.origin;
-        if (origin == null || origin.length() == 0) return null;
-        if (!url.startsWith(origin)) return null;
-        String rest = url.substring(origin.length());
-        if (rest.length() == 0 || rest.charAt(0) != '/') return null;
-        return rest;
-    }
 
     private static String originOf(String url) {        try {
             java.net.URL parsed = new java.net.URL(url);

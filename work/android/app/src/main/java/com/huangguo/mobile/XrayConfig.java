@@ -83,6 +83,11 @@ final class XrayConfig {
         String flow;
         /** grpc 的 serviceName。 */
         String serviceName;
+        /**
+         * TLS 证书不校验。裸 https 代理（free 订阅里成片出现）几乎全是自签证书，
+         * 不写这条握手就过不去。只对「用户自己粘进来的代理」生效。
+         */
+        boolean allowInsecure;
 
         Node() {}
 
@@ -297,6 +302,7 @@ final class XrayConfig {
             // 「SNI 走 CDN、Host 走源站」的少数场景。
             tls.put("serverName", empty(node.host) ? node.server : node.host);
             if (!empty(node.fingerprint)) tls.put("fingerprint", node.fingerprint);
+            if (node.allowInsecure) tls.put("allowInsecure", true);
             stream.put("tlsSettings", tls);
         } else if ("reality".equals(security)) {
             // libgojni.so 里 reality 只有 1 处字符串命中，八成是残缺实现。
@@ -392,7 +398,14 @@ final class XrayConfig {
         if (lower.startsWith("socks5://")) return parseBareProxy("socks", text.substring(9));
         if (lower.startsWith("socks://")) return parseBareProxy("socks", text.substring(8));
         if (lower.startsWith("http://")) return parseBareProxy("http", text.substring(7));
-        if (lower.startsWith("https://")) return parseBareProxy("http", text.substring(8));
+        if (lower.startsWith("https://")) {
+            // https:// 的裸代理 = 「TLS 包着的 HTTP CONNECT」。协议还是 http，
+            // 只是流要过 TLS，而且这类自签证书必须跳过校验。
+            Node node = parseBareProxy("http", text.substring(8));
+            node.tls = "tls";
+            node.allowInsecure = true;
+            return node;
+        }
         throw new IllegalArgumentException(
                 "认不出这个链接。支持 vmess:// 、vless:// 、trojan:// 、ss:// ，"
                         + "以及 http(s):// 与 socks5:// 形式的裸代理地址");

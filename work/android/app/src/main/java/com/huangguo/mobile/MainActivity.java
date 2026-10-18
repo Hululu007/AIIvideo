@@ -15,6 +15,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.util.Log;
 import android.view.RoundedCorner;
 import android.view.View;
@@ -1077,6 +1079,9 @@ public final class MainActivity extends Activity {
     }
 
     final class Bridge {
+        /** 上一次触感的时间戳，用来压掉同一帧里叠上来的重复震动。 */
+        private volatile long hapticLastAt;
+
         private Bridge() {
         }
 
@@ -1110,6 +1115,63 @@ public final class MainActivity extends Activity {
                     Bridge.this.lambda$setBackEnabled$0(z);
                 }
             });
+        }
+
+        /**
+         * 触感反馈。前端每一个「按下去有反应」的动作都会调这里，让手指也收到信号。
+         *
+         * 走 @JavascriptInterface 而不是桥指令：桥是异步的（回包走 evaluateJavascript），
+         * 一次点击要等一个来回才震，那就晚了 —— 震动必须和按压同帧。
+         *
+         * 强度只用四档，名字按「用户感受到了什么」取，不按毫秒数取：
+         *   light   —— 选项切换、页签、开关（10ms，像按到实体键）
+         *   medium  —— 进入下一屏、提交（18ms）
+         *   success —— 做成了（双段，先重后轻）
+         *   error   —— 失败了（三段急促）
+         * 系统里关掉「触感反馈」时 Vibrator.hasVibrator() 仍为 true，但这里不去猜 ——
+         * 用户在系统设置里关的开关由系统自己拦，App 侧不做二次判断。
+         */
+        @JavascriptInterface
+        public void haptic(final String kind) {
+            if (this.hapticLastAt != 0 && System.currentTimeMillis() - this.hapticLastAt < 24) {
+                return;
+            }
+            this.hapticLastAt = System.currentTimeMillis();
+            final Vibrator vibrator = (Vibrator) getSystemService(VIBRATOR_SERVICE);
+            if (vibrator == null || !vibrator.hasVibrator()) {
+                return;
+            }
+            final String name = kind == null ? "light" : kind;
+            // 有的 ROM 在振动器被别的 App 占着时抛异常，触感不该把页面搞崩。
+            try {
+                if (Build.VERSION.SDK_INT >= 29) {
+                    int id;
+                    if ("error".equals(name)) {
+                        id = VibrationEffect.EFFECT_DOUBLE_CLICK;
+                    } else if ("success".equals(name)) {
+                        id = VibrationEffect.EFFECT_CLICK;
+                    } else if ("medium".equals(name)) {
+                        id = VibrationEffect.EFFECT_HEAVY_CLICK;
+                    } else {
+                        id = VibrationEffect.EFFECT_TICK;
+                    }
+                    vibrator.vibrate(VibrationEffect.createPredefined(id));
+                    return;
+                }
+                long[] pattern;
+                if ("error".equals(name)) {
+                    pattern = new long[]{0, 18, 42, 18, 42, 18};
+                } else if ("success".equals(name)) {
+                    pattern = new long[]{0, 16, 40, 10};
+                } else if ("medium".equals(name)) {
+                    pattern = new long[]{0, 18};
+                } else {
+                    pattern = new long[]{0, 10};
+                }
+                vibrator.vibrate(pattern, -1);
+            } catch (Exception ignored) {
+                // 触感是锦上添花，失败就当没有。
+            }
         }
 
         @JavascriptInterface
