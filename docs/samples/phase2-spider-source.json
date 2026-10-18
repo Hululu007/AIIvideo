@@ -1,0 +1,12 @@
+{
+  "_note": "phase2 测试源：内容全部由 spider 提供，没有 origin、没有 web.paths。",
+  "web": {
+    "spider": "yhdm",
+    "firstPageSize": 24,
+    "pageSize": 24
+  },
+  "cover": {
+    "mode": "plain",
+    "allowedHosts": ["yhdm.one"]
+  }
+}
