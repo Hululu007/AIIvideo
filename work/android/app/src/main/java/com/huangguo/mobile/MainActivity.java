@@ -47,6 +47,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import org.json.JSONArray;
 import org.json.JSONObject;
 import org.json.JSONTokener;
 import org.videolan.libvlc.MediaDiscoverer;
@@ -191,6 +192,71 @@ public final class MainActivity extends Activity {
         this.webView.addJavascriptInterface(new Bridge(), "AndroidHost");
         this.webView.loadUrl(this.migratingOrigin ? "file:///android_asset/app.html" : "https://appassets.androidplatform.net/assets/app.html");
         checkHotUpdates();
+        // 命令行自检入口（阶段 0 专用，没有界面入口）：
+        //   adb shell am start -n com.huangguo.mobile/.MainActivity --es spider_demo 1
+        // 它只把「宿主页 + bridge + 超时 + 回收」这条链在真机上跑一遍。
+        // 阶段 1 接上热更、设置页有真入口之后，这段可以删。
+        if (getIntent() != null && getIntent().hasExtra("spider_demo")) {
+            // 三个 extra 都能省：默认跑 _dev-hello、15 秒超时。
+            //   --es spider_asset spiders/_dev-hang.js   换一个自检样本
+            //   --ei spider_timeout 3000                 缩短看门狗（验超时用）
+            String asset = getIntent().getStringExtra("spider_asset");
+            if (asset == null || asset.length() == 0) asset = "spiders/_dev-hello.js";
+            int timeout = getIntent().getIntExtra("spider_timeout", 15000);
+            final String chosen = asset;
+            // 第四个数：第一次失败之后再跑一次。超时把宿主销毁了，
+            // 这一条验的就是「下一次调用能重新建页」——不然用户点第二次还是坏的。
+            final String after = getIntent().getStringExtra("spider_after");
+            final int afterTimeout = getIntent().getIntExtra("spider_after_timeout", 15000);
+            this.requests.execute(() -> {
+                try {
+                    runSpiderDemo(chosen, timeout);
+                } catch (Throwable e) {
+                    Log.e("HG.Spider", "自检失败：" + e);
+                }
+                if (after != null && after.length() > 0) {
+                    try {
+                        Log.i("HG.Spider", "重建验证：接着跑 " + after);
+                        runSpiderDemo(after, afterTimeout);
+                    } catch (Throwable e) {
+                        Log.e("HG.Spider", "重建验证失败：" + e);
+                    }
+                }
+            });
+        }
+    }
+
+    /**
+     * 阶段 0 的自检：把 assets 里那个写死三张卡的 spider 装进宿主页跑一次 home。
+     *
+     * 存在的意义只有一个 —— 把「宿主页 + bridge + 超时 + 回收」这条链在真机上
+     * 验一遍。它跑在 Bridge.request 的线程池里（后台线程），所以可以阻塞到结果回来。
+     */
+    JSONObject runSpiderDemo(String asset, int timeoutMs) throws Exception {
+        String source = readAsset(asset);
+        JSONObject payload = SpiderRuntime.call(this, source, "home", new JSONObject(), timeoutMs);
+        JSONArray items = payload.optJSONArray("items");
+        Log.i("HG.Spider", "自检 home 通过：items=" + (items == null ? 0 : items.length())
+                + " abi=" + SpiderRuntime.ABI);
+        return payload;
+    }
+
+    /** 读一个 assets 文本文件。宿主页和自检 spider 都从这里来。 */
+    private String readAsset(String path) throws Exception {
+        java.io.InputStream in = getAssets().open(path);
+        try {
+            byte[] raw = new byte[Math.max(1024, in.available())];
+            int read = 0;
+            while (true) {
+                if (read == raw.length) raw = java.util.Arrays.copyOf(raw, raw.length * 2);
+                int n = in.read(raw, read, raw.length - read);
+                if (n < 0) break;
+                read += n;
+            }
+            return new String(raw, 0, read, java.nio.charset.StandardCharsets.UTF_8);
+        } finally {
+            in.close();
+        }
     }
 
     public WindowInsets lambda$onCreate$0(View view, WindowInsets windowInsets) {
@@ -740,6 +806,9 @@ public final class MainActivity extends Activity {
         // 站点侧那个隐藏 WebView（见 SiteFetchWebView）。它挂在 decor 上，
         // 不销毁的话渲染进程会一直留着，定时器和视频缓冲都不退。
         SiteFetchWebView.shutdown();
+        // spider 宿主页同理：留着渲染进程的话，页面里的定时器和 spider 的
+        // 半截 Promise 都不会退。
+        SpiderRuntime.shutdown();
         WebView webView = this.webView;
         if (webView != null) {
             webView.removeJavascriptInterface("AndroidHost");
@@ -937,6 +1006,17 @@ public final class MainActivity extends Activity {
         this.commands.put("sync", jSONObject -> services().account.sync());
         this.commands.put("cover", jSONObject -> services().repository.coverData(jSONObject.optString("url")));
         this.commands.put("login", jSONObject -> services().account.login(jSONObject.optString("username"), jSONObject.optString("password")));
+        // ── spider 运行时（阶段 0）────────────────────────────────────────
+        //
+        // op 决定动作，args 决定参数。阶段 0 只有 demo：把 assets/spiders/_dev-hello.js
+        // 装进宿主页跑一次 home，返回它给的 payload。阶段 1 接上热更之后，调用方从
+        // 「自检」换成「当前源」，这条指令的形状不用变。
+        this.commands.put("spider", jSONObject -> {
+            String op = jSONObject.optString("op", "demo");
+            if (!"demo".equals(op)) throw new IllegalArgumentException("spider 运行时的 op 还不支持：" + op);
+            return runSpiderDemo(jSONObject.optString("asset", "spiders/_dev-hello.js"),
+                    jSONObject.optInt("timeoutMs", 15000));
+        });
         this.commands.put("theme", jSONObject -> {
             String strOptString4 = jSONObject.optString("mode");
             if (strOptString4.isEmpty()) {

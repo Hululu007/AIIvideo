@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<!--
+  CSP 八条，一条都别删：
+  - default-src 'none'：兜底闸门，没单独放行的资源类型一律不许加载。
+  - script-src 'unsafe-inline' 'unsafe-eval'：唯一开的口子；spider 是当字符串 eval 进来的。
+  - connect-src 'none'：断 fetch/XHR/WebSocket/EventSource/sendBeacon，上网只能走 __spider.call('net')。
+  - img-src 'none'：堵 new Image().src='…?d='+数据 这种老式外带，图片加载本身就是出站 GET。
+  - style-src 'none'：本页无样式，留着内联 style 只多一个注入面。
+  - frame-src 'none'：不许套 iframe，免得子框架当跳板绕同源限制。
+  - form-action 'none'：表单点了也提交不出去。
+  - base-uri 'none'：不许写 <base>，相对地址不会被改指到别的 origin。
+-->
+<meta http-equiv="Content-Security-Policy" content="
+  default-src 'none';
+  script-src 'unsafe-inline' 'unsafe-eval';
+  connect-src 'none';
+  img-src 'none';
+  style-src 'none';
+  frame-src 'none';
+  form-action 'none';
+  base-uri 'none';
+">
+<script>
+// 全局只留三个名字：__spider（能力入口）、__spiderSite（spider 赋值）、__spiderRun（驱动入口）。
+var __spiderSite = null;
+window.__spider = {
+  call(op, args) {
+    var bridge = window.__hgSpider;
+    if (!bridge || typeof bridge.call !== 'function') {
+      return { ok: false, error: 'bridge 不可用' };   // 宿主页被单独打开时走这条，不抛异常
+    }
+    // args 可能是对象，也可能是驱动脚本已经 stringify 过的字符串；后者再 stringify 会双重编码。
+    var raw = bridge.call(String(op), typeof args === 'string' ? args : JSON.stringify(args || {}));
+    try {
+      return JSON.parse(raw);                    // bridge 只能同步返回字符串，解析在这层做
+    } catch (e) {
+      return { ok: false, error: 'bridge 返回的不是 JSON' };
+    }
+  }
+};
+// 一次能力调用只走这条路：永远 resolve，成功 {ok:true,payload}，失败 {ok:false,error:字符串}。
+window.__spiderRun = function (cap, argsJson) {
+  return Promise.resolve()
+    .then(function () {
+      var site = window.__spiderSite;
+      if (!site) throw new Error('spider 没有导出 __spiderSite');
+      var fn = site[cap];
+      if (typeof fn !== 'function') throw new Error('spider 没有实现 ' + cap);
+      return fn(window.__spider, JSON.parse(argsJson || '{}'));
+    })
+    .then(function (payload) { return { ok: true, payload: payload }; })
+    .catch(function (error) { return { ok: false, error: String((error && error.message) || error) }; });
+};
+</script>
