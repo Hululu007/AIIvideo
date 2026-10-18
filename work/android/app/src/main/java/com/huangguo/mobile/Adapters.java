@@ -34,6 +34,8 @@ final class Adapters {
      * 纯字符串匹配，零网络开销；mrds66 的指纹探测只在它自己那些没登记过的镜像上才需要跑。
      */
     static final List<SiteAdapter> ALL = Collections.unmodifiableList(Arrays.<SiteAdapter>asList(
+            // yhdm 是纯域名匹配，零网络开销，排在会发请求的指纹探测前面。
+            new YhdmSite(),
             new AgedmSite(),
             new Hanime1Site(),
             new Porn91Site(),

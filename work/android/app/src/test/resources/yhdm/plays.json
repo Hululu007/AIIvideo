@@ -1,0 +1,17 @@
+{
+    "video_plays": [
+        {
+            "play_data": "https://v10.ppqrrs.com/wjv10/202610/01/KvF2L5W4Mx90/video/index.m3u8",
+            "src_site": "wjzy2"
+        },
+        {
+            "play_data": "https://v13.rstu6.com/202610/01/96SNaWq6A927/video/index.m3u8",
+            "src_site": "snzy"
+        },
+        {
+            "play_data": "https://vod12.wgslsw.com/20261002/KvF2L5W4Mx90/index.m3u8",
+            "src_site": "yhzy"
+        }
+    ],
+    "html_content": "\t\t\t\t\t\t\n\t\t\t\t\t\t\n\t\t\t\t\t\t\t\n\t\t\t\t\t\t\t<li class=\"ep-col mb-2\">\n\t\t\t\t\t\t\t\t<a class=\"swa current\" onclick=\"sw_p(this)\" href='/_player_x_/https://v10.ppqrrs.com/wjv10/202610/01/KvF2L5W4Mx90/video/index.m3u8' target=\"p-frame\">WJ</a>\n\t\t\t\t\t\t\t</li>\n\t\t\t\t\t\t\t\n\t\t\t\t\t\t\t<li class=\"ep-col mb-2\">\n\t\t\t\t\t\t\t\t<a class=\"swa \" onclick=\"sw_p(this)\" href='/_player_x_/https://v13.rstu6.com/202610/01/96SNaWq6A927/video/index.m3u8' target=\"p-frame\">SN</a>\n\t\t\t\t\t\t\t</li>\n\t\t\t\t\t\t\t\n\t\t\t\t\t\t\t<li class=\"ep-col mb-2\">\n\t\t\t\t\t\t\t\t<a class=\"swa \" onclick=\"sw_p(this)\" href='/_player_x_/https://vod12.wgslsw.com/20261002/KvF2L5W4Mx90/index.m3u8' target=\"p-frame\">YH</a>\n\t\t\t\t\t\t\t</li>\n\t\t\t\t\t\t\t\n\t\t\t\t\t\t\n\t\t\t\t\t\t"
+}

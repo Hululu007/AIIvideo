@@ -1,0 +1,515 @@
+
+
+<!DOCTYPE html>
+
+<html>
+
+<head>
+	<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+
+	<link rel="shortcut icon" href="/static/favicon.ico" type="image/x-icon">
+	<link rel="icon" href="/static/favicon.ico" type="image/x-icon">
+
+	<title> 仙逆剧场版 弑仙之战 第01集 在线播放 - 樱花动漫 </title>
+	<meta name="keywords" content="仙逆剧场版 弑仙之战,在线播放">
+	
+
+	<link href="/static/css/yhdm.css" rel="stylesheet">
+	<!-- <script src="/static/js/jquery.min.js"></script> -->
+	<script src="https://s1.pstatp.com/cdn/expire-1-M/jquery/1.9.1/jquery.min.js"></script>
+	 
+
+<style type="text/css">
+	.lightdm {position: absolute; z-index: 150; top: -20px; right: 0; width: 55px; }
+
+	.lightSwitcher,.turnedOff {
+		background: url(/static/img/light-q.png) no-repeat 0 0; width: 55px; height: 30px; display: block;
+	}
+	.lightSwitcher:hover {
+		text-decoration: underline
+	}
+	.turnedOff {
+		color: #ff0; background-position: 0 -35px;
+	}
+
+	#shadow {background: #000; position: absolute; left: 0; top: 0; width: 100%; z-index: 10; zoom:1;height: auto; display: none; }
+
+	#player {position: relative; background: #000; z-index: 999; }
+
+	.gutters-1 > .col, .gutters-1 > [class*="ep-col"] {
+	  padding-right: 0.15625rem; padding-left: 0.15625rem;
+	}
+
+	.ep-col {
+		position: relative; width: 100%; padding-right: 15px; padding-left: 15px; -ms-flex: 0 0 33.333333%; flex: 0 0 33.333333%; max-width: 33.333333%;
+	}
+
+	@media (min-width: 576px) {
+		.ep-col{-ms-flex: 0 0 33.333333%; flex: 0 0 33.333333%; max-width: 33.333333%; }
+	}
+	@media (min-width: 768px) {
+		.ep-col{-ms-flex: 0 0 25%; flex: 0 0 25%; max-width: 25%; }
+	}
+	@media (min-width: 992px) {
+		.ep-col{-ms-flex: 0 0 16.666667%; flex: 0 0 16.666667%; max-width: 16.666667%; }
+	}
+	@media (min-width: 1200px) {
+	}
+
+	.embed-responsive {
+	  position: relative; display: block; width: 100%; padding: 0; overflow: hidden;
+	}
+
+	.embed-responsive::before {
+	  display: block; content: "";
+	}
+
+	.embed-responsive .embed-responsive-item, .embed-responsive iframe, .embed-responsive embed, .embed-responsive object, .embed-responsive video {
+		position: absolute; top: 0; bottom: 0; left: 0; width: 100%; height: 100%; border: 0;
+	}
+
+	.embed-responsive-21by9::before {
+	  padding-top: 42.857143%;
+	}
+
+	.embed-responsive-16by9::before {
+	  padding-top: 56.25%;
+	}
+
+	.embed-responsive-4by3::before {
+	  padding-top: 75%;
+	}
+
+	.embed-responsive-1by1::before {
+	  padding-top: 100%;
+	}
+
+	
+
+	.seg-btn {
+		padding: 0.2em; border-width: 1px; border-style: solid; border: 1px solid #888888; color: #888888;
+	}
+	.seg-btn.current {
+		background-color: #18eb28; color: #ffffff;
+	}
+
+	.p-fill {
+		position: fixed !important;
+		left: 0px !important;
+		top: 0px !important;
+		width: 100% !important;
+		height: 100% !important;
+		padding-bottom: 2.0em !important;
+	}
+	.p-fill .play-wrap {
+		/*position: absolute;*/
+		/*left: 0px !important;*/
+		/*top: 0px !important;*/
+		width: 100% !important;
+		height: 100% !important;
+	}
+	.p-fill #player-tools {
+	}
+
+	#sw-f-btn {
+		border: 1px solid grey;
+		background: transparent;
+		color: snow;
+		cursor: pointer;
+	}
+	.seg-btn {
+		border: 1px solid grey;
+		background: transparent;
+		color: grey;
+		cursor: pointer;
+	}
+	.seg-btn-active {
+		border: 1px solid #ff80b8;
+		background: transparent;
+		color: snow;
+		cursor: pointer;
+	}
+	
+</style>
+
+
+</head>
+
+<body>
+
+	
+	
+		<header class="container clearfix mt-3 mb-3">
+
+			<div class="mb-3 top-wrap">
+				<div class="mb-2 top-wrap-a">
+					<div class="logo"> <a href="/" title="樱花动漫">樱花动漫</a> </div>
+				</div>
+				<div class="mb-2 top-wrap-b">
+					<form name="formsearch" id="formsearch" action='/search' method="get">
+						<input class="search_input" placeholder="搜索" name="q">
+						<button class="search_submit" type="submit">submit</button>
+					</form>
+				</div>
+			</div>
+			
+		</header>
+
+
+
+
+	
+
+	<section class="container-fluid" style="background-color: #333333; padding-left: 0px; padding-right: 0px;">
+
+		<div class="container clearfix mb-3">
+			<div class="float-right" style="position: relative; z-index: 99;">
+				<div class="lightdm">
+					<a class="lightSwitcher" href="javascript:void(0);" target="_self"></a>
+				</div>
+			</div>
+
+			<div class="text-white font-2 py-2 mb-1">
+				<a class="text-white" href="/" target="_self">樱花动漫</a> <span class="text-secondary"> / </span>
+				
+				<h1 style="font-size: 1em;">
+					<a class="text-white" href="/vod/2026476948.html" title="仙逆剧场版 弑仙之战" target="_self">仙逆剧场版 弑仙之战</a> <span class="text-secondary"> / </span> <small>第01集</small>
+				</h1>
+			</div>
+
+			<div class="mb-2" id="player" style="margin-left: -15px; margin-right: -15px;">
+
+				<div>
+					<div id="x-play" class="embed-responsive embed-responsive-16by9 play-wrap">
+						<iframe name="p-frame" class="embed-responsive-item" allowfullscreen></iframe>
+
+						
+						
+
+						
+
+						
+					</div>
+				</div>
+
+				<div class="float-right" id="player-tools">
+					
+
+
+					
+
+					<script type="text/javascript">
+						function onc(node) {
+							var values = node.value.split(';');
+							$('#x-play iframe').attr('src', '/_player_x_/'+values[0]);
+							if (values[1] == 'mp4s') {
+								seg_reset();
+							} else {
+								seg_close();
+							}
+						}
+					</script>
+					<!-- <button id="sw-f-btn" onclick="sw_f()">网页全屏</button> -->
+				</div>
+			</div>
+
+
+			<h5 class="font-2">
+				<a class="text-white" href="/vod/2026476948.html" title="仙逆剧场版 弑仙之战" target="_self"> 仙逆剧场版 弑仙之战 </a>
+				&nbsp;
+				<span class="text-white">(ANIME</span>
+				<span class="text-white">2026)</span>
+				&nbsp;
+				<span class="text-white small">第01集</span>
+				
+			</h5>
+
+			<div class="small pb-1">
+				
+				<a class="text-secondary" >&laquo;上一集(无)</a>
+				
+				&nbsp;&nbsp;
+				
+				<a class="text-secondary" >下一集(无)&raquo;</a>
+				
+			</div>
+			
+		</div>
+
+	</section>
+
+	<div class="container">
+
+		<div class=""> <ul class="menu-tabs"> <li class="active">其他播放源</li> </ul> </div>
+		<div class="ep-panel mb-3">
+			<ul class="row list-unstyled gutters-1" id="plays-ul">
+				
+				<li class="ep-col mb-2">
+					<a class="swa current" target="p-frame">加载中</a>
+				</li>
+				
+			</ul>
+			<script type="text/javascript">
+				function sw_p(node) {
+					$('.swa').removeClass('current');
+					$(node).addClass('current');
+				}
+				var url = '/_get_plays/{0}/{1}'.replace('{0}', '2026476948').replace('{1}', 'ep1');
+				var s_video_plays;
+				$.get(url, function(data) {
+					// data = JSON.parse(data);
+					s_video_plays = data.video_plays;
+					console.log(s_video_plays);	
+					$('#plays-ul').html(data.html_content);
+					if (data.video_plays.length > 0) {
+						var src = '/_player_x_/' + data.video_plays[0].play_data;
+						document.getElementsByName('p-frame')[0].setAttribute('src', src);
+					} else {
+					}
+				});
+			</script>
+		</div>
+
+		<section>
+		
+		<div class=""> <ul class="menu-tabs"> <li class="active">全部剧集</li> </ul> </div>
+		<div class="ep-panel mb-3">
+			<ul class="row list-unstyled gutters-1">
+				
+				<li class="ep-col mb-2">
+					<a class="current" title='第01集' href='/vod-play/2026476948/ep1.html' target="">第01集</a>
+				</li>
+				
+				<li class="ep-col mb-2">
+					<a class="" title='正片' href='/vod-play/2026476948/zheng_pian.html' target="">正片</a>
+				</li>
+				
+				<li class="ep-col mb-2">
+					<a class="" title='HD' href='/vod-play/2026476948/hd.html' target="">HD</a>
+				</li>
+				
+			</ul>
+		</div>
+
+
+		</section>
+
+		<div class="mb-3">
+			<ul class="menu-tabs">
+				<li class="active">推荐动漫</li>
+			</ul>
+			<ul class="row gutters-1 list-unstyled">
+				
+				<li class="col-md-2 col-sm-3 col-3">
+					<a href="/vod/1999457734.html" target="_self">
+						<img class="lazy mb-1" style="width: 100%;" data-original="/cover2/1999457734.jpg" alt="海贼王">
+					</a>
+					<a href="/vod/1999457734.html" title="海贼王" target="_self">
+						<div class="small text-truncate">
+						海贼王    
+						</div>
+					</a>
+				</li>
+				
+				<li class="col-md-2 col-sm-3 col-3">
+					<a href="/vod/2026718674.html" target="_self">
+						<img class="lazy mb-1" style="width: 100%;" data-original="/cover2/2026718674.jpg" alt="咒术回战 第三季">
+					</a>
+					<a href="/vod/2026718674.html" title="咒术回战 第三季" target="_self">
+						<div class="small text-truncate">
+						咒术回战 第三季    
+						</div>
+					</a>
+				</li>
+				
+				<li class="col-md-2 col-sm-3 col-3">
+					<a href="/vod/2025004336.html" target="_self">
+						<img class="lazy mb-1" style="width: 100%;" data-original="/cover2/2025004336.jpg" alt="仙逆剧场版 神临之战">
+					</a>
+					<a href="/vod/2025004336.html" title="仙逆剧场版 神临之战" target="_self">
+						<div class="small text-truncate">
+						仙逆剧场版 神临之战    
+						</div>
+					</a>
+				</li>
+				
+				<li class="col-md-2 col-sm-3 col-3">
+					<a href="/vod/2026268265.html" target="_self">
+						<img class="lazy mb-1" style="width: 100%;" data-original="/cover2/2026268265.jpg" alt="完美世界剧场版 九劫焚天">
+					</a>
+					<a href="/vod/2026268265.html" title="完美世界剧场版 九劫焚天" target="_self">
+						<div class="small text-truncate">
+						完美世界剧场版 九劫焚天    
+						</div>
+					</a>
+				</li>
+				
+				<li class="col-md-2 col-sm-3 col-3">
+					<a href="/vod/2025296276.html" target="_self">
+						<img class="lazy mb-1" style="width: 100%;" data-original="/cover2/2025296276.jpg" alt="链锯人 剧场版：蕾塞篇">
+					</a>
+					<a href="/vod/2025296276.html" title="链锯人 剧场版：蕾塞篇" target="_self">
+						<div class="small text-truncate">
+						链锯人 剧场版：蕾塞篇    
+						</div>
+					</a>
+				</li>
+				
+				<li class="col-md-2 col-sm-3 col-3">
+					<a href="/vod/2026476949.html" target="_self">
+						<img class="lazy mb-1" style="width: 100%;" data-original="/cover2/2026476949.jpg" alt="吞噬星空剧场版 决战原始星">
+					</a>
+					<a href="/vod/2026476949.html" title="吞噬星空剧场版 决战原始星" target="_self">
+						<div class="small text-truncate">
+						吞噬星空剧场版 决战原始星    
+						</div>
+					</a>
+				</li>
+				
+			</ul>
+		</div>
+
+		<div class="mb-3">
+			<ul class="menu-tabs">
+				<li class="active">动漫介绍</li>
+			</ul>
+			<div class="small" style="line-height: 1.6em;">
+				王林于雷之仙界遭遇宿敌绝命追杀，在生死绝境中展开一场惊天逆袭，以弱胜强，终成弑仙壮举。
+				<br>
+				<a class="text-secondary" href="/vod/2026476948.html" target="_self">... 更多详情</a>
+			</div>
+		</div>
+
+	</div>
+
+
+	<div id="shadow">
+	</div>
+
+	
+
+	<script>
+		$(document).ready(function() {
+			$("#shadow").css("height", $(document).height()).hide();
+			$(".lightSwitcher").click(function() {
+				$("#shadow").toggle();
+				if ($("#shadow").is(":hidden")) $(this).html("").removeClass("turnedOff");
+				else
+					$(this).html("").addClass("turnedOff");
+			});
+		});
+		var is_fill = false;
+		function sw_f(argument) {
+			if (is_fill) {
+				is_fill = !is_fill;
+				$('#player').removeClass('p-fill');
+				$('#sw-f-btn').text('网页全屏');
+				$('#sw-f-btn').blur();
+			} else {
+				is_fill = !is_fill;
+				$('#player').addClass('p-fill');
+				$('#sw-f-btn').text('退出网页全屏');
+				$('#sw-f-btn').blur();
+			}
+		}
+
+
+		var myframe;
+		function xkeyup(e) {
+			if (document.activeElement.tagName != 'INPUT') {
+				if (e.keyCode === 27) {if (is_fill) {sw_f(); } } 
+				if (e.keyCode == 37) {myframe.contentWindow.xkeyup(e);}
+				if (e.keyCode == 39) {myframe.contentWindow.xkeyup(e);}
+				if (e.keyCode == 32) {myframe.contentWindow.xkeyup(e);}
+			}
+		}
+		function xkeydown(e) {
+			if (document.activeElement.tagName != 'INPUT') {
+				if (e.keyCode == 37) {return false;}
+				if (e.keyCode == 39) {return false;}
+				if (e.keyCode == 32) {return false;}
+			}
+		}
+
+		$(document).keyup(function(e) {return xkeyup(e); });
+		$(document).keypress(function(e) {return xkeydown(e); });
+
+		$(document).ready(function (argument) {
+			if (0) {
+				myframe = $('#x-play iframe')[0];
+				myframe.onload = function (argument) {
+					$(myframe.contentDocument).keyup(function(e) {
+						if (e.keyCode === 27) {if (is_fill) {sw_f(); } } 
+						// return xkeyup(e); 
+					});
+				}
+			}
+		})
+							
+	</script>
+
+
+
+	
+		<footer class="container footer pb-3" style="">
+			<div style="border-top: 2px solid #ff80b8;"></div>
+			<div class="mb-3">
+				
+			</div>
+			<p class="my-1">本网站提供的资源均系收集于各大视频网站，本网站只提供web页面服务，并不提供影片资源存储，也不参与录制、上传</p>
+			<p class="my-1">若本站收录的节目无意侵犯了贵司版权，请给网页底部邮箱地址来信，我们会及时处理和回复，谢谢</p>
+			<p class="my-1">Copyright &copy; 2019 <a href="https://yhdm.one">樱花动漫 yhdm.one</a></p>
+			
+		</footer>
+	
+
+	<!-- <script src="/static/js/jquery.lazyload.min.js" type="text/javascript" charset="utf-8"></script> -->
+	<script src="https://s1.pstatp.com/cdn/expire-1-M/jquery.lazyload/1.9.1/jquery.lazyload.min.js" type="application/javascript"></script>
+	
+	<script type="text/javascript">
+		$("img.lazy").lazyload({})
+	</script>
+
+	
+	
+
+
+	
+
+
+
+		
+
+	        
+
+	        
+
+	        
+
+	        
+
+	        
+	        	<script data-cfasync="false" src="https://grop.net/14/f1552881b465a40c2011547ea2a6af68"></script>
+
+	        
+
+	        
+	    
+	     
+
+
+
+	
+
+
+	
+
+
+	
+		
+	
+	
+</body>
+
+</html>
