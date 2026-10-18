@@ -597,8 +597,31 @@ public final class AiiHttp {
     }
 
     private static byte[] rawWith(OkHttpClient http, Request request, String url) throws Exception {
+        return rawWith(http, request, url, null);
+    }
+
+    /**
+     * 同上，外加把响应里的 `Set-Cookie` 收进 `cookieOut`（键=名字，值=值）。
+     *
+     * 有的站「游客标记」只在响应头里下发，正文里一个字节都没有 —— 91porn 的 `ga`
+     * 就是这样：没有它，同一个 viewkey 每次请求换一部片（见 Porn91Adapter 的
+     * 「游客标记」那段）。这类站没别的拿法，只能从响应头剥。
+     */
+    private static byte[] rawWith(OkHttpClient http, Request request, String url,
+                                  java.util.Map<String, String> cookieOut) throws Exception {
         Response response = http.newCall(request).execute();
         try {
+            if (cookieOut != null) {
+                for (String line : response.headers("Set-Cookie")) {
+                    int eq = line.indexOf('=');
+                    if (eq <= 0) continue;
+                    String name = line.substring(0, eq).trim();
+                    String rest = line.substring(eq + 1);
+                    int semi = rest.indexOf(';');
+                    String value = (semi >= 0 ? rest.substring(0, semi) : rest).trim();
+                    if (name.length() > 0) cookieOut.put(name, value);
+                }
+            }
             if (!response.isSuccessful()) throw new IOException("HTTP " + response.code() + " @ " + url);
             ResponseBody body = response.body();
             return body == null ? new byte[0] : body.bytes();
@@ -667,6 +690,29 @@ public final class AiiHttp {
             if (!isStreamBreak(e)) throw e;
             log("HTTP/2 被重置，降级 HTTP/1.1 重试 " + pathOfUrl(url));
             return rawWith(plainHttp1Client(timeoutSeconds), request, url);
+        }
+    }
+
+    /**
+     * 带自定义头的朴素 GET，**顺手把响应的 `Set-Cookie` 收进 `cookieOut`**。
+     *
+     * 与三参那个重载行为完全一致（同样的代理、同样的 h2→h1 降级），只是多回一份
+     * cookie。给「需要先拿一个站点下发的标记，再带着它重新请求」的适配器用。
+     */
+    public static byte[] getRaw(String url, java.util.Map<String, String> headers, int timeoutSeconds,
+                                java.util.Map<String, String> cookieOut) throws Exception {
+        Request.Builder builder = new Request.Builder().url(url).header("Accept-Encoding", "identity");
+        if (headers != null) {
+            for (java.util.Map.Entry<String, String> e : headers.entrySet()) builder.header(e.getKey(), e.getValue());
+        }
+        log("GET " + hostOfUrl(url) + pathOfUrl(url));
+        Request request = builder.build();
+        try {
+            return rawWith(plainClient(timeoutSeconds), request, url, cookieOut);
+        } catch (IOException e) {
+            if (!isStreamBreak(e)) throw e;
+            log("HTTP/2 被重置，降级 HTTP/1.1 重试 " + pathOfUrl(url));
+            return rawWith(plainHttp1Client(timeoutSeconds), request, url, cookieOut);
         }
     }
 

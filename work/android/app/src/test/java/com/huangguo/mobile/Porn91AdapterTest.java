@@ -357,4 +357,68 @@ public class Porn91AdapterTest {
         // ASCII 不动
         assertEquals("abc-123_x.y", call("enc", new Class<?>[]{String.class}, "abc-123_x.y"));
     }
+
+    // ── ⑧ 游客标记 ga：没有它详情页每次换一部片 ──────────────────────
+
+    /**
+     * 有标记就带上 `Cookie: ga=…`。
+     *
+     * 2026-10-18 的根因：同一个 viewkey 连请求五次，五次五个不同的 mp4，
+     * 而标题不变 —— 站点在没有游客标记时走「随机给一部」的渲染路径。
+     * 带上标记之后 poster/mp4 正好等于列表卡片封面。
+     */
+    @Test
+    public void requestHeadersCarryGuestCookie() throws Exception {
+        java.util.Map<String, String> headers =
+                (java.util.Map<String, String>) call("requestHeaders", new Class<?>[]{String.class}, "abc123");
+        assertEquals("ga=abc123", headers.get("Cookie"));
+        // 原有的浏览器头不能被顶掉
+        assertNotNull("Cookie 不能顶掉 User-Agent", headers.get("User-Agent"));
+        assertTrue("User-Agent 应当是浏览器的", headers.get("User-Agent").contains("Mozilla/"));
+    }
+
+    /** 没有标记时**不能**凭空造一个 Cookie 头 —— 第一次请求要靠它换标记。 */
+    @Test
+    public void requestHeadersWithoutGuestHaveNoCookie() throws Exception {
+        java.util.Map<String, String> headers =
+                (java.util.Map<String, String>) call("requestHeaders", new Class<?>[]{String.class}, (Object) null);
+        assertFalse("没有标记时不该带 Cookie", headers.containsKey("Cookie"));
+        assertNotNull(headers.get("User-Agent"));
+    }
+
+    /** 只认 `ga`，别人的 cookie（CLIPSHARE / PHPSESSID）不参与。 */
+    @Test
+    public void pickGuestTakesOnlyGa() throws Exception {
+        java.util.Map<String, String> jar = new java.util.LinkedHashMap<String, String>();
+        jar.put("CLIPSHARE", "quu7veee2pt2t3125d4r67iu85");
+        assertEquals("没有 ga 就该返回空串", "",
+                call("pickGuest", new Class<?>[]{java.util.Map.class}, (Object) jar));
+
+        jar.put("ga", " xyz ");
+        assertEquals("xyz", call("pickGuest", new Class<?>[]{java.util.Map.class}, (Object) jar));
+    }
+
+    /** 站点没下发标记时用兜底值，不是空手去请求（空手＝随机片）。 */
+    @Test
+    public void chooseGuestFallsBackWhenMissing() throws Exception {
+        java.util.Map<String, String> empty = new java.util.LinkedHashMap<String, String>();
+        assertEquals("1", call("chooseGuest", new Class<?>[]{java.util.Map.class}, (Object) empty));
+
+        java.util.Map<String, String> jar = new java.util.LinkedHashMap<String, String>();
+        jar.put("ga", "BwHMj%5E90a3");
+        assertEquals("BwHMj%5E90a3",
+                call("chooseGuest", new Class<?>[]{java.util.Map.class}, (Object) jar));
+    }
+
+    /** 校正接口：没给 id 直接报错，一个请求都不发。 */
+    @Test
+    public void reconcileRejectsEmptyIds() throws Exception {
+        try {
+            call("reconcile", new Class<?>[]{String.class, String.class}, "https://901.26702.app", "");
+            org.junit.Assert.fail("空 idList 应该抛异常");
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            String message = e.getCause() == null ? "" : String.valueOf(e.getCause().getMessage());
+            assertTrue("异常信息要说清是没给 id，实际：" + message, message.contains("没有提供 id"));
+        }
+    }
 }

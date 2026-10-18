@@ -18,8 +18,8 @@ android {
         applicationId = "com.huangguo.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10026
-        versionName = "1.0.26"
+        versionCode = 10030
+        versionName = "1.0.30"
         vectorDrawables { useSupportLibrary = true }
     }
 

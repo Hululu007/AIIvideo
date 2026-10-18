@@ -36,6 +36,9 @@ final class Porn91Site implements SiteAdapter {
      * 分类表。站点导航栏里就这十个，**不认识的 code 回的是「全站最新」而不是 404**
      * —— 所以只能写实测过的。
      */
+    /** 分类表。适配器在「导航抓不到」时拿它兜底。 */
+    static String[][] categoryCodes() { return CATEGORIES; }
+
     private static final String[][] CATEGORIES = {
         { "ori",    "91原创"   },
         { "hot",    "热门"     },
@@ -108,6 +111,10 @@ final class Porn91Site implements SiteAdapter {
         paths.put("search", "/api/search?q={keyword}&page={page}");
         paths.put("category", "/api/videos?cate_id={cateId}&page={page}");
         paths.put("tags", "/api/tags");
+        // 「标签」在这个站上就是顶部分类栏，点进去就是分类列表 —— 所以 tag-list
+        // 直接复用分类接口。没有这一条的话，全部类型页和首页那排胶囊点下去都
+        // 落在 Java 桥的 tag-list 指令上，那个指令这个源没有，等于没反应。
+        paths.put("tag-list", "/api/videos?cate_id={slug}&page={page}");
         web.put("paths", paths);
 
         JSONObject categories = new JSONObject();
@@ -163,6 +170,11 @@ final class Porn91Site implements SiteAdapter {
         ui.put("categoryLabels", labels);
         ui.put("categoryTitles", titles);
         ui.put("categoryLeads", leads);
+        // 标签页按 tagGroups 分组渲染，没声明的组一个都不显示（renderTags 只认这份
+        // 配置）。这个站只有一组：站点的分类栏。
+        JSONArray tagGroups = new JSONArray();
+        tagGroups.put(new JSONArray().put("category").put("分类"));
+        ui.put("tagGroups", tagGroups);
         ui.put("popularTags", popular);
         ui.put("publicPopularTags", new JSONArray());
         web.put("ui", ui);
@@ -170,7 +182,8 @@ final class Porn91Site implements SiteAdapter {
 
         config.put("_note", "91porn（" + hostOf(base) + "）。KVS 模板，服务端渲染，"
                 + "/api/* 全 404。单集站：一个 viewkey 一部片，播放地址在详情页里，"
-                + "没有多档清晰度。标签体系不存在，tags 返回空数组是站点的形状。");
+                + "没有多档清晰度。标签页列的是站点的分类栏（导航里那 11 个），"
+                + "点进去就是对应的分类列表。");
         return config;
     }
 

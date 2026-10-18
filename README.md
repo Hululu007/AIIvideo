@@ -73,4 +73,7 @@ cd work/android
 
 架构说明、桥指令清单、测试与踩过的坑见 [`work/android/README.md`](work/android/README.md)；
 业务与协议层面（账号后端、播放器、热更通道、发版流程）见 [开发说明](docs/开发说明.md)；
-热更怎么发见 [热更新说明](docs/热更新说明.md)。
+热更怎么发见 [热更新说明](docs/热更新说明.md)；
+源市场清单是什么、为什么它不算一个源，见 [源市场清单](docs/2026-10-18-源市场清单.md)；
+真机上接 Chrome DevTools 调页面（能直接调桥，不用重新打包）见
+[真机 WebView 调试](docs/2026-10-18-真机WebView调试.md)。

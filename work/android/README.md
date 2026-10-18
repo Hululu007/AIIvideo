@@ -159,7 +159,7 @@ leave-private）**故意留在 `dispatch()` 方法里**，不进注册表——�
 真机上跑通 40 条指令，不靠肉眼看界面：
 
 ```bash
-# 1. 开 WebView 调试（debug 包或 debuggable）
+# 1. 开 WebView 调试（发布版也开着：setWebContentsDebuggingEnabled(true)，见 MainActivity:155）
 adb forward tcp:9222 localabstract:webview_devtools_remote_$(adb shell pidof com.huangguo.mobile | tr -d '\r')
 curl -s http://127.0.0.1:9222/json   # 取 webSocketDebuggerUrl
 
@@ -167,12 +167,16 @@ curl -s http://127.0.0.1:9222/json   # 取 webSocketDebuggerUrl
 #    websocket 客户端要 suppress_origin=True，否则 WebView 拒绝握手
 ```
 
+完整的配方（含 Python 客户端、`awaitPromise`、往页面里塞长文本的办法）在
+[`docs/2026-10-18-真机WebView调试.md`](../../docs/2026-10-18-真机WebView调试.md)。
+
 判定标准：logcat 里 `未知请求` 出现 **0 次** = 40 条全部被注册表接住。
 出现 `xxx failed` 是业务失败（没配源、没登录、参数不全），不是路由错误。
 
 ## 测试
 
-126 个 JUnit 用例，全部在 JVM 上跑，不需要设备，秒级。
+233 个 JUnit 用例（2026-10-18），全部在 JVM 上跑，不需要设备，秒级。
+其中 26 个是联网用例，默认跳过，加 `-Dhg.live=1` 才跑。
 
 | 测试类 | 用例 | 测什么 |
 |---|---|---|

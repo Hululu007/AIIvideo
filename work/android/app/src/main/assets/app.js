@@ -810,6 +810,62 @@ function markHotUpdateHealthy() {
 }
 api('hot-update-status').then(syncHotStatus).catch(() => {});
 
+// ── 列表校正：网格页在乱写，拿详情页盖一遍 ──────────────────────────────
+//
+// 2026-10-18：91porn 的首页/分类页每张卡上有三个 id（href 里的 viewkey、
+// 容器 id `playvthumb_<n>`、封面 `thumb/<n>.jpg`），三个一致才靠得住。实测
+// 一页 40 张卡里 12 个 viewkey 重复出现，同一个链接挂三四个不同封面，点进去
+// 是另一部 —— 站点故意给爬虫的迷魂阵（搜索页反而干净，两次渲染 0 变化）。
+//
+// 所以不指望网格页：先照它把图铺出来，再拿每条自己的详情页把标题/封面盖掉。
+// 只补「这次新见到的 id」，同一批 id 一次请求；拉过的详情在 Java 侧进缓存，
+// 第二次进同一页零成本。失败就保留原值 —— 校正失败最多是回到站点的原样，
+// 不能让一张卡把整页拖住。
+// id → 详情页真值。**按 id 存，不按「这次请求过没」记** —— 同一个 id 会同时出现在
+// 首页和分类页的两个数组里（两个不同对象），只记「请求过」的话，第二个列表永远
+// 补不上（真机踩到：首页补好了，切到高清 tab 又变回假封面）。
+const reconciledFixes = new Map();
+function homeItems(data) {
+  return [...asArray(data?.featured), ...asArray(data?.homepageRecommend), ...asArray(data?.homepageNewest),
+          ...asArray(data?.recommend?.items), ...asArray(data?.newest?.items)];
+}
+// 把手上的真值套到这批 item 上，返回改了几个字段。
+function applyFixes(items) {
+  let touched = 0;
+  asArray(items).forEach(item => {
+    const fix = item && reconciledFixes.get(item.id);
+    if (!fix) return;
+    if (fix.title && fix.title !== item.title) { item.title = fix.title; touched += 1; }
+    if (fix.cover && fix.cover !== item.cover) { item.cover = fix.cover; touched += 1; }
+    if (fix.badge && !item.episodeLabel) { item.episodeLabel = fix.badge; touched += 1; }
+  });
+  return touched;
+}
+async function reconcileCards(items, onPatched) {
+  const list = asArray(items).filter(item => item && item.id);
+  if (!list.length) return;
+  // 已经校正过的 id 立刻套一遍（不花请求，也不等网络）
+  const touchedFirst = applyFixes(list);
+  if (touchedFirst && typeof onPatched === 'function') onPatched();
+
+  const missing = [...new Set(list.map(item => item.id))].filter(id => !reconciledFixes.has(id)).slice(0, 30);
+  if (!missing.length) return;
+
+  let data = null;
+  try {
+    const reply = await bridgeCall('detail', { id: '/api/reconcile?ids=' + encodeURIComponent(missing.join(',')) });
+    const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
+    data = (result && (result.data || result)) || null;
+  } catch (error) {
+    return;                       // 整批失败：什么都不记，下次进来还能重试
+  }
+  const fixed = asArray(data && data.items);
+  if (!fixed.length) return;
+  fixed.forEach(entry => { if (entry && entry.id) reconciledFixes.set(entry.id, entry); });
+  const touched = applyFixes(list);
+  if ((touched || fixed.length) && typeof onPatched === 'function') onPatched();
+}
+
 function itemCard(item) {
   const id = esc(item.id);
   const title = esc(item.title || '影片');
@@ -1041,8 +1097,21 @@ function renderTags() {
   // 现在的顺序：**配置优先**。只有配置里没写 tagGroups 时才退回内置分组，
   // 这样黄果那套和旧的短剧/漫剧源行为不变。
   const configured = siteUi().tagGroups || [];
-  const sections = configured.length ? configured
+  const base = configured.length ? configured
     : (privateMode() ? [] : [['short', '短剧类型'], ['comic', '漫剧类型']]);
+  // **数据里出现的组必须都能渲染。** 配置是「这份源有哪些组」的声明，但源是会
+  // 变的（91porn 就是：标签页列的是站点分类栏，组名叫 category，而它那份
+  // user-source.json 是更早的版本生成的，里面根本没有 tagGroups）。只按配置
+  // 渲染的结果是「10 个标签」写在标题上、页面一片空 —— 数字对、内容没有，
+  // 最难查的那种。所以配置里没声明的组按数据补上，标题用通用名。
+  const GROUP_TITLE = { popular: '热门', story: '题材', setting: '场景', plot: '玩法',
+                        style: '外貌', relationship: '关系', other: '其他', cms: '分类',
+                        category: '分类', short: '短剧类型', comic: '漫剧类型', hanime: '里番' };
+  const declared = new Set(base.map(([id]) => id));
+  const extra = [...new Set(tags.map(tag => tag.group || 'other'))]
+    .filter(group => !declared.has(group))
+    .map(group => [group, GROUP_TITLE[group] || '其他']);
+  const sections = [...base, ...extra];
   const groups = sections.map(([id, title]) => {
     const members = tags.filter(tag => tag.group === id);
     if (!members.length) return '';
@@ -2728,6 +2797,12 @@ async function goHome() {
     writeCache('home', fresh);
     if (firstLoad || changed) renderHome();
     else refreshMissingImages([...asArray(fresh.featured), ...asArray(fresh.recommend?.items), ...asArray(fresh.newest?.items)]);
+    // 先把网格页的图画出来，再拿详情页把标题/封面盖成真值（见 reconcileCards）。
+    reconcileCards(homeItems(fresh), () => {
+      if (token !== routeToken || state.route !== 'home') return;
+      writeCache('home', state.home);
+      renderHome();
+    });
   } catch (error) {
     // ⚠️ 渲染和网络必须分开 catch。以前这两段在同一个 try 里，后面几句抛出来，
     // 用户看到的也是「内容更新失败，正在显示缓存」—— 实测日志是
@@ -2768,7 +2843,11 @@ async function goTag(slug, label) {
   const token = ++routeToken;
   if (state.route !== 'listing' || state.listing?.kind !== 'tag-list' || state.listing?.slug !== slug) state.listingReturn = captureScreen();
   setRoute('listing'); state.tab = 'home'; setNav('home');
-  searchInput.value = `#${privateMode() ? '' : (slug.startsWith('comic:') ? '漫剧·' : '短剧·')}${String(label).replace(/^#+/, '')}`;
+  // 「短剧·/漫剧·」这个前缀只在源真的按短剧/漫剧分标签时才有意义。别的源
+  // （比如 91porn，它的标签就是分类栏）套上会变成「#短剧·高清版」，纯噪音。
+  const dramaTagged = (siteUi().tagGroups || []).some(([id]) => id === 'short' || id === 'comic');
+  const prefix = dramaTagged && !privateMode() ? (slug.startsWith('comic:') ? '漫剧·' : '短剧·') : '';
+  searchInput.value = `#${prefix}${String(label).replace(/^#+/, '')}`;
   const refreshing = api('tag-list', { slug, label, page: 1 });
   const cached = readCache(`tag:${slug}:1`);
   if (token !== routeToken) return;
@@ -2785,6 +2864,12 @@ async function goTag(slug, label) {
     writeCache(`tag:${slug}:1`, fresh);
     if (firstLoad || changed) { renderListing(); scroll.scrollTop = previousScroll; }
     else updateListingFooter();
+    reconcileCards(state.listing.items, () => {
+      if (token !== routeToken || state.route !== 'listing') return;
+      const top = scroll.scrollTop;
+      renderListing();
+      scroll.scrollTop = top;
+    });
   } catch (error) {
     if (token !== routeToken) return;
     if (!state.listing.items.length) renderError(error, 'tag-list');
@@ -2838,6 +2923,12 @@ async function openListing(kind) {
     const previousScroll = scroll.scrollTop;
     renderListing();
     scroll.scrollTop = previousScroll;
+    reconcileCards(state.listing.items, () => {
+      if (token !== routeToken || state.route !== 'listing') return;
+      const top = scroll.scrollTop;
+      renderListing();
+      scroll.scrollTop = top;
+    });
   } catch (error) {
     if (token !== routeToken) return;
     state.listing.refreshing = false;
@@ -2873,6 +2964,12 @@ async function loadMoreListing() {
     }
     const count = content.querySelector('.listing-page > p');
     if (count) count.textContent = `已显示 ${listing.items.length} 部作品`;
+    reconcileCards(added, () => {
+      if (state.route !== 'listing' || state.listing !== listing) return;
+      const top = scroll.scrollTop;
+      renderListing();
+      scroll.scrollTop = top;
+    });
   } catch (error) {
     if (token === routeToken && state.listing === listing && state.route === 'listing') listing.error = true;
   } finally {
@@ -2911,6 +3008,13 @@ async function goCategory(tab, sub = subIndex(tab), keepCompact = false) {
       refreshMissingImages(asArray(fresh.items));
       updateCategoryFooter();
     }
+    reconcileCards(state.categoryItems, () => {
+      if (token !== routeToken || state.route !== 'category' || categoryId() !== id) return;
+      const top = scroll.scrollTop;
+      writeCache(`category:${id}:1`, state.category);
+      renderCategory(state.compactHeld);
+      scroll.scrollTop = top;
+    });
   } catch (error) {
     if (token !== routeToken) return;
     if (!state.category) {
@@ -2980,6 +3084,11 @@ async function goSearch(query) {
     state.searchPending = false; state.search = fresh;
     writeCache(`search:${state.query}`, fresh);
     renderSearch();
+    reconcileCards(state.search.items, () => {
+      if (token !== routeToken || state.route !== 'search') return;
+      writeCache(`search:${state.query}`, state.search);
+      renderSearch();
+    });
   } catch (error) {
     if (token !== routeToken) return;
     state.searchPending = false;
@@ -3107,6 +3216,12 @@ window.hgBack = () => {
   if (isRootColumn()) return false;
   if (state.route === 'campaign') { restoreScreen(state.campaignReturn); return true; }
   if (state.route === 'account-management') { restoreScreen(state.accountReturn); return true; }
+  // 设置的四个子页（源/代理/播放器/市场）各有自己的返回快照，之前漏接，
+  // 全掉进最后的 goHome() 兜底，「返回设置」就变成「返回首页」了。
+  if (state.route === 'source-settings') { restoreScreen(state.sourceReturn); return true; }
+  if (state.route === 'proxy-settings') { restoreScreen(state.proxyReturn); return true; }
+  if (state.route === 'player-settings') { restoreScreen(state.playerReturn); return true; }
+  if (state.route === 'market') { restoreScreen(state.marketReturn); return true; }
   if (state.route === 'settings') { restoreScreen(state.settingsReturn); return true; }
   if (state.route === 'detail') { if (detailCard) detailCard.close(); else returnFromDetail(); return true; }
   if (state.route === 'listing' && state.listing?.kind === 'tag-list') { restoreScreen(state.listingReturn); return true; }
@@ -3123,7 +3238,12 @@ window.hgResume = () => {
   // document.hidden 经常一直是 false，那条事件根本不发。
   feedPlayer.resume?.();
   // 播放全程在原生里，页面这边没有 feed 页可回 —— 退出播放器后落回详情页。
+  // 先把 route 归位、清掉「正在打开播放器…」boot 残页，再进 goDetail：
+  // goDetail 会把当前屏幕抓成 state.previous，若不先归位，残页会顶掉真正的
+  // 返回目标，返回时还原出一屏 boot 残页，和选集来回死循环。
   if (state.route === 'feed' && !document.querySelector('.feed')) {
+    feedPlayer.cleanup();
+    state.route = 'detail';
     const back = state.feedReturnId || state.detail?.id;
     if (back) goDetail(back); else goHome();
     return;
@@ -4021,6 +4141,13 @@ function scheduleCategoryRetry(token, id, attempt = 0) {
       state.categoryItems = asArray(fresh.items);
       writeCache(`category:${id}:1`, fresh);
       renderCategory(state.compactHeld);
+      reconcileCards(state.categoryItems, () => {
+        if (token !== routeToken || state.route !== 'category') return;
+        const top = scroll.scrollTop;
+        writeCache(`category:${id}:1`, state.category);
+        renderCategory(state.compactHeld);
+        scroll.scrollTop = top;
+      });
     } catch (error) {
       if (token !== routeToken || state.route !== 'category') return;
       scheduleCategoryRetry(token, id, attempt + 1);

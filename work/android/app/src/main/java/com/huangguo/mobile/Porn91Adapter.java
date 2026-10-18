@@ -4,6 +4,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
@@ -112,8 +113,57 @@ public final class Porn91Adapter {
      * 详情元数据缓存。**只给 detail() 用，play() 不许读它** —— 签名会过期。
      * 存解析好的 JSON，不存 HTML。
      */
-    private static final Map<String, JSONObject> META_CACHE = new HashMap<String, JSONObject>();
-    private static final int CACHE_LIMIT = 16;
+    private static final Map<String, JSONObject> META_CACHE =
+            java.util.Collections.synchronizedMap(new HashMap<String, JSONObject>());
+    /**
+     * 缓存条数。**必须比一页卡片多** —— 列表校正会把整页的详情都拉一遍（24 条），
+     * 旧的 16 条会让最早的那批在下一次校正时又被重拉，等于每次进首页都全量请求。
+     */
+    private static final int CACHE_LIMIT = 64;
+
+    /**
+     * 站点的游客标记（cookie 名就叫 `ga`）。**没有它，详情页每次渲染换一部片。**
+     *
+     * ── 2026-10-18 查出来的真身 ──────────────────────────────────────
+     * 症状是「点进去，片子跟标题封面对不上」，而且不是偶发 —— 几乎每条都不对。
+     *
+     * 实测同一个 `viewkey=1816005455` 连请求五次，什么都不带：
+     *
+     *     #1 mp4=855282  #2 mp4=878350  #3 mp4=864307
+     *     #4 mp4=874177  #5 mp4=876121
+     *
+     * 五次五个文件，标题十次都是「新疆黑丝混血校花被体育生颜射」。把两个封面
+     * 下下来看，一个是金发白人在车里，一个是黑发在酒店 —— 根本不是同一部片。
+     *
+     * 带上 `Cookie: ga=<任意值>`（我用 `ga=1` 验过）之后：
+     *
+     *     1816005455 → 1252139    208573139 → 1252176
+     *     911802319  → 1252166    9e50cbb7…  → 1252103
+     *
+     * 这四个数**正好是首页列表那四张卡片的封面缩略图**（`playvthumb_<id>`），
+     * 标题、封面、视频终于是一条片了。
+     *
+     * 所以机制是：标题按 viewkey 取（永远对），媒体和封面按会话取。站点在
+     * 没有游客标记时走「随便给一部」那条渲染路径 —— 大概率是给爬虫/新访客的
+     * 试看池。列表页不受影响（实测连拉两次，24 条的 thumb 和 viewkey 一个不差），
+     * 所以症状只在点进详情之后出现。
+     *
+     * ── 为什么不是硬编码一个值 ────────────────────────────────────────
+     * 站点在首次响应里会下发真的 `ga`（`Max-Age=100000000`，到 2029 年）。
+     * 能拿到就用它的，拿不到（比如站点哪天改成必须验签）再退回 `1` —— 两条路
+     * 都试过，当前都通。取值流程见 {@link #get(String)}。
+     */
+    private static volatile String guest;
+    private static final Object GUEST_LOCK = new Object();
+
+    /**
+     * 站点没给标记时的兜底值。
+     *
+     * 实测 `ga=1` 一样管用 —— 站点只判断「这个访客带没带标记」，不校验内容
+     * （我拿 `ga=1`、`ga=abc`、真标记三种都比过，同一批 viewkey 出来的都是同一部片）。
+     * 留着这条是为了防「哪天 Set-Cookie 被中间设备剥掉」—— 那种情况下至少还能看。
+     */
+    static final String FALLBACK_GUEST = "1";
 
     private Porn91Adapter() {}
 
@@ -126,10 +176,12 @@ public final class Porn91Adapter {
     public static byte[] fetch(String path, SiteProfile profile) throws Exception {
         String base = base(profile);
         JSONObject result;
-        if (path.startsWith("/api/home")) {
+        if (path.startsWith("/api/reconcile")) {
+            result = reconcile(base, param(path, "ids"));
+        } else if (path.startsWith("/api/home")) {
             result = home(base);
         } else if (path.startsWith("/api/tags")) {
-            result = tags();
+            result = tags(base);
         } else if (path.startsWith("/api/search")) {
             result = search(base, param(path, "q"), page(path));
         } else if (path.startsWith("/api/videos")) {
@@ -137,6 +189,7 @@ public final class Porn91Adapter {
             // （Hanime1Adapter 在这上面踩过：按「有没有 /play」分流，分类列表
             //  掉进了 detail，videoId() 解出空串，站点回 403）。
             String cate = param(path, "cate_id");
+            if (cate.startsWith("cat:")) cate = cate.substring(4);
             if (cate.length() > 0) {
                 result = listing(base, cate, page(path));
             } else if (path.indexOf("/play") > 0) {
@@ -220,11 +273,53 @@ public final class Porn91Adapter {
      * 所以这里返回 `{categories: []}`，配置里也不声明 ui.tagGroups。
      * 前端 renderTags 拿到空数组就画不出东西，那是**站点的形状**。
      */
-    private static JSONObject tags() {
+    /**
+     * 「全部类型」页。这个站没有话题标签，但**顶部那排分类链接就是它的标签栏**：
+     *
+     *   91原創 / 當前最熱 / 本月最熱 / 10分鐘以上 / 20分鐘以上 / 本月收藏
+     *   最近加精 / 高清版 / 上月最熱 / 本月討論 / 收藏最多
+     *
+     * 以前这里返回空数组，理由是「没有标签体系」—— 结果是「全部类型」页空白，
+     * 首页那排胶囊点下去也没反应（它们走 tag-list，而 tag-list 压根没配）。
+     *
+     * 现在直接从站点导航里抠：**标签名和 category 码都取站点自己的**，不写死一份
+     * 表。多一个少一个分类不用改代码。点了走 tag-list → 分类列表。
+     */
+    private static JSONObject tags(String base) throws Exception {
+        JSONArray items = new JSONArray();
+        java.util.Set<String> seen = new java.util.HashSet<String>();
+        String html = get(base + "/v.php");
+        Matcher m = Pattern.compile(
+                "<a[^>]+href=[\"'](?:https?://[^\"']*)?v\\.php\\?category=([a-z0-9_]+)[^\"']*[\"'][^>]*>(.*?)</a>",
+                Pattern.CASE_INSENSITIVE | Pattern.DOTALL).matcher(html);
+        while (m.find()) {
+            String code = m.group(1);
+            String label = unescape(stripHtml(m.group(2))).replaceAll("\\s+", " ").trim();
+            if (code.length() == 0 || label.length() == 0) continue;
+            if (label.length() > 24) continue;                 // 正文里的链接不算
+            if (!seen.add(code)) continue;
+            JSONObject tag = new JSONObject();
+            tag.put("slug", code);
+            tag.put("name", label);
+            tag.put("group", "category");                      // 最终组名，前端直接认
+            items.put(tag);
+        }
+        if (items.length() == 0) {
+            // 导航改版了也不至于让整页空白：退回写死的那十个，至少能点。
+            for (int i = 0; i < Porn91Site.categoryCodes().length; i++) {
+                JSONObject tag = new JSONObject();
+                tag.put("slug", Porn91Site.categoryCodes()[i][0]);
+                tag.put("name", Porn91Site.categoryCodes()[i][1]);
+                tag.put("group", "category");
+                items.put(tag);
+            }
+        }
+        JSONObject group = new JSONObject();
+        group.put("code", "category");
+        group.put("tags", items);
+
         JSONObject out = new JSONObject();
-        try {
-            out.put("categories", new JSONArray());
-        } catch (Exception ignored) {}
+        out.put("categories", new JSONArray().put(group));
         return out;
     }
 
@@ -266,6 +361,100 @@ public final class Porn91Adapter {
         JSONObject out = new JSONObject();
         out.put("items", items);
         out.put("pagination", pagination(html, page, items.length()));
+        return out;
+    }
+
+    // ── 列表校正：拿详情页的真值盖掉网格页的假数据 ────────────────────
+
+    /**
+     * 一页最多校正多少条。站点一页就是 24，留点余量。
+     */
+    private static final int RECONCILE_LIMIT = 26;
+
+    /** 并发度。**别调大** —— 见下面那段注释。 */
+    private static final int RECONCILE_THREADS = 4;
+
+    /** 整轮的时间预算。到点就用手上已有的，不把首页拖死。 */
+    private static final long RECONCILE_BUDGET_MS = 12000;
+
+    private static final java.util.concurrent.ExecutorService RECONCILE_POOL =
+            java.util.concurrent.Executors.newFixedThreadPool(RECONCILE_THREADS, r -> {
+                Thread t = new Thread(r, "porn91-reconcile");
+                t.setDaemon(true);
+                return t;
+            });
+
+    /**
+     * 用详情页的数据校正列表卡片。
+     *
+     * ── 为什么需要它 ─────────────────────────────────────────────────
+     * 2026-10-18 真机 + 浏览器两边都确认过：91porn 的**网格页在乱写**。同一页里
+     * 一个 viewkey 能出现 2~4 次，每次配不同的封面和标题；点进去（详情页）才是
+     * 真的。实测一页 40 张卡里 12 个 viewkey 重复，`/v.php` 两次渲染有 10/24 条
+     * 的封面会变，而我们照着卡片上的 href、封面、标题原样搬过来，于是「点缩略图
+     * 是一个，点进去封面换了一个」。
+     *
+     * 搜索页反而干净（两次渲染 0 变化、3/3 与详情一致），说明站点做得到，
+     * 只是首页/分类页故意不给 —— 那是给爬虫的迷魂阵，不是我们解析错了。
+     *
+     * 既然网格页不可信，就用详情页盖一遍：每张卡发一次详情请求，把标题、封面、
+     * 时长换成真值。
+     *
+     * ── 代价 ─────────────────────────────────────────────────────────
+     * 一页 24 条 = 24 次详情请求，约 900KB，4 线程约 1~1.5 秒。第二次进同一页
+     * 全部命中 META_CACHE，零请求（这也是 CACHE_LIMIT 必须 ≥ 一页的原因）。
+     *
+     * **并发度压到 4**：这个站对「非浏览器流量」有静默处理（UA 不对直接回 200 +
+     * 0 字节），一口气打 24 个并发请求有被限流的风险。4 条一轮，单条失败就跳过、
+     * 保留卡片原值 —— 校正失败最多是回到「站点怎么写我们就怎么显示」，不能让
+     * 一个坏条目把整页拖垮。
+     */
+    static JSONObject reconcile(String base, String idList) throws Exception {
+        java.util.List<String> ids = new java.util.ArrayList<String>();
+        String[] parts = idList == null ? new String[0] : idList.split(",");
+        for (int i = 0; i < parts.length && ids.size() < RECONCILE_LIMIT; i++) {
+            String id = parts[i].trim();
+            if (id.length() > 0 && !ids.contains(id)) ids.add(id);
+        }
+        if (ids.isEmpty()) throw new Exception("没有提供 id");
+
+        java.util.List<java.util.concurrent.Future<JSONObject>> jobs =
+                new java.util.ArrayList<java.util.concurrent.Future<JSONObject>>();
+        for (int i = 0; i < ids.size(); i++) {
+            final String id = ids.get(i);
+            jobs.add(RECONCILE_POOL.submit(() -> {
+                try {
+                    JSONObject real = detail(base, id);
+                    JSONObject one = new JSONObject();
+                    one.put("id", id);
+                    one.put("title", real.optString("title", ""));
+                    one.put("cover", real.optString("cover", ""));
+                    one.put("badge", real.optString("duration", ""));
+                    return one;
+                } catch (Throwable e) {
+                    return null;      // 单条失败：前端保留原值
+                }
+            }));
+        }
+
+        JSONArray items = new JSONArray();
+        long deadline = System.currentTimeMillis() + RECONCILE_BUDGET_MS;
+        for (int i = 0; i < jobs.size(); i++) {
+            long left = deadline - System.currentTimeMillis();
+            if (left <= 0) {
+                log("porn91 校正超时，剩 " + (jobs.size() - i) + " 条没等");
+                break;
+            }
+            try {
+                JSONObject one = jobs.get(i).get(left, java.util.concurrent.TimeUnit.MILLISECONDS);
+                if (one != null && one.optString("cover", "").startsWith("http")) items.put(one);
+            } catch (Throwable ignored) {
+                // 超时/异常只影响这一条
+            }
+        }
+
+        JSONObject out = new JSONObject();
+        out.put("items", items);
         return out;
     }
 
@@ -541,7 +730,24 @@ public final class Porn91Adapter {
      * 实测它和安卓的 DOM 一致，但安卓那串是项目里其它适配器在用的，统一。
      */
     private static String get(String url) throws Exception {
-        byte[] body = AiiHttp.getRaw(url, HEADERS, TIMEOUT);
+        Map<String, String> jar = new LinkedHashMap<String, String>();
+        byte[] body = request(url, jar);
+
+        // 第一次请求没带游客标记，站点会顺手在响应头里塞一个 —— 但**这一份正文
+        // 是随机片**，不能拿它去解析标题封面，必须带着新标记重取一次。
+        // 每个进程只会走到这里一次（拿到之后 guest 就定住了）。
+        if (guest == null) {
+            String found = pickGuest(jar);
+            String chosen = chooseGuest(jar);
+            synchronized (GUEST_LOCK) { if (guest == null) guest = chosen; }
+            log("porn91 拿到游客标记 ga=" + chosen.substring(0, Math.min(12, chosen.length()))
+                    + (found.length() > 0 ? "" : "（站点没下发，用兜底值）") + "，重取这一页");
+            // **无论标记是拣来的还是兜底的，这一份正文都要重取** —— 没带标记的
+            // 那次渲染出来的是随机片，拿它解析出来的标题封面全是错的。
+            jar.clear();
+            body = request(url, jar);
+        }
+
         if (body == null || body.length == 0) {
             // ★ 这个站对不认识的 UA 回 **HTTP 200 + 0 字节**，不报错。
             // 不在这里拦的话，上层拿到空串会一路解析成「0 条卡片」，看起来像
@@ -551,6 +757,49 @@ public final class Porn91Adapter {
                     + "检查 HEADERS 里的 User-Agent 是否被改掉了。");
         }
         return new String(body, "UTF-8");
+    }
+
+    /** 一次 GET，把响应头里的 Set-Cookie 收进 jar。 */
+    private static byte[] request(String url, Map<String, String> jar) throws Exception {
+        return AiiHttp.getRaw(url, requestHeaders(guest), TIMEOUT, jar);
+    }
+
+    /**
+     * 真正的请求头：浏览器头 + 游客标记。
+     *
+     * 没有标记就先不带 `Cookie`（第一次请求正是靠这个让站点下发一个）。
+     * 包级可见，单测直接钉「带不带这个头」。
+     */
+    static Map<String, String> requestHeaders(String guestToken) {
+        Map<String, String> headers = new LinkedHashMap<String, String>(HEADERS);
+        if (guestToken != null && guestToken.length() > 0) {
+            headers.put("Cookie", "ga=" + guestToken);
+        }
+        return headers;
+    }
+
+    /** 从 Set-Cookie 收来的 jar 里取 `ga`。没有返回空串。 */
+    static String pickGuest(Map<String, String> jar) {
+        if (jar == null) return "";
+        String value = jar.get("ga");
+        return value == null ? "" : value.trim();
+    }
+
+    /** 拣到的用拣到的，拣不到用兜底值。包级可见，单测直接钉。 */
+    static String chooseGuest(Map<String, String> jar) {
+        String found = pickGuest(jar);
+        return found.length() > 0 ? found : FALLBACK_GUEST;
+    }
+
+    /**
+     * 单测和排障用：清掉游客标记**和**元数据缓存。
+     *
+     * 标记错着的时候解析出来的那一份详情也是错的（封面/简介属于别的片），
+     * 所以两样必须一起清 —— 只清标记，缓存还会把错的那份吐回来。
+     */
+    static void forgetGuest() {
+        synchronized (GUEST_LOCK) { guest = null; }
+        synchronized (META_CACHE) { META_CACHE.clear(); }
     }
 
     /**
@@ -702,12 +951,14 @@ public final class Porn91Adapter {
     }
 
     private static void cache(String id, JSONObject meta) {
-        if (META_CACHE.size() >= CACHE_LIMIT) {
-            java.util.Iterator<String> it = META_CACHE.keySet().iterator();
-            int drop = CACHE_LIMIT / 4;
-            while (it.hasNext() && drop-- > 0) { it.next(); it.remove(); }
+        synchronized (META_CACHE) {
+            if (META_CACHE.size() >= CACHE_LIMIT) {
+                java.util.Iterator<String> it = META_CACHE.keySet().iterator();
+                int drop = CACHE_LIMIT / 4;
+                while (it.hasNext() && drop-- > 0) { it.next(); it.remove(); }
+            }
+            META_CACHE.put(id, meta);
         }
-        META_CACHE.put(id, meta);
     }
 
     // ── 分页 ──────────────────────────────────────────────────────────
@@ -752,7 +1003,18 @@ public final class Porn91Adapter {
     // ── 正则 ──────────────────────────────────────────────────────────
 
     /**
-     * 卡片链接。**viewkey 必须认两种形态**（坑 3）：
+     * 卡片链接。**三种形态都得认**：
+     *
+     *   view_video.php?viewkey=…       常规
+     *   view_video_hd.php?viewkey=…    高清分类（category=hd）整页都是这个
+     *   viewkey 本身两种写法：纯数字 / 20 位十六进制（坑 3）
+     *
+     * 2026-10-18 踩到：`高清` 那个 tab 一直「已显示 0 部作品」。原因就是这一页
+     * 的卡片全走 `view_video_hd.php`，而我们只认 `view_video.php` —— 一条都匹配
+     * 不上。**详情/播放仍然用 view_video.php**（实测它对 hd 的 id 一样给标题、
+     * 封面和直链；`view_video_hd.php` 那页反而没有 poster 也没有 source）。
+     *
+     * 原来那条注释：
      *   1555330457              纯数字
      *   51dc03e8e27a694f2fc7    20 位十六进制
      * 写成 \d+ 会漏掉一半，而且漏得没声音。
@@ -761,7 +1023,7 @@ public final class Porn91Adapter {
      * 也可能是相对（`view_video.php?viewkey=…`，搜索页就是相对）。
      */
     private static final Pattern CARD_RE = Pattern.compile(
-            "<a[^>]+href=[\"'](?:https?://[^\"']*)?view_video\\.php\\?viewkey=([0-9a-zA-Z]+)",
+            "<a[^>]+href=[\"'](?:https?://[^\"']*)?view_video(?:_hd)?\\.php\\?viewkey=([0-9a-zA-Z]+)",
             Pattern.CASE_INSENSITIVE);
 
     /** `<source src='…'>` / `<source src="…">`，跨行、属性顺序不固定。 */
