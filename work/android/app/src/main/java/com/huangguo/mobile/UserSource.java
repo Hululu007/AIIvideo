@@ -2013,6 +2013,10 @@ public final class UserSource {
      *   test                         通过核心测一次延迟，返回 ms
      *   mode?value=direct|builtin|external   切换模式（切到 builtin 会顺手拉起核心）
      *   boot                         冷启动读盘并恢复内置核心（设置页首次加载时调）
+     *   sub?url=<订阅地址>            拉订阅 + 测速
+     *   speed?batch=N                分批测速，第 N 批
+     *   use?index=N                  连上第 N 个已测通的节点
+     *   nodes[?do=refresh|reset]     内置节点池的状态 / 热更新 / 复位
      *
      * 所有分支都返回同一套字段：{ok, mode, running, port, socksUrl, host, effective,
      * external, busy, node, error, unavailable}，前端拿到就整块重画。
@@ -2046,6 +2050,7 @@ public final class UserSource {
             if ("subclear".equals(action)) return proxySubClear(context, out);
             if ("speed".equals(action)) return proxySpeed(context, param(query, "batch"), out);
             if ("use".equals(action)) return proxyUse(context, param(query, "index"), out);
+            if ("nodes".equals(action)) return proxyNodes(context, param(query, "do"), out);
             return fail(out, "不认识的代理指令：" + action);
         } catch (Throwable e) {
             return fail(out, "代理指令失败：" + e.getClass().getSimpleName() + " " + e.getMessage());
@@ -2237,6 +2242,10 @@ public final class UserSource {
                 && proxyLink(context).length() > 0) {
             proxyStart(context, "", "", new JSONObject());
         }
+        // 节点池热更新：过期了就在后台拉一次。不阻塞这条指令 ——
+        // boot 是设置页打开时第一条请求，它必须立刻返回。
+        // 拉到的下一轮测速自然用上；这一轮用旧的也没问题，旧的最多差几个小时。
+        if (MODE_BUILTIN.equals(proxyMode(context))) autoRefreshNodes(context);
         return proxyStatus(context, out);
     }
 
@@ -2358,6 +2367,75 @@ public final class UserSource {
         out.put("ok", true);
         out.put("source", "builtin");
         return out;
+    }
+
+    /**
+     * 内置节点池的热更新。
+     *
+     *   nodes                    只报状态，不联网（几毫秒）
+     *   nodes?do=refresh         拉一次远端，成功则落盘
+     *   nodes?do=reset           删缓存，回到 APK 自带那份
+     *
+     * 分成三条而不是「查状态时顺手刷新」：状态查询在进设置页时每次都会调，
+     * 把它变成一次网络请求会让设置页打开就卡几秒。刷新必须由用户明确触发，
+     * 或者由 proxyBoot 里的后台线程在过期时默默做（那条路径不阻塞任何人）。
+     */
+    private static JSONObject proxyNodes(Context context, String what, JSONObject out) throws Exception {
+        String action = what == null ? "" : what.trim();
+        NodesFeed.Status status;
+        if ("refresh".equals(action)) {
+            status = NodesFeed.refresh(context);
+            // 节点池换了，上一轮测出来的结果就作废了 —— 下标指向的已经不是
+            // 同一个节点，留着它会让用户点一行连到别的地方去。
+            if (status.ok) {
+                synchronized (SPEED_LOCK) {
+                    speedAccum = null;
+                    lastSpeedTest = null;
+                }
+            }
+        } else if ("reset".equals(action)) {
+            status = NodesFeed.reset(context);
+            synchronized (SPEED_LOCK) {
+                speedAccum = null;
+                lastSpeedTest = null;
+            }
+        } else {
+            status = NodesFeed.status(context);
+        }
+        out.put("ok", status.ok);
+        out.put("nodes", status.toJson());
+        return out;
+    }
+
+    /**
+     * 启动时在后台悄悄检查一次节点池。
+     *
+     * 只在「离上次成功/失败超过 6 小时」时才发请求，所以正常使用下一天
+     * 最多几次。放在线程里跑是因为设置页的 boot 指令要立刻返回状态，
+     * 不能陪着等网络。
+     */
+    private static void autoRefreshNodes(final Context context) {
+        if (!NodesFeed.due(context)) return;
+        Thread worker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    NodesFeed.Status status = NodesFeed.refresh(context);
+                    if (status.ok) {
+                        log("节点池已更新：" + status.nodes + " 条（" + status.updated + "）");
+                    } else {
+                        log("节点池更新失败：" + status.error);
+                    }
+                } catch (Throwable e) {
+                    log("节点池更新异常：" + e.getClass().getSimpleName());
+                }
+            }
+        }, "nodes-refresh");
+        worker.setDaemon(true);
+        try {
+            worker.start();
+        } catch (Throwable ignored) {
+        }
     }
 
     /**

@@ -1620,9 +1620,83 @@ function proxySummary() {
  */
 function subState() {
   if (!state.proxySub) {
-    state.proxySub = { url: '', count: 0, summary: '', speedNote: '', speed: [], testing: false, busy: false };
+    state.proxySub = {
+      url: '', count: 0, summary: '', speedNote: '', speed: [], testing: false, busy: false,
+      nodes: null, nodesBusy: false, nodesNote: '',
+    };
   }
   return state.proxySub;
+}
+
+/**
+ * 「节点库」那一行说明。
+ *
+ * 用户需要知道的只有三件事：这一批是哪天的、有多少条、是不是包里的老货。
+ * 其余（缓存路径、候选地址、TTL）都是实现细节，不该出现在界面上。
+ */
+function nodesLine(nodes) {
+  if (!nodes) return '节点库：读取中…';
+  if (nodes.ok === false) return '节点库：读不出来' + (nodes.error ? '（' + esc(nodes.error) + '）' : '');
+  // updated 来自远端 JSON，是外部输入 —— 一律 esc。这一行是拼进 innerHTML 的，
+  // 不转义的话一份恶意 feed 就能往页面里塞标签（虽然候选地址是我们自己的，
+  // 但「我们自己的地址将来会不会被换掉」不该由这一行代码来赌）。
+  const when = nodes.updated ? '维护于 ' + esc(String(nodes.updated)) : '没有维护日期';
+  const how = nodes.source === 'assets' ? '，随安装包自带' : '';
+  const fresh = nodes.stale && nodes.source !== 'assets' ? '，可以点「检查更新」' : '';
+  return '节点库：' + when + ' · ' + (Number(nodes.nodes) || 0) + ' 条' + how + fresh;
+}
+
+/**
+ * 读一次节点库状态。不联网，几毫秒就回来，所以进设置页就调。
+ *
+ * 失败不弹 toast：这只是个说明行，读不到就显示「读取中」，
+ * 拿它报错会让人以为整个代理坏了。
+ */
+async function loadNodesStatus() {
+  const sub = subState();
+  try {
+    const result = await proxyCoreCommand('nodes');
+    if (result && result.nodes) {
+      sub.nodes = result.nodes;
+      renderProxySettingsKeepScroll();
+    }
+  } catch (ignored) {}
+}
+
+/**
+ * 手动检查更新。
+ *
+ * 三个候选地址逐个试，全失败时后端会把原因带回来。成功之后**必须重测**——
+ * 旧的测速结果指向的是上一批节点，下标已经对不上了。
+ */
+async function refreshNodesFeed() {
+  const sub = subState();
+  if (sub.busy || sub.nodesBusy) return;
+  sub.nodesBusy = true;
+  sub.nodesNote = '正在获取…';
+  sub.speed = [];
+  sub.speedNote = '';
+  renderProxySettingsKeepScroll();
+  try {
+    const result = await proxyCoreCommand('nodes?do=refresh');
+    const nodes = (result && result.nodes) || {};
+    sub.nodes = nodes;
+    if (result.ok === false) {
+      sub.nodesNote = '更新失败：' + (nodes.error || result.error || '网络不通') + '。还在用旧的那份。';
+    } else {
+      sub.nodesNote = '已更新到 ' + (nodes.updated || '最新版本') + '，共 ' + (nodes.nodes || 0) + ' 条。';
+      sub.busy = false;
+      sub.nodesBusy = false;
+      renderProxySettingsKeepScroll();
+      await runSpeedTest();
+      return;
+    }
+  } catch (problem) {
+    sub.nodesNote = '更新失败：' + problem.message;
+  } finally {
+    sub.nodesBusy = false;
+    renderProxySettingsKeepScroll();
+  }
 }
 
 /**
@@ -1758,12 +1832,15 @@ function renderProxySettings() {
     <section class="settings-player">
       <h2>免费节点</h2>
       <p>App 自带一组公开共享节点。点一下测速，挑快的直接连 —— 不用注册、不用填任何东西。</p>
+      <p class="field-hint">${nodesLine(sub.nodes)}</p>
       <div class="player-options">
-        <button type="button" data-proxy-sub="speed">${sub.testing ? '测速中…' : '测速并挑选'}</button>
+        <button type="button" data-proxy-sub="speed"${sub.busy ? ' disabled' : ''}>${sub.testing ? '测速中…' : '测速并挑选'}</button>
+        <button type="button" data-proxy-sub="nodes-refresh"${sub.busy ? ' disabled' : ''}>${sub.nodesBusy ? '检查中…' : '检查更新'}</button>
       </div>
+      ${sub.nodesNote ? `<p class="field-hint">${esc(sub.nodesNote)}</p>` : ''}
       <p id="proxy-sub-speed" class="field-hint"${sub.speedNote ? '' : ' hidden'}>${esc(sub.speedNote || '')}</p>
       ${renderSpeedList(sub)}
-      <p class="field-hint">公开共享节点，随时可能失效；流量会经过陌生人的服务器，别用来登录重要账号。连不上就过一会儿再试，或者往下面用自己的订阅。</p>
+      <p class="field-hint">公开共享节点，随时可能失效；流量会经过陌生人的服务器，别用来登录重要账号。连不上就点「检查更新」换一批，或者往下面用自己的订阅。</p>
     </section>
     <section class="settings-player">
       <h2>用自己的订阅</h2>
@@ -1867,6 +1944,8 @@ function goProxySettings() {
   // 先用上次那份状态画一屏（不然会白一下），再问 Java 要一次真实的。
   renderProxySettings();
   bootProxyCore(true);
+  // 节点库那一行也要有值。这条路不联网，所以不等着 boot 的结果。
+  loadNodesStatus();
   // 只有「外部地址」模式下才有那个输入框 —— 别的模式下别抢焦点弹键盘。
   content.querySelector('#proxy-value')?.focus();
 }
@@ -3178,10 +3257,18 @@ document.addEventListener('click', async event => {
     if (action === 'clear') {
       subAction.disabled = true;
       proxyCoreCommand('subclear').then(() => {
-        state.proxySub = { url: '', count: 0, summary: '', speedNote: '', speed: [], testing: false, busy: false };
+        state.proxySub = {
+          url: '', count: 0, summary: '', speedNote: '', speed: [], testing: false, busy: false,
+          nodes: null, nodesBusy: false, nodesNote: '',
+        };
         renderProxySettingsKeepScroll();
+        loadNodesStatus();
         toast('已改回用内置的免费节点');
       }).catch(problem => { toast(problem.message, true); subAction.disabled = false; });
+      return;
+    }
+    if (action === 'nodes-refresh') {
+      refreshNodesFeed();
       return;
     }
     runSpeedTest();

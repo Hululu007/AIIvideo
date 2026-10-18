@@ -64,10 +64,15 @@ final class Subscription {
      * 走同一个客户端也省得再处理一遍 DoH / 重试 / 用户代理。
      */
     /**
-     * 内置的免费节点，打进 APK 的 assets/free-nodes.json。
+     * 内置的免费节点。
      *
-     * 这是「没机场的人」的默认路径 —— 他们不需要知道订阅是什么，进设置页
-     * 点一下测速就行。文件由维护者人工更新，格式见文件里的 _note。
+     * ── 现在这份是**可热更新**的 ──
+     * 以前这里直接读 assets/free-nodes.json，意味着打进 APK 的那 178 条链接
+     * 会一天天烂掉，而修复手段只有发新版。现在走 NodesFeed：
+     * 缓存优先 → 远端 → assets，见那个类的注释。
+     *
+     * 这个方法的语义没变（「给用户一组开箱即用的节点」），变的是数据来源，
+     * 所以调用方一处都不用改。
      *
      * 为什么不用 assets 里直接塞原始订阅文本：那样维护的人得懂 base64，
      * 而且改一条要重算整个编码。JSON 数组是所有人都能直接改的形态。
@@ -75,9 +80,11 @@ final class Subscription {
     static Result builtin(Context context) {
         Result empty = new Result();
         try {
-            String text = new String(
-                    HotUpdateManager.read(context.getAssets().open(BUILTIN_ASSET), MAX_BYTES),
-                    StandardCharsets.UTF_8);
+            String text = NodesFeed.text(context);
+            if (text == null || text.trim().isEmpty()) {
+                empty.firstError = "内置节点文件读不出来";
+                return empty;
+            }
             JSONObject root = new JSONObject(text);
             JSONArray links = root.optJSONArray("links");
             if (links == null) {
