@@ -409,10 +409,23 @@ public final class UserSource {
         JSONObject web = config.optJSONObject("web");
         if (web == null) return "缺少 web 块（前端配置）";
 
+        // ── spider 源（2026-10-19 放宽）──────────────────────────────────
+        // 一份源可以只写 "web": {"spider": "yhdm"}：内容全部由前端把 spider
+        // 源码交给 SpiderStore 跑，Java 这边**不拼任何 /api 路径**。所以
+        // paths / origin / categories 这三样对它都不是必需项 —— 它们描述的是
+        // 「REST 源怎么发请求、怎么分栏」，spider 源这两件事都归 JS 自己。
+        //
+        // 判据故意写成「有 spider 才免」，不做无条件放宽：既没 spider 也没
+        // origin 的配置仍然掉进下面那套 REST 校验，缺什么报什么。否则「什么都
+        // 不写」也会通过 —— 那是装完就白屏的配置，比报错难查得多。
+        boolean spiderSource = web.optString("spider", "").trim().length() > 0;
+
         JSONObject paths = web.optJSONObject("paths");
-        if (paths == null || paths.length() == 0) return "web.paths 为空（至少要有一条接口路径）";
-        String home = paths.optString("home", "");
-        if (home.length() == 0) return "web.paths.home 缺失（首页拿不到数据）";
+        String home = paths == null ? "" : paths.optString("home", "");
+        if (!spiderSource) {
+            if (paths == null || paths.length() == 0) return "web.paths 为空（至少要有一条接口路径）";
+            if (home.length() == 0) return "web.paths.home 缺失（首页拿不到数据）";
+        }
 
         // origin：SiteProfile 建 URI 时会校验 scheme / host / userInfo / query / fragment，
         // 任何一条不过都会走到「站点必须是 HTTPS 域名」那个分支。
@@ -427,7 +440,9 @@ public final class UserSource {
         // 有适配器就豁免：适配器自己拼 URL（agedm 用 api、cms 用 api），
         // paths 那张表它根本不看 —— agedm.json 就是 origin 空 + 相对路径 + adapter。
         boolean hasAdapter = config.optString("adapter", "").trim().length() > 0;
-        if (origin.length() == 0 && !hasAdapter) {
+        // spider 源同样豁免「没有 origin 就得有一串绝对地址」：它一条路径都不拼，
+        // 那个前提（home 是绝对地址、detail 也是）对它不存在。
+        if (origin.length() == 0 && !hasAdapter && !spiderSource) {
             if (!home.startsWith("https://")) {
                 return "缺少 origin（站点入口地址）；要么补上，要么把 web.paths.home 写成 https 绝对地址";
             }
@@ -479,7 +494,8 @@ public final class UserSource {
         }
 
         JSONObject categories = web.optJSONObject("categories");
-        if (categories == null || categories.length() == 0) return "web.categories 为空（分类栏会是空的）";
+        // spider 源的分类由 spider 自己给（前端按 spider 的输出画），配置里不必非有。
+        if (!spiderSource && (categories == null || categories.length() == 0)) return "web.categories 为空（分类栏会是空的）";
         // 分类 id 以前要求是正整数。AGE动漫 打破了这个假设 —— 它的「分类」是中文词
         // （label=搞笑），没有数字 id。所以放宽成「非空标量」，只拦住真正会让请求
         // 不带过滤发出去的情况：空值 / 0。apiPathFor 那边查不到就不发请求，
@@ -510,7 +526,7 @@ public final class UserSource {
             }
         }
 
-        Iterator<String> slugs = categories.keys();
+        Iterator<String> slugs = categories == null ? java.util.Collections.<String>emptyList().iterator() : categories.keys();
         while (slugs.hasNext()) {
             String slug = slugs.next();
             if (slug.startsWith("_")) continue;   // 自述键

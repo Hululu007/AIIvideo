@@ -1,0 +1,231 @@
+/*
+ * AIIvideo —— spider 输出 → 前端形状（模型转换层，阶段 2）
+ *
+ * 这一层只做一件事：把 spider ABI 吐出来的对象，翻成 app.js / adapters.js 现在
+ * **已经在读**的那副骨架。它不改语义、不补业务、不猜站点结构 —— 猜是 spider 的
+ * 事，它拿得到 HTML。这里只负责「字段叫什么」。
+ *
+ * 三条硬约束，破坏任何一条都会让下游炸：
+ *
+ *   1. 纯函数。不碰 DOM、不碰网络、不读 window.HG_SITE。
+ *      所以 Node 能直接 vm 加载它跑离线回归（scripts/model-check.js），
+ *      不用真机、不用 WebView、不用等网。
+ *   2. **缺的字段给空串/0，绝不给 undefined。** undefined 进了字符串模板就是
+ *      字面上的「undefined」五个字母 —— 2026-10-18 的选集格子事故就是这么来的：
+ *      模板 `${item.episodeNumber}` 渲染出一排 undefined。所以每个出参字段都必须
+ *      有确定的初值，哪怕它是空。
+ *   3. 出参只增不删。前端今天读 `episodes[].number`，明天读 `.episodeNumber`，
+ *      两个都给；删谁由前端那一侧先改完再说。
+ *
+ * 唯一允许碰到外界的行是文件末尾 `window.HGModel = …`。那不是「依赖 window」，
+ * 那只是宿主页的挂载点，跟 assets 里别的脚本一个规矩。
+ */
+(function () {
+  'use strict';
+
+  // ── 小工具：这三个函数的存在意义就是「不返回 undefined」────────────
+  //
+  // 为什么不直接用 `x || ''`：`x` 是 0 或 false 时 `||` 会把它吃掉，而
+  // score=0 / episodeNumber=0 都是合法值。区分「没有」和「是 0」只能显式判空。
+  function str(value) {
+    return value === undefined || value === null ? '' : String(value);
+  }
+
+  function num(value) {
+    var n = Number(value);
+    return isFinite(n) ? n : 0;
+  }
+
+  function arr(value) {
+    return Array.isArray(value) ? value : [];
+  }
+
+  /** 数字位补零：1 → '01'。只用于「标题缺失时兜一个」的那条路。 */
+  function pad2(n) {
+    var s = String(n);
+    return s.length >= 2 ? s : '0' + s;
+  }
+
+  // 封面：spider 按 ABI 约定给绝对地址（hosts 白名单里的域）。这里只处理
+  // 协议相对地址 `//cdn/x.jpg` —— 那是唯一一种不用知道站点就能补全的形态。
+  // 相对路径 `/cover/1.jpg` 补不了：base 在 spider 手里，转换层没有配置可读。
+  function coverUrl(raw) {
+    var s = str(raw).trim();
+    if (s.indexOf('//') === 0) return 'https:' + s;
+    return s;
+  }
+
+  // ── 前端字段：episodeLabel ────────────────────────────────────────
+  //
+  // adaptVideo 的算法原样搬过来（'共 N 集' → badge → playAt），因为卡片右下角那行小字
+  // 就是它，换一种写法会让同一份数据在两张卡上显示不同文案。
+  function episodeLabel(episodeCount, raw) {
+    var count = num(episodeCount);
+    if (count > 0) return '共 ' + count + ' 集';
+    var badge = str(raw && raw.badge);
+    if (badge) return badge;
+    return str(raw && raw.playAt);
+  }
+
+  // ── Card：spider 的卡片 → adaptVideo 的输出 ────────────────────────
+  //
+  // 字段顺序不重要，齐全才重要。`badge` / `episodeCount` 在前端不是「卡片字段」，
+  // 它们是 episodeLabel 的原料，但仍然原样留着 —— 下一阶段要拿 badge 做角标。
+  function card(raw) {
+    var item = raw || {};
+    var count = num(item.episodeCount);
+    return {
+      id: str(item.id),
+      title: str(item.title),
+      cover: coverUrl(item.cover),
+      score: item.score === undefined || item.score === null || item.score === '' ? '' : item.score,
+      tags: arr(item.tags).map(str),
+      description: str(item.description),
+      category: str(item.category),
+      badge: str(item.badge),
+      episodeCount: count,
+      episodeLabel: episodeLabel(count, item),
+      duration: str(item.duration)
+    };
+  }
+
+  // ── Episode：spider 的 {no, ref, line, title} → 前端读的那一套 ──────
+  //
+  // 这里是整个转换层存在的主要理由：
+  //   no  → episodeNumber（选集格子上的数字）
+  //   ref → id（站内标识，下一阶段 play 要拿它去解析地址）
+  //
+  // `ref` **原样保留**。retire 掉 web.paths 之后，前端手里只有这个 ref，
+  // 丢了它就得回头再取一次详情页。
+  //
+  // `number` 是给 app.js 的 renderDetail 用的（它现在就写 `data-episode="${item.number}"`），
+  // 和 episodeNumber 同值。等 renderDetail 改读 episodeNumber，这个键可以删。
+  function episode(raw) {
+    var item = raw || {};
+    var no = num(item.episodeNumber) || num(item.no);
+    var ref = str(item.ref);
+    var title = str(item.title);
+    // 站点没给标题时兜一个「第NN集」，不是美化 —— 选集格子是空字符串的话，
+    // 用户看到一排空白按钮，和渲染 undefined 一样没法点。
+    if (!title && no > 0) title = '第' + pad2(no) + '集';
+    return {
+      episodeNumber: no,
+      number: no,
+      title: title,
+      ref: ref,
+      id: str(item.id) || ref,
+      line: str(item.line) || 'default',
+      duration: str(item.duration)
+    };
+  }
+
+  // ── Line：从详情页的 lines 到播放页的 lines，同一个形状 ──────────────
+  //
+  // 详情页的 line 只有 {line, name}（没有地址 —— 那正是 Stage 5 的「Episode.ref 是
+  // 标识不是 URL」）。播放页的 line 有 url。两种都收，缺的键给空串。
+  function line(raw) {
+    var item = raw || {};
+    var key = str(item.line) || 'default';
+    return { line: key, name: str(item.name) || key, url: str(item.url) };
+  }
+
+  function lines(raw) {
+    var out = arr(raw).map(line).filter(function (one) { return one.line !== ''; });
+    // 详情页一条线路都没给，不代表「不能播」—— 很多站线路信息只藏在播放页里。
+    // 给一条默认线路，前端就不会拿着空数组画出空白的线路选择器。
+    if (out.length === 0) out = [{ line: 'default', name: '默认线路', url: '' }];
+    return out;
+  }
+
+  // ── Paged：{page, hasMore, items} ─────────────────────────────────
+  //
+  // nextPage 是给 adapters.js 的 nextPageOf 那套老调用点的兼容键：列表页判
+  // 「还有没有下一页」读的是 nextPage === null，不是 hasMore。等列表页改读
+  // hasMore，这个键一并删（见 docs/2026-10-19-spider模型与转换.md 第 4 节）。
+  function paged(payload) {
+    var data = payload || {};
+    var page = num(data.page) || 1;
+    var hasMore = data.hasMore === true;
+    return {
+      items: arr(data.items).map(card),
+      page: page,
+      hasMore: hasMore,
+      nextPage: hasMore ? page + 1 : null
+    };
+  }
+
+  // ── Detail ───────────────────────────────────────────────────────
+  //
+  // 注意 episodeCount 的算法：spider 给了就用它，没给就用 episodes.length。
+  // 反过来（一律用 length）会在「只返回一页剧集」的站上把总集数算成 3，
+  // 前端那句「共 3 集」就成了谎话。
+  function detail(payload) {
+    var data = payload || {};
+    var out = card(data);
+    var episodes = arr(data.episodes).map(episode);
+    out.episodeCount = num(data.episodeCount) || episodes.length;
+    out.episodeLabel = episodeLabel(out.episodeCount, data);
+    out.description = str(data.description);
+    out.episodes = episodes;
+    out.lines = lines(data.lines);
+    return out;
+  }
+
+  // ── Play ─────────────────────────────────────────────────────────
+  //
+  // spider 给的是 {url, alts:[{line,url}]}：url 是「默认播这一条」，alts 是全部线路。
+  // 前端要的是 {url, lines}。两条容易错的地方：
+  //   ① url 必须先落在 lines 里 —— 否则播放器拿到的地址和线路列表对不上，
+  //      用户切一下线路再切回来就换了源。不在就补到最前面。
+  //   ② lines 空但 url 有值（spider 只给了一条），也要给出一条默认线路。
+  function play(payload) {
+    var data = payload || {};
+    var url = str(data.url);
+    var list = [];
+    arr(data.alts).forEach(function (raw, index) {
+      var one = line(raw);
+      if (!one.url) return;
+      if (!str(raw && raw.line)) one.line = 'LINE' + (index + 1);
+      list.push(one);
+    });
+    if (!url && list.length > 0) url = list[0].url;
+    if (list.length === 0) {
+      list = [{ line: 'default', name: '默认线路', url: url }];
+    } else if (url) {
+      var found = list.some(function (one) { return one.url === url; });
+      if (!found) list.unshift({ line: 'default', name: '默认线路', url: url });
+    }
+    return { url: url, lines: list, episodeNumber: num(data.episodeNumber) };
+  }
+
+  // ── 分派 ─────────────────────────────────────────────────────────
+  //
+  // 三种「页面级」能力（home / category / search）返回的是同一个 Paged 形状，
+  // 所以共用 paged()。动作名收在这里而不是散在调用方：将来加 category 的
+  // 筛选参数，只改这一张表。
+  var PAGED_CAPS = { home: 1, category: 1, search: 1, list: 1, 'tag-list': 1 };
+  var DETAIL_CAPS = { detail: 1, episode: 1 };
+  var PLAY_CAPS = { play: 1 };
+
+  function fromBridge(payload, cap) {
+    var name = str(cap);
+    if (PAGED_CAPS[name]) return paged(payload);
+    if (DETAIL_CAPS[name]) return detail(payload);
+    if (PLAY_CAPS[name]) return play(payload);
+    // 抛而不是返回空：未知能力名意味着前端和 spider 的 ABI 对不上，
+    // 静默返回 {items:[]} 会让它变成「这个源没内容」，排查方向直接跑偏。
+    throw new Error('HGModel.fromBridge：未知的能力名 ' + (name || '(空)'));
+  }
+
+  var HGModel = {
+    card: card,
+    paged: paged,
+    detail: detail,
+    play: play,
+    fromBridge: fromBridge
+  };
+
+  // 全文件唯一一行碰宿主的代码。Node 侧在 vm 里塞一个 `window` 壳就能拿到它，
+  // 前端侧和 adapters.js 一样挂在 window 上，两边加载的是同一个文件、同一份逻辑。
+  if (typeof window !== 'undefined') window.HGModel = HGModel;
+})();

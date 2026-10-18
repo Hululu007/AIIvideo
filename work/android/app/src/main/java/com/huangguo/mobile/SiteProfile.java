@@ -22,9 +22,28 @@ final class SiteProfile {
         return this.rules.optString(str);
     }
 
+    /**
+     * 生产路径：内置模板（assets/site-default.json）+ 用户配置，合并后交给下面那个构造器。
+     *
+     * 只有这一处需要 Context —— 读 asset 和读 files/ 下的配置。把它和「解释规则」
+     * 拆成两个构造器，是为了那份解释逻辑（origin/封面/net 那一串校验）能在 JVM 上
+     * 直接被验：单测里没有 AssetManager，构造不出一个能 open("site-default.json")
+     * 的 Context，而这份逻辑最该被守住。
+     */
     SiteProfile(Context context, JSONObject jSONObject) throws Exception {
-        jSONObject = SourceConfig.has(context) ? SourceConfig.read(context) : jSONObject;
-        JSONObject jSONObjectMerge = merge(new JSONObject(new String(HotUpdateManager.read(context.getAssets().open("site-default.json"), 131072), StandardCharsets.UTF_8)), jSONObject == null ? new JSONObject() : jSONObject);
+        this(new JSONObject(new String(HotUpdateManager.read(context.getAssets().open("site-default.json"), 131072), StandardCharsets.UTF_8)),
+                SourceConfig.has(context) ? SourceConfig.read(context) : jSONObject);
+    }
+
+    /**
+     * 规则层：模板 + 用户配置合并，然后解释。
+     *
+     * 合并这一步是 spider 源能成立的地方：merge 只对「两边都是对象」的键递归，
+     * 其余一律直接覆盖/塞进去 —— 所以用户配置里一个 {@code web.spider} 会原样
+     * 出现在合并结果里，SpiderStore 那条桥拿到的就是这个块。
+     */
+    SiteProfile(JSONObject siteDefault, JSONObject userConfig) throws Exception {
+        JSONObject jSONObjectMerge = merge(siteDefault, userConfig == null ? new JSONObject() : userConfig);
         this.rules = jSONObjectMerge;
         String strReplaceAll = jSONObjectMerge.getString("origin").replaceAll("/+$", "");
         this.origin = strReplaceAll;

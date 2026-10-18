@@ -78,6 +78,14 @@ final class SourceConfig {
             if (space != null && space.length() > 0) return space;
         }
 
+        // spider 源（只有 web.spider、没有 origin/paths）：id 空间就是 spider 的 id。
+        // 不加这一段会掉到最下面那条 cfg| 分支 —— 手工写在本地的 spider 配置没有
+        // __url，于是恒为 "hgsrc:cfg|"，两个不同的 spider 源共用一份观看历史：
+        // 点开历史播的是另一部片子。静默张冠李戴，比报错糟得多。
+        JSONObject spiderWeb = config.optJSONObject("web");
+        String spiderId = spiderWeb == null ? "" : spiderWeb.optString("spider", "").trim();
+        if (spiderId.length() > 0) return "hgsrc:spider|" + spiderId;
+
         String origin = config.optString("origin", "").trim();
         if (origin.length() > 0) {
             JSONObject web = config.optJSONObject("web");

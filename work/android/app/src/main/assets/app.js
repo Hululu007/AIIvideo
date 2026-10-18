@@ -196,8 +196,55 @@ window.HG_PLAYER = {
 // 而不是让用户看到一句 unknown action。
 const CONTENT_ACTIONS = new Set(['home', 'category', 'search', 'tags', 'tag-list', 'episode', 'recommend', 'newest']);
 
+// ── spider 源：内容请求不走 /api ────────────────────────────────
+//
+// 源的配置里只要有 web.spider，内容就由运行时提供，前端不再拼任何 URL ——
+// 这是 web.paths 退役的那一步。判断放在 api() 最前面：一条源的形态是二选一
+// （路径 or spider），不该两种都走一遍再挑一个。
+const SPIDER_CAP = { home: 'home', category: 'category', search: 'search', detail: 'detail' };
+
+function spiderIdOf() {
+  const site = window.HG_SITE || {};
+  return String(site.spider || '').trim();
+}
+
+/** 内部动作名 → 模型里的结构化参数。spider 只认 ref/keyword/slug/page。 */
+function spiderArgsFor(action, args) {
+  const page = Number(args.page) || 1;
+  if (action === 'home') return {};
+  if (action === 'category') return { slug: args.id || args.slug || '', page };
+  if (action === 'search') return { keyword: args.query || '', page };
+  if (action === 'detail') return { ref: String(args.id || '') };
+  // episode 是「要第 n 集的地址」，模型里对应 play：ref 里带集号（spider 自己解析）
+  if (action === 'episode') return { ref: String(args.id || '') + ':ep' + (args.episode || 1) };
+  return args;
+}
+
+async function spiderApi(action, args) {
+  const id = spiderIdOf();
+  if (!id) throw new Error('这个源没有声明 web.spider');
+  const cap = action === 'episode' ? 'play' : SPIDER_CAP[action];
+  if (!cap) throw new Error('spider 源还不支持 ' + action + '（阶段 2 只做 home/category/search/detail/play）');
+  const model = window.HGModel;
+  if (!model) throw new Error('模型层没加载：model.js 不在页面里');
+  const payload = await bridgeCall('spider', {
+    op: 'call', id, cap, args: spiderArgsFor(action, args), timeoutMs: 45000
+  });
+  const out = model.fromBridge(payload, cap);
+  if (action === 'episode') {
+    // 内置播放器的桥要 {source|url, lines}，两边都给，省得它去猜。
+    const url = out.url || '';
+    return { source: url, url, lines: out.lines || [] };
+  }
+  return out;
+}
+
 function api(action, args = {}) {
   const run = async () => {
+    // 源声明了 spider 就整条内容通路都走它，不再碰 /api 路径。
+    if (spiderIdOf() && (SPIDER_CAP[action] || action === 'episode')) {
+      return spiderApi(action, args);
+    }
     // REST 接口统一走 Java api-json 桥，避免 WebView 自动附带 Origin 请求头。
     if (shape.apiPathFor(action, args)) {
       try { return await callApi(action, args); }
