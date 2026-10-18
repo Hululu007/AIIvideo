@@ -944,7 +944,52 @@ public final class AiiHttp {
         return clientFor(false,
                 (int) (like.connectTimeoutMillis() / 1000),
                 (int) (like.readTimeoutMillis() / 1000),
-                dns, effectiveRoute());
+                dns, routeForProxyHost());
+    }
+
+    /** 冷启动时等核心就绪的上限。够核心拉起来，又不至于让用户以为卡死。 */
+    private static final long PROXY_READY_WAIT_MS = 2500;
+
+    /**
+     * 给「路由说这个 host 要走代理」的请求取代理；内置核心还没起来时**等一会儿**。
+     *
+     * ── 这个方法是为什么存在的 ────────────────────────────────────────
+     * 2026-10-19 真机：spider 在启动 0.4 秒后跑，日志是
+     *
+     * <pre>
+     * [source] net yhdm.one → 代理
+     * [http] DoH yhdm.one → 4 个地址          ← 还在做本地 DNS
+     * failed to connect to yhdm.one/2001::caa0:…（被污染的 IPv6）
+     * </pre>
+     *
+     * 两个真相：{@link NetRoute} 判的是「这个 host 该走代理」（按源声明），而建
+     * 客户端用的是 {@link #effectiveRoute()}（全局设置）。启动头一两秒内置核心还没
+     * 监听，{@code effectiveProxy()} 返回空串 —— 那是「还没好」，不是「不走代理」。
+     * 把它们当同一件事，结果就是拿直连去撞被 DNS 污染的地址，一个请求烧掉 15 秒。
+     *
+     * <p>所以这条路只做一件事：模式是内置核心、代理串还是空的时候，最多等
+     * {@link #PROXY_READY_WAIT_MS}；等到就用，等不到就照旧直连（比一直卡着好，
+     * 而且日志里能看出是核心没起来）。
+     */
+    private static ProxyRoute routeForProxyHost() {
+        ProxyRoute route = effectiveRoute();
+        if (effectiveProxy().length() > 0) return route;
+        if (!ProxyConsole.MODE_BUILTIN.equals(proxyModeOrEmpty())) return route;
+        long until = System.currentTimeMillis() + PROXY_READY_WAIT_MS;
+        while (System.currentTimeMillis() < until) {
+            try {
+                Thread.sleep(120);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            if (effectiveProxy().length() > 0) {
+                log("等内置核心就绪 " + (PROXY_READY_WAIT_MS - (until - System.currentTimeMillis())) + "ms");
+                return effectiveRoute();
+            }
+        }
+        log("内置核心迟迟没起来，这手先按直连发（源声明的是走代理）");
+        return route;
     }
 
     /**

@@ -149,6 +149,9 @@ final class SpiderRuntime {
          */
         volatile SiteProfile profile;
 
+        /** 应用上下文，给 net 里的诊断日志用（模式/代理串）。 */
+        android.content.Context ctx;
+
         /** onPageFinished 可能对同一页触发多次（子框架、重定向），注入只做一次。 */
         volatile boolean injected;
 
@@ -207,10 +210,17 @@ final class SpiderRuntime {
         final Session s = new Session(cap, spiderSource,
                 args == null ? "{}" : args.toString(), budget);
         // 当前生效的源配置。取不到就留 null，net 退回全局路由（见 Session.profile）。
+        s.ctx = activity.getApplicationContext();
+        // profile 是 net 走哪条路由的唯一依据。取不到就别硬撑 —— 那就退回老的
+        // 全局路由（不带 NetRoute），并在日志里说清楚，否则「App 能取、spider 不能」
+        // 这种问题会被误判成站点抽风。
         try {
-            s.profile = HotUpdateManager.get(activity.getApplicationContext()).currentSite();
-        } catch (Throwable ignored) {
+            s.profile = HotUpdateManager.get(s.ctx).currentSite();
+        } catch (Throwable e) {
+            UserSource.log("spider 拿不到当前源配置：" + e);
         }
+        // 不兜底构造：currentSite() 是「当前生效配置」的唯一入口，它给了 null 说明
+        // 配置本身有问题，那时候再拼一份出来只会掩盖真正的错。日志里说清楚就够。
 
         // 排队也算在预算里：等锁等掉的钱不该再从看门狗里另算一份，
         // 否则用户点一下要等 30 秒才看到「超时」。
@@ -287,7 +297,26 @@ final class SpiderRuntime {
         // 打一行路由。spider 这条路最容易出的诊断困境是「App 能取、spider 取不到」，
         // 而两者差的就是路由决策 —— 不把结论打出来，只能靠猜。
         UserSource.log("net " + host + " → " + (NetRoute.mustProxy(host) ? "代理" : "直连")
-                + (NetRoute.directOnly(host) ? "（直连表命中）" : ""));
+                + (NetRoute.directOnly(host) ? "（直连表命中）" : "")
+                + " profile=" + (s.profile != null ? "有" : "空")
+                + " mode=" + ProxyConsole.proxyMode(s.ctx)
+                + " proxy=" + (AiiHttp.effectiveProxy().length() > 0 ? "有" : "空"));
+
+        // 源说要走代理、可内置核心还没起来的时候，**等它**。
+        //
+        // 这一条和 AiiHttp 里那个 routeForProxyHost 是同一件事的两个层面：
+        // 那边负责「建客户端时别把空窗当直连」，这边负责「等之前先别发请求」。
+        // 实测（2026-10-19 00:31:14）spider 在启动 0.3 秒后触发，那一刻
+        // effectiveProxy() 是空串 —— 直连去撞被 DNS 污染的 IPv6，一个请求烧 15 秒。
+        // 等 3 秒的成本远小于一次 15 秒失败，而且用户看不出差别。
+        if (NetRoute.mustProxy(host) && AiiHttp.effectiveProxy().length() == 0) {
+            long waitBegan = System.currentTimeMillis();
+            while (System.currentTimeMillis() - waitBegan < 3000 && AiiHttp.effectiveProxy().length() == 0) {
+                try { Thread.sleep(120); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+            }
+            UserSource.log("net 等核心就绪 " + (System.currentTimeMillis() - waitBegan) + "ms → "
+                    + (AiiHttp.effectiveProxy().length() > 0 ? "已就绪" : "仍为空，按直连发"));
+        }
 
         Map<String, String> headers = headersOf(args);
         String method = args.optString("method", "GET").trim().toUpperCase(Locale.ROOT);

@@ -813,6 +813,40 @@ public final class MainActivity extends Activity {
         handleBack(false);
     }
 
+    /**
+     * 已经在运行时再收到一次带 spider extra 的 intent 就跑一次自检。
+     *
+     * 为什么需要它：冷启动那一刻内置代理核心还没起来（实测启动后 0.3 秒时
+     * effectiveProxy() 仍是空串），spider 只能直连，撞上被污染的 IPv6 要烧 15 秒。
+     * 有了这条，验证流程可以先正常启动、等核心就绪、再补一条 intent 触发 ——
+     * 否则每次都要和启动时序赛跑。
+     */
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (intent != null && intent.hasExtra("spider_demo")) {
+            String id = intent.getStringExtra("spider_id");
+            String cap = intent.getStringExtra("spider_cap");
+            String argsRaw = intent.getStringExtra("spider_args");
+            int timeout = intent.getIntExtra("spider_timeout", 15000);
+            this.requests.execute(() -> {
+                try {
+                    JSONObject args = argsRaw == null || argsRaw.length() == 0
+                            ? new JSONObject() : new JSONObject(argsRaw);
+                    long t0 = System.currentTimeMillis();
+                    JSONObject payload = SpiderStore.call(this, id,
+                            cap == null || cap.length() == 0 ? "home" : cap, args, timeout);
+                    Log.i("HG.Spider", "真源 " + id + "." + cap + " ok "
+                            + (System.currentTimeMillis() - t0) + "ms payload="
+                            + payload.toString().substring(0, Math.min(600, payload.toString().length())));
+                } catch (Throwable e) {
+                    Log.e("HG.Spider", "真源调用失败：" + e);
+                }
+            });
+        }
+    }
+
     @Override
     protected void onDestroy() {
         if (Build.VERSION.SDK_INT >= 33 && this.backRegistered) {
