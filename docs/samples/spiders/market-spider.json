@@ -1,0 +1,46 @@
+{
+  "updated": "2026-10-19",
+  "_note": "spider 源清单。和 market.json 是两份东西：那份是老用户用的 REST 配置源，这份全是 spider 源 —— 内容由 App 内置的 spider 运行时跑 js 提供，不拼任何 /api 路径。装法：设置页贴本文件地址，勾选后逐条装。每条 url 指向一份源配置 json，配置里的 web.spider 直接写着对应的 js 源码地址，App 会把它一起装上。",
+  "sources": [
+    {
+      "name": "樱花动漫",
+      "desc": "spider · 番剧 / 服务端渲染 / 需代理",
+      "url": "https://149.104.21.177.sslip.io/spiders/yhdm.json"
+    },
+    {
+      "name": "AGE动漫",
+      "desc": "spider · 番剧 / 45 个类型词 / 播放要跑站点 wasm 解 age_ 密文",
+      "url": "https://149.104.21.177.sslip.io/spiders/agedm.json"
+    },
+    {
+      "name": "影视线路（苹果CMS）",
+      "desc": "spider · 一个源覆盖几千个苹果CMS 站 / 换站改 web.api",
+      "url": "https://149.104.21.177.sslip.io/spiders/cms.json"
+    },
+    {
+      "name": "Hanime1",
+      "desc": "spider · 里番 / 需代理 / 240 个标签分 7 组",
+      "url": "https://149.104.21.177.sslip.io/spiders/hanime1.json"
+    },
+    {
+      "name": "每日大赛",
+      "desc": "spider · 吃瓜爆料 / 需代理 / 封面是 AES 密文",
+      "url": "https://149.104.21.177.sslip.io/spiders/mrds66.json"
+    },
+    {
+      "name": "91porn",
+      "desc": "spider · KVS / 需代理 / 靠游客标记纠正首页迷魂阵",
+      "url": "https://149.104.21.177.sslip.io/spiders/porn91.json"
+    },
+    {
+      "name": "MissAV",
+      "desc": "spider · 需代理 / 整站 Cloudflare 盾后，由真浏览器内核过盾",
+      "url": "https://149.104.21.177.sslip.io/spiders/missav.json"
+    },
+    {
+      "name": "ASMR基佬中心",
+      "desc": "spider · 音声 / 文件站 / 需代理 / 无海报",
+      "url": "https://149.104.21.177.sslip.io/spiders/openlist.json"
+    }
+  ]
+}
