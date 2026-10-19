@@ -18,6 +18,8 @@ import android.os.Looper;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.util.Log;
+
+import java.io.IOException;
 import android.view.RoundedCorner;
 import android.view.View;
 import android.view.WindowInsets;
@@ -899,9 +901,29 @@ public final class MainActivity extends Activity {
                 return out;
             }
             if ("call".equals(op)) {
-                return SpiderStore.call(this, jSONObject.optString("id"), jSONObject.optString("cap", "home"),
-                        jSONObject.optJSONObject("args") == null ? new JSONObject() : jSONObject.optJSONObject("args"),
-                        jSONObject.optInt("timeoutMs", 15000));
+                final String id = jSONObject.optString("id");
+                final String cap = jSONObject.optString("cap", "home");
+                final JSONObject callArgs = jSONObject.optJSONObject("args") == null
+                        ? new JSONObject() : jSONObject.optJSONObject("args");
+                final int timeoutMs = jSONObject.optInt("timeoutMs", 15000);
+                try {
+                    return SpiderStore.call(this, id, cap, callArgs, timeoutMs);
+                } catch (ShieldSignal e) {
+                    // 盾后站点 :spider 进程的 headless WebView 过不去（挑战要真窗口）。
+                    // 主进程的 SiteFetchWebView 有窗口有 decor，挑战 1~2 秒就过 ——
+                    // 在这里过盾取 HTML，塞进重试请求回填给 spider JS（方案 1 兜底）。
+                    // 只重试一次：再撞盾说明 clearance 也救不了，原样上抛防循环。
+                    Log.w("HG.Spider", "cap=" + cap + " 撞盾（" + e.url + "），主进程过盾后重试");
+                    final String html;
+                    try {
+                        html = SiteFetchWebView.fetchPage(e.url);
+                    } catch (Throwable fetchError) {
+                        throw new IOException("盾后过盾失败（主进程）：" + fetchError.getMessage()
+                                + "；原始失败：" + e.getMessage());
+                    }
+                    callArgs.put("__shieldUrl", e.url).put("__shieldBody", html);
+                    return SpiderStore.call(this, id, cap, callArgs, timeoutMs);
+                }
             }
             throw new IllegalArgumentException("spider 运行时的 op 还不支持：" + op);
         });

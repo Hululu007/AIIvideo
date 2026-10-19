@@ -91,6 +91,20 @@ public class SpiderService extends Service {
                         .put("ok", true)
                         .put("payload", payload)
                         .toString();
+            } catch (ShieldSignal e) {
+                // 盾后站点 headless 过不去（挑战要真窗口，clearance 也没有或失效）。
+                // 应答带上被挡地址，主进程 SpiderClient 抛 ShieldSignal，bridge 命令层
+                // 用有窗口的 SiteFetchWebView 过盾取 HTML 后回填重试（方案 1 兜底）。
+                Log.w(TAG, "远端调用失败（盾后，转主进程过盾）：" + e.getMessage());
+                try {
+                    return new JSONObject()
+                            .put("ok", false)
+                            .put("error", e.getMessage())
+                            .put("shieldUrl", e.url)
+                            .toString();
+                } catch (Throwable ignored) {
+                    return "{\"ok\":false,\"error\":\"盾后站点过盾失败\"}";
+                }
             } catch (Throwable e) {
                 final String message = e.getMessage() != null ? e.getMessage() : e.toString();
                 Log.w(TAG, "远端调用失败：" + message);

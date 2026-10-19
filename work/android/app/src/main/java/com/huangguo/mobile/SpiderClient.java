@@ -99,6 +99,13 @@ final class SpiderClient {
             final String reply = ch.call(req.toString());
             final JSONObject out = new JSONObject(reply);
             if (!out.optBoolean("ok", false)) {
+                // 盾后站点 headless 过不去（有 shieldUrl 标记）→ 抛结构化信号，
+                // bridge 命令层捕获后用主进程有窗口的 SiteFetchWebView 过盾取 HTML，
+                // 回填 __shieldBody 重试一次（方案 1 兜底）。
+                if (out.has("shieldUrl")) {
+                    throw new ShieldSignal(out.optString("shieldUrl", ""),
+                            out.optString("error", "盾后站点过盾失败"));
+                }
                 throw new IOException(out.optString("error", "spider 调用失败"));
             }
             return out.has("payload") ? out.getJSONObject("payload") : new JSONObject();

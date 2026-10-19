@@ -1,16 +1,5 @@
 {
   "origin": "https://huangguoai.com",
-  "hosts": {
-    "_why": "入口域名的三条解析路径都不可信：运营商 DNS 回证书过期的 IP，阿里 DoH 回 0.0.0.0，腾讯 DoH 五个地址里只有一两个偶尔能连。所以把实测能用的写死（2026-10-17 手机实测：103.41.125.230 三次两次成功 1.7~7.5 秒；43.229.39.228 三次两次但要 15 秒）。spider 的 net 走 AiiHttp，读的就是这张表 —— 钉住之后不依赖 DNS，直连也能通。",
-    "huangguoai.com": [
-      "103.41.125.230",
-      "43.229.39.228"
-    ],
-    "cab3f.nt17g20k.cc": [
-      "103.41.125.230",
-      "43.229.39.228"
-    ]
-  },
   "headers": {
     "User-Agent": "Mozilla/5.0 (Linux; Android) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36",
     "Referer": "{origin}/"

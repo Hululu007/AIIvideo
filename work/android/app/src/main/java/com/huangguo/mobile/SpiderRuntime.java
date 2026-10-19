@@ -206,6 +206,13 @@ final class SpiderRuntime {
 
         volatile boolean timedOut;
 
+        /**
+         * 盾后站点 headless 兜底也过不去时，被挡的原始地址（方案 1：过盾外包）。
+         * net 在 bridge 线程上抛 ShieldSignal 时类型信息会被 SpiderBridge 压平成
+         * error 字符串，url 靠这个字段随会话走，call() 收尾时重建信号抛给服务层。
+         */
+        volatile String shieldUrl;
+
         /** 成功时的 payload；失败时留在 {@link #error}。 */
         JSONObject result;
         String error;
@@ -222,6 +229,32 @@ final class SpiderRuntime {
     }
 
     // ── 对外入口 ──────────────────────────────────────────────────────
+
+    /**
+     * 剥掉宿主握手键（{@code __} 开头，如 {@code __shieldBody} / {@code __shieldUrl}）
+     * 后序列化成 argsJson。这些键是主进程和运行时之间的信使，绝不能漏进 spider JS
+     * 的 args —— 源拿到不认识的键只会原样拼进请求，等于把内部协议泄露给站点。
+     */
+    static String sanitizeArgs(JSONObject args) {
+        if (args == null) return "{}";
+        JSONObject out = new JSONObject();
+        Iterator<String> it = args.keys();
+        while (it.hasNext()) {
+            String k = it.next();
+            if (k.startsWith("__")) continue;
+            try {
+                out.put(k, args.opt(k));
+            } catch (Throwable ignored) {
+            }
+        }
+        return out.toString();
+    }
+
+    /** 过盾回填的 url 比对：和本会话记录的被挡地址一致才吃这份正文。 */
+    private static boolean cannedUrl(Session s, String url) {
+        return s != null && s.shieldUrl != null && s.shieldUrl.equals(url);
+    }
+
 
     /**
      * 把一个 spider 源码字符串装进宿主页并调用一次能力。<b>后台线程调用。</b>
@@ -258,7 +291,7 @@ final class SpiderRuntime {
         // 领号要尽早：越早领，前面那次越早知道自己已经过期。
         final long gen = GENERATION.incrementAndGet();
         final Session s = new Session(cap, spiderSource,
-                args == null ? "{}" : args.toString(), budget, gen);
+                sanitizeArgs(args), budget, gen);
         // 当前生效的源配置。取不到就留 null，net 退回全局路由（见 Session.profile）。
         s.ctx = app.getApplicationContext();
         // profile 是 net 走哪条路由的唯一依据。取不到就别硬撑 —— 那就退回老的
@@ -301,7 +334,10 @@ final class SpiderRuntime {
                 s.timedOut = true;
                 fail(s, timeoutMessage(s));
             }
-            if (s.error != null) throw new IOException(s.error);
+            if (s.error != null) {
+                if (s.shieldUrl != null) throw new ShieldSignal(s.shieldUrl, s.error);
+                throw new IOException(s.error);
+            }
             return s.result == null ? new JSONObject() : s.result;
         } finally {
             if (session == s) session = null;
@@ -363,6 +399,19 @@ final class SpiderRuntime {
             // 白名单是「spider 自己声明的 hosts」，不是全局表：一个源能碰哪些域名
             // 应该写在源文件里，用户看得见。
             throw new IOException("net 拒绝：主机不在白名单");
+        }
+
+        // 过盾外包的回填（方案 1）：:spider 撞盾后主进程用有窗口的 WebView 取回
+        // HTML，经重试请求的 __shieldBody/__shieldUrl 塞回来。这里不发任何网络，
+        // 直接当 200 响应交给 spider JS —— 解析照常，全程不触碰渲染线程。
+        // url 必须和被挡的那次一致，防同一会话里别的请求误吃这份正文。
+        final String cannedBody = args.optString("__shieldBody", "");
+        if (cannedBody.length() > 0 && cannedUrl(s, url)) {
+            Log.i(TAG, "op=net 命中过盾回填（" + host + "，" + cannedBody.length() + " 字节），跳过网络");
+            return new JSONObject()
+                    .put("ok", true)
+                    .put("status", 200)
+                    .put("body", cannedBody);
         }
 
         // 打一行路由。spider 这条路最容易出的诊断困境是「App 能取、spider 取不到」，
@@ -481,9 +530,13 @@ final class SpiderRuntime {
                             raw = html.getBytes(java.nio.charset.StandardCharsets.UTF_8);
                         }
                     } catch (Exception e) {
-                        // WebView 也过不去时，把两边的失败一起报出来 —— 只报
-                        // okhttp 那句「HTTP 403」会让人以为是站点挂了。
-                        throw new IOException("net 失败：" + host + " 在 Cloudflare 后面，okhttp 被挡（"
+                        // WebView（headless）也没过去 —— 大概率是挑战要真窗口。
+                        // 方案 1（2026-10-19）：不再当普通错误上抛，改成带 url 的
+                        // 结构化信号。类型信息会被 SpiderBridge 压平，url 挂在
+                        // Session.shieldUrl 上随会话走，call() 收尾重建后交给
+                        // 主进程外包过盾（主进程 WebView 有窗口，挑战能过）。
+                        s.shieldUrl = url;
+                        throw new ShieldSignal(url, "net 失败：" + host + " 在 Cloudflare 后面，okhttp 被挡（"
                                 + (httpFailure == null ? "无响应" : httpFailure.getMessage())
                                 + "），改用真浏览器内核也没过：" + e.getMessage());
                     }
