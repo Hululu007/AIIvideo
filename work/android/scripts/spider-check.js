@@ -105,6 +105,9 @@ const PROFILES = {
   porn91: {
     dir: 'porn91',
     fixtures: {
+      // 列表校正现在打的是 relay 上的 /p91/reconcile（见 porn91.js 里那段
+      // 「为什么校正不在本文件里做」）。夹具返回一份真形状的单条结果。
+      'reconcile.json': /\/p91\/reconcile/,
       'home.html': /\/v\.php(?:$|\?)/,
       'list-hd.html': /cate_id=hd|cate_id=original|category=|viewtype=basic/,
       'list-ori.html': /cate_id=ori/,
@@ -144,6 +147,41 @@ const PROFILES = {
       search: [
         ['搜索页有卡片', r => (r.items || []).length > 0],
       ],
+      // 标签清单（坑 ⑦）：站点没有话题标签，导航栏那排分类链接就是标签栏。
+      // 夹具抓的是英文站（导航文字 91 / Hot / Top this Mon.），而源里名字优先取
+      // 站点原文，所以这里断言的是 **code、条数、形状**，不是某几个中文字 ——
+      // 英文/中文站都该过，钉死「91原创」等于把夹具的语言当成了契约。
+      tags: [
+        ['至少 8 个标签', r => (r.items || []).length >= 8],
+        ['slug 非空', r => (r.items || []).every(one => String(one.slug || '').length > 0)],
+        ['slug 不重复', r => {
+          const slugs = (r.items || []).map(one => String(one.slug));
+          return slugs.length === new Set(slugs).size;
+        }],
+        ['十个分类码都在', r => {
+          const slugs = new Set((r.items || []).map(one => String(one.slug)));
+          return ['ori', 'hot', 'top', 'hd', 'rf', 'tf', 'long', 'longer', 'md', 'mf']
+            .every(code => slugs.has(code));
+        }],
+        ['名字非空、没有 HTML 残留', r => (r.items || []).every(one => {
+          const name = String(one.name || '');
+          return name.length > 0 && name.indexOf('<') < 0 && name.indexOf('&') < 0;
+        })],
+        ['组是 category', r => (r.items || []).every(one => String(one.group) === 'category')],
+      ],
+      // 列表卡校正（坑 ⑧）：只有这一条 id 有详情夹具，其余 id 在离线里必然失败，
+      // 所以断言的是「单条成功就带回、失败不影响别人」这条形状，不是覆盖率。
+      reconcile: [
+        ['给一个 id 就回一条', r => (r.items || []).length === 1],
+        ['id 原样带回', r => String((r.items || [])[0] && r.items[0].id) === '51dc03e8e27a694f2fc7'],
+        ['标题非空', r => String((r.items || [])[0] && r.items[0].title || '').length > 0],
+        ['封面是 https', r => String((r.items || [])[0] && r.items[0].cover || '').startsWith('https://')],
+      ],
+      // 标签的详情页 = 分类页，slug 就是 category code。
+      tagList: [
+        ['标签页有卡片', r => (r.items || []).length > 0],
+        ['卡片 id 非空', r => String((r.items || [])[0] && r.items[0].id || '').length > 0],
+      ],
       // Porn91AdapterTest#playSourceIsNotTheDecoy：
       //   诱饵 358999.mp4 / ccm.91p52.com 必须被排除；签名三件套 st= e= f= 必须都在。
       detail: [
@@ -175,6 +213,86 @@ const PROFILES = {
       search: { ref: '东京', page: 1 },
       detail: { ref: '51dc03e8e27a694f2fc7' },
       play: { ref: '51dc03e8e27a694f2fc7' },
+      // 前端传的是 slug（goTag 的第二跳），不是 ref。这里两种都写一遍没意义，
+      // 就按前端真实形状来 —— 离线回归的意义是复现 App 那条路。
+      tags: {},
+      tagList: { slug: 'ori', page: 1 },
+      reconcile: { ids: ['51dc03e8e27a694f2fc7'] },
+    },
+  },
+
+  // ── 黄果短剧（huangguoai.com，苹果CMS 式私有 JSON 接口）──────────────
+  //
+  // 接口全是 JSON，夹具就是原始响应 —— 这和别家的 HTML 夹具不一样：
+  // 改断言时可以直接看响应里的字段，不用在标签里找。
+  huangguo: {
+    dir: 'huangguo',
+    fixtures: {
+      'home.json': /\/api\/home/,
+      'tags.json': /\/api\/tags/,
+      'search.json': /\/api\/search/,
+      // play 要排在 detail 前面：`/api/videos/7628/play` 也匹配 detail 那条前缀。
+      'play.json': /\/api\/videos\/\d+\/play/,
+      'list.json': /\/api\/videos\?/,
+      'detail.json': /\/api\/videos\/\d+$/,
+    },
+    checks: {
+      // 首页五块摊平后 ≥ 20 条（2026-10-19 实测 featured 4 + latest 8 + cate_rec 4×N）。
+      home: [
+        ['卡片 ≥ 15', r => (r.items || []).length >= 15],
+        ['id 非空', r => String((r.items || [])[0] && r.items[0].id || '').length > 0],
+        ['标题非空', r => String((r.items || [])[0] && r.items[0].title || '').length > 0],
+        ['封面是 https', r => String((r.items || [])[0] && r.items[0].cover || '').startsWith('https://')],
+        ['id 无重复', r => {
+          const ids = (r.items || []).map(one => String(one.id));
+          return ids.length === new Set(ids).size;
+        }],
+      ],
+      // cate_id=24（AI成人短剧），一页 20 条，角标是「N集」。
+      category: [
+        ['一页 20 条', r => (r.items || []).length === 20],
+        ['角标是 N集', r => /^\d+集$/.test(String((r.items || [])[0] && r.items[0].badge || ''))],
+        ['有下一页', r => r.hasMore === true],
+      ],
+      search: [
+        ['搜索有结果', r => (r.items || []).length > 0],
+        ['第一页有下一页', r => r.hasMore === true],
+      ],
+      detail: [
+        ['标题是「时停手表」（夹具里那条）', r => String(r.title || '') === '时停手表'],
+        ['6 集', r => (r.episodes || []).length === 6],
+        ['集 ref 是集号', r => String((r.episodes || [])[0] && r.episodes[0].ref) === '1'],
+        ['简介非空', r => String(r.description || '').length > 0],
+        ['标签是数组', r => Array.isArray(r.tags) && r.tags.length > 0],
+      ],
+      play: [
+        ['是 m3u8 直链', r => /\.m3u8/.test(String(r.url || ''))],
+        ['带 auth_key 签名', r => String(r.url || '').indexOf('auth_key=') >= 0],
+        ['至少一条备选', r => (r.alts || []).length >= 1],
+      ],
+      tags: [
+        ['156 个标签', r => (r.items || []).length === 156],
+        // 配置里声明了 10 个分区，但「吃瓜黑料」那组现在是空的（站点没给标签），
+        // 实际有内容的组是 9 个。空组不渲染，所以这里断言 9。
+        ['9 个有内容的分区', r => new Set((r.items || []).map(t => String(t.group))).size === 9],
+        ['分区都在配置声明的组里', r => (r.items || []).every(t => {
+          const g = String(t.group);
+          return ['djtc', 'jiakong', 'nanpin', 'nvpin', 'djll', 'gyk',
+            'appearance', 'play', 'changjing', 'chigua-heiliao'].indexOf(g) >= 0;
+        })],
+      ],
+      tagList: [
+        ['按标签搜到内容', r => (r.items || []).length > 0],
+      ],
+    },
+    args: {
+      home: {},
+      category: { slug: '24', page: 1 },
+      search: { keyword: '都市', page: 1 },
+      detail: { ref: '7628' },
+      play: { ref: '7628:1' },
+      tags: {},
+      tagList: { slug: '都市', page: 1 },
     },
   },
 
@@ -370,6 +488,28 @@ const PROFILES = {
           r => (r.items || []).every(one => String(one.cover || '').indexOf('/image/icon/') < 0)],
       ],
       // Hanime1AdapterTest#搜索页抠得出至少30张：>= 30
+      // 240 个标签 / 7 个分区。夹具就是分类页（tagpanel.html 与 genre-1.html 同一份），
+      // 面板在模态框里，所以 tags() 打分类页这条路径离线也能覆盖。
+      tags: [
+        ['240 个标签（对齐 Java 版实测的 240）', r => (r.items || []).length === 240],
+        ['7 个分区', r => new Set((r.items || []).map(t => String(t.group))).size === 7],
+        ['分区都在配置声明的组里', r => (r.items || []).every(t =>
+          ['hanime-attr', 'relationship', 'hanime-role', 'style', 'setting', 'plot', 'hanime-act', 'other']
+            .indexOf(String(t.group)) >= 0)],
+        ['無碼归影片属性（繁体分区名要能映射）', r => {
+          const hit = (r.items || []).find(t => String(t.name) === '無碼');
+          return !!hit && String(hit.group) === 'hanime-attr';
+        }],
+        ['slug 不重复', r => {
+          const slugs = (r.items || []).map(t => String(t.slug));
+          return slugs.length === new Set(slugs).size;
+        }],
+      ],
+      // 标签 → 列表：拼 ?genre=…&tags%5B%5D=…（夹具同样命中 genre-1.html）。
+      tagList: [
+        ['有卡片', r => (r.items || []).length > 0],
+        ['卡片 id 非空', r => String((r.items || [])[0] && r.items[0].id || '').length > 0],
+      ],
       search: [
         ['搜索页 ≥ 30（JUnit 搜索页抠得出至少30张）', r => (r.items || []).length >= 30],
       ],
@@ -395,6 +535,9 @@ const PROFILES = {
       search: { ref: 'RD', page: 1 },
       detail: { ref: '408706' },
       play: { ref: '408706' },
+      tags: {},
+      // 前端点标签走的是 slug（标签名本身），和 detail 的 id 不是一回事。
+      tagList: { slug: '巨乳', page: 1 },
     },
   },
 
@@ -433,7 +576,7 @@ const PROFILES = {
 };
 
 /** 能力名的固定顺序：汇总表的列就是它。 */
-const CAPS = ['home', 'category', 'search', 'detail', 'play'];
+const CAPS = ['home', 'category', 'search', 'detail', 'play', 'tags', 'tagList', 'reconcile'];
 
 /** 每个源跑哪些能力：配置了断言的能力 + 配置了入参的能力，取并集，按 CAPS 排序。 */
 function capsFor(profile) {
@@ -544,6 +687,17 @@ function makeCtx(resolver, logs) {
         // 不会因为离线缺 cookie 而在某一步 differ。
         if (Array.isArray(a.keep) && a.keep.length) out.cookies = {};
         return out;
+      }
+      if (op === 'netAll') {
+        // 离线沙箱没有线程池，串行跑完再按顺序返回 —— 形状必须和真机一致
+        // （results 与 requests 一一对应），否则源里那套「按索引映射回 id」
+        // 在真机上会错位，而离线是绿的。
+        const list = Array.isArray(a.requests) ? a.requests : [];
+        const results = [];
+        for (const one of list) {
+          results.push(await ctx.call('net', one || {}));
+        }
+        return { ok: true, results: results };
       }
       if (op === 'log') {
         if (a.msg) logs.push(String(a.msg));

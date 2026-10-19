@@ -112,6 +112,11 @@ final class XrayConfig {
      * @param port 本地 SOCKS5 端口，由 ProxyCore 选好传进来
      */
     static JSONObject build(Node node, int port) throws JSONException {
+        return build(node, port, NetRoute.declaredProxyHosts());
+    }
+
+    /** 同 {@link #build(Node, int)}，但显式指定源声明的代理域（测速配置传空表）。 */
+    static JSONObject build(Node node, int port, java.util.List<String> declaredProxyHosts) throws JSONException {
         if (node == null) throw new IllegalArgumentException("节点为空");
         if (empty(node.server)) throw new IllegalArgumentException("节点缺服务端地址");
         if (port <= 0 || port > 65535) throw new IllegalArgumentException("本地端口超出范围：" + port);
@@ -124,14 +129,18 @@ final class XrayConfig {
         root.put("outbounds", new JSONArray().put(outbound(node)).put(direct()).put(block()));
         // api 只对「进程内自己查」有用，不监听端口 —— 见 api()。
         root.put("api", api());
-        root.put("routing", routing());
+        root.put("routing", routing(declaredProxyHosts));
         return root;
     }
 
     /** 便捷入口：直接拿字符串喂 startLoop。 */
     static String buildString(Node node, int port) {
+        return buildString(node, port, NetRoute.declaredProxyHosts());
+    }
+
+    static String buildString(Node node, int port, java.util.List<String> declaredProxyHosts) {
         try {
-            return build(node, port).toString();
+            return build(node, port, declaredProxyHosts).toString();
         } catch (JSONException e) {
             // build() 里只有 put 会抛，而键都是常量 —— 到不了这儿。
             throw new IllegalStateException("配置序列化失败", e);
@@ -359,22 +368,58 @@ final class XrayConfig {
                         .put("statsOutboundDownlink", true));
     }
 
-    private static JSONObject routing() throws JSONException {
-        // 分流：DirectHosts 里的域名（AGE动漫/黄果 这些直连可用的源）从本地
-        // SOCKS 进来后直接 freedom 出站，不进代理节点 —— 源不背节点的抖动。
-        // Xray 的 domain: 规则自带子域匹配语义（domain:x.com 命中 x.com 和 *.x.com）。
-        JSONArray domains = new JSONArray();
-        for (String rule : DirectHosts.domainRules()) domains.put(rule);
+    private static JSONObject routing(java.util.List<String> declaredProxyHosts) throws JSONException {
+        // 分流规则，命中即裁决（先命中先用）：
+        //
+        //   ① api 入站 → direct。核心自己查统计的流量不绕代理。
+        //   ② 当前源声明的 net.proxy 域 → proxy。作者显式声明压过 geo 判断 ——
+        //      作者最懂自己的入口域是不是被墙（被墙域常挂国内 CDN，geosite:cn
+        //      会把它误判成直连，所以必须放在 ③ 前面）。
+        //   ③ geosite:cn → direct。境内域名/CDN 全直连，这条是本方案的主角：
+        //      geosite.dat 由 libv2ray.aar 的 assets 自带（11MB），核心经
+        //      AAssetManager 直接读 APK，零额外工作。
+        //   ④ DirectHosts 手填白名单 → direct。老源（AGE动漫/91porn）的语义
+        //      在 OkHttp 侧还依赖它，核心侧留着等价规则，等路由学习（方案 A）
+        //      落地后连同 DirectHosts 一起退役。
+        //   ⑤ 兜底 → proxy。冷门被墙域 geosite 不认识，靠这条而不是靠维护表。
+        //      Xray 里「第一条 outbound 是默认出站」，这里再写一条显式规则，
+        //      读配置的人不用知道那个隐含约定。
+        //
+        // domainStrategy 保持 AsIs：只用域名规则，不做「域名不中再解析 IP 查
+        // geoip」—— 那要给核心配 DNS（IPIfNonMatch 才有意义），阶段 2 再说。
         JSONArray rules = new JSONArray()
-                // api 自己的流量必须直连，否则查统计会绕一圈走代理。
                 .put(new JSONObject()
                         .put("type", "field")
                         .put("inboundTag", new JSONArray().put("api"))
-                        .put("outboundTag", TAG_DIRECT))
-                .put(new JSONObject()
-                        .put("type", "field")
-                        .put("domain", domains)
                         .put("outboundTag", TAG_DIRECT));
+        if (declaredProxyHosts != null && !declaredProxyHosts.isEmpty()) {
+            JSONArray declared = new JSONArray();
+            for (String host : declaredProxyHosts) {
+                if (host != null && host.length() > 0) declared.put("domain:" + host.trim().toLowerCase(Locale.ROOT));
+            }
+            if (declared.length() > 0) {
+                rules.put(new JSONObject()
+                        .put("type", "field")
+                        .put("domain", declared)
+                        .put("outboundTag", TAG_OUT));
+            }
+        }
+        rules.put(new JSONObject()
+                .put("type", "field")
+                .put("domain", new JSONArray().put("geosite:cn"))
+                .put("outboundTag", TAG_DIRECT));
+        JSONArray domains = new JSONArray();
+        for (String rule : DirectHosts.domainRules()) domains.put(rule);
+        if (domains.length() > 0) {
+            rules.put(new JSONObject()
+                    .put("type", "field")
+                    .put("domain", domains)
+                    .put("outboundTag", TAG_DIRECT));
+        }
+        rules.put(new JSONObject()
+                .put("type", "field")
+                .put("network", "tcp,udp")
+                .put("outboundTag", TAG_OUT));
         return new JSONObject().put("domainStrategy", "AsIs").put("rules", rules);
     }
 

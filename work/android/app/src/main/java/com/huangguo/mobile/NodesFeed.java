@@ -167,7 +167,7 @@ final class NodesFeed {
     static String assetText(Context context) {
         try {
             InputStream in = context.getAssets().open(Subscription.BUILTIN_ASSET);
-            return new String(HotUpdateManager.read(in, MAX_BYTES), StandardCharsets.UTF_8);
+            return new String(Assets.read(in, MAX_BYTES), StandardCharsets.UTF_8);
         } catch (Throwable e) {
             return "";
         }

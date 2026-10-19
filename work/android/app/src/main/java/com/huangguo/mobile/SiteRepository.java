@@ -70,7 +70,7 @@ final class SiteRepository {
     }
 
     SiteRepository(Context context) {
-        this(context, HotUpdateManager.get(context).currentSite());
+        this(context, SiteProfile.current(context));
     }
 
     SiteRepository(Context context, SiteProfile siteProfile) {

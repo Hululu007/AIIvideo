@@ -473,6 +473,31 @@
       return { items: items, page: page, hasMore: page < pages };
     },
 
+    /**
+     * 「全部类型」页的分类。
+     *
+     * 苹果CMS 的分类不在配置里（一个源覆盖几千个站，每个站的 class 都不一样），
+     * 而是接口自己回的 `class[]`。所以这个能力每次真请求一次接口拿平表，
+     * 摊成叶子交出去 —— 形状和 home() 里那份 categories 同源，只是这里给的是
+     * 前端标签页直接吃的 {name, slug, group}。
+     *
+     * 父类不给：实测父类查不出内容（点进去是空的），列出来只会让人点了个寂寞。
+     */
+    async tags(ctx, args) {
+      var api = apiOf(args);
+      var raw = await call(ctx, api, 'ac=detail&pg=1');
+      var leaves = categoriesPayload(classTree(raw['class']));
+      if (leaves.length === 0) {
+        throw new Error('CMS 接口没给出 class[]（' + api + '）。'
+          + '可能：这个地址不是苹果CMS 的采集接口，或者对方把分类清空了。');
+      }
+      var out = [];
+      for (var i = 0; i < leaves.length; i++) {
+        out.push({ name: leaves[i].name, slug: leaves[i].slug, group: 'cms' });
+      }
+      return { items: out };
+    },
+
     async search(ctx, args) {
       args = args || {};
       var api = apiOf(args);

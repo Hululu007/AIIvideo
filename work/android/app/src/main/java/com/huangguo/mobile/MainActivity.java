@@ -59,8 +59,8 @@ import org.videolan.libvlc.MediaDiscoverer;
  * 一个撑满的 WebView 加载 assets/app.html，页面本身是纯粹的 HTML/CSS/JS。
  * 原生侧只做四件 WebView 做不到的事：
  *   1. 资源供给   通过 WebViewAssetLoader 把 assets/ 挂到
- *                 https://appassets.androidplatform.net/assets/，顺便由
- *                 HotUpdateManager.resource() 叠加热更层的文件
+ *                 https://appassets.androidplatform.net/assets/
+ *                 （热更层 2026-10-19 已整块拆除，界面只有 APK 里这一份）
  *   2. 桥接指令   @JavascriptInterface 的 Bridge，前端调 AndroidHost.request()
  *   3. 外观       状态栏/导航栏配色、边到边、返回手势
  *   4. 系统能力   选头像、装 APK、拉起播放器、通知
@@ -89,12 +89,9 @@ public final class MainActivity extends Activity {
     private int backViewLeft;
     private int backViewWidth;
     private boolean detailSystemBars;
-    private HotUpdateManager.Session hotSession;
-    private HotUpdateManager hotUpdates;
     private boolean migratingOrigin;
     private File pendingUpdateApk;
     private DualContentRepository repository;
-    private boolean resourceReady;
     private FrameLayout root;
     private volatile float statusBarInsetDp;
     private AppStore store;
@@ -104,14 +101,28 @@ public final class MainActivity extends Activity {
     private final ExecutorService localRequests = Executors.newSingleThreadExecutor();
     private final ExecutorService coverRequests = Executors.newFixedThreadPool(2);
     private final Handler hotHandler = new Handler(Looper.getMainLooper());
-    private final Runnable resourceTimeout = new Runnable() {
-        @Override
-        public final void run() {
-            MainActivity.this.lambda$new$0();
-        }
-    };
     private float pendingBackProgress = -1.0f;
     private final Map<String, Command> commands = new HashMap<>();
+
+    /**
+     * 只放行「我们自己的 assets 域」。
+     *
+     * <p>从 HotUpdateManager 搬过来的，逻辑没变：WebView 只该在
+     * {@code https://appassets.androidplatform.net/assets/} 底下导航，
+     * 任何别的主机（含 userInfo、非 443 端口、非 /assets/ 路径）都要拦住。
+     * 热更层拆掉之后这条判断仍然需要 —— 它挡的是外部导航，不是热更包。
+     */
+    static boolean trusted(Uri uri) {
+        if (uri == null) return false;
+        if ("https".equals(uri.getScheme())
+                && WebViewAssetLoader.DEFAULT_DOMAIN.equals(uri.getHost())
+                && uri.getUserInfo() == null) {
+            return (uri.getPort() == -1 || uri.getPort() == 443)
+                    && uri.getPath() != null
+                    && uri.getPath().startsWith("/assets/");
+        }
+        return false;
+    }
 
     public void restart() {
         recreate();
@@ -126,19 +137,20 @@ public final class MainActivity extends Activity {
         super.onCreate(bundle);
         registerCommands();
         host = this;
-        ContentMode.get(this).startPublic();
-        HotUpdateManager hotUpdateManager = HotUpdateManager.get(this);
-        this.hotUpdates = hotUpdateManager;
-        this.hotSession = hotUpdateManager.beginSession();
-        this.repository = new DualContentRepository(this, ContentMode.get(this).active(), this.hotSession.site);
+        // 站点配置只有两个来源：APK 里的 site-default.json 打底，用户自己配的
+        // user-source.json 覆盖上去。热更层那条「拿包里的 site.json 顶掉内置」的
+        // 路已经整块拆掉了（2026-10-19）—— 它带来的问题是越级覆盖：装一版带新界面
+        // 的 APK 之后，设备上跑的还是旧热更包里的前端，而版本号完全看不出来。
+        SiteProfile site = SiteProfile.current(this);
+        this.repository = new DualContentRepository(this, site);
         this.store = new AppStore(this);
         SharedPreferences sharedPreferences = getSharedPreferences("hot-updates", 0);
         String objectId = "";
         String string = sharedPreferences.getString("siteFingerprint", "");
-        if (!string.isEmpty() && !string.equals(this.hotSession.site.fingerprint)) {
+        if (!string.isEmpty() && !string.equals(site.fingerprint)) {
             this.store.clearCache();
         }
-        sharedPreferences.edit().putString("siteFingerprint", this.hotSession.site.fingerprint).apply();
+        sharedPreferences.edit().putString("siteFingerprint", site.fingerprint).apply();
         this.migratingOrigin = !sharedPreferences.getBoolean("originMigrated", false);
         this.account = new AccountService(this, this.store);
         try {
@@ -182,16 +194,11 @@ public final class MainActivity extends Activity {
         this.webView.getSettings().setAllowFileAccessFromFileURLs(false);
         this.webView.getSettings().setAllowUniversalAccessFromFileURLs(false);
         this.webView.getSettings().setMediaPlaybackRequiresUserGesture(false);
-        this.webView.setWebViewClient(new AnonymousClass1(this, new WebViewAssetLoader.Builder().addPathHandler("/assets/", new WebViewAssetLoader.PathHandler() {
-            @Override
-            public final WebResourceResponse handle(String str) {
-                return MainActivity.this.lambda$onCreate$1(str);
-            }
-        }).build()));
+        this.webView.setWebViewClient(new AnonymousClass1(this, new WebViewAssetLoader.Builder().addPathHandler("/assets/",
+                new WebViewAssetLoader.AssetsPathHandler(this)).build()));
         this.webView.setWebChromeClient(new AnonymousClass2());
         this.webView.addJavascriptInterface(new Bridge(), "AndroidHost");
         this.webView.loadUrl(this.migratingOrigin ? "file:///android_asset/app.html" : "https://appassets.androidplatform.net/assets/app.html");
-        checkHotUpdates();
         // 命令行自检入口（阶段 0 专用，没有界面入口）：
         //   adb shell am start -n com.huangguo.mobile/.MainActivity --es spider_demo 1
         // 它只把「宿主页 + bridge + 超时 + 回收」这条链在真机上跑一遍。
@@ -254,13 +261,8 @@ public final class MainActivity extends Activity {
 
         @Override
         public void onPageStarted(WebView webView, String str, Bitmap bitmap) {
-            if (HotUpdateManager.trusted(Uri.parse(str))) {
-                this.this$0.resourceReady = false;
-                this.this$0.hotHandler.removeCallbacks(this.this$0.resourceTimeout);
-                if (this.this$0.hotSession.trial) {
-                    this.this$0.hotHandler.postDelayed(this.this$0.resourceTimeout, 15000L);
-                }
-            }
+            // 页面开始加载。热更 trial 的超时回退随热更层一起删掉了 ——
+            // 现在界面只有 assets 这一个来源，加载不出来就是 APK 本身的问题。
         }
 
         @Override
@@ -292,40 +294,17 @@ public final class MainActivity extends Activity {
 
         @Override
         public boolean shouldOverrideUrlLoading(WebView webView, WebResourceRequest webResourceRequest) {
-            return !HotUpdateManager.trusted(webResourceRequest.getUrl());
-        }
-
-        @Override
-        public void onReceivedError(WebView webView, WebResourceRequest webResourceRequest, WebResourceError webResourceError) {
-            if (webResourceRequest.isForMainFrame() && this.this$0.hotSession.trial) {
-                this.this$0.lambda$new$0();
-            }
-        }
-
-        @Override
-        public void onReceivedHttpError(WebView webView, WebResourceRequest webResourceRequest, WebResourceResponse webResourceResponse) {
-            if (webResourceRequest.isForMainFrame() && this.this$0.hotSession.trial && webResourceResponse.getStatusCode() >= 400) {
-                this.this$0.lambda$new$0();
-            }
+            return !trusted(webResourceRequest.getUrl());
         }
 
         @Override
         public boolean onRenderProcessGone(WebView webView, RenderProcessGoneDetail renderProcessGoneDetail) {
-            try {
-                this.this$0.hotUpdates.rollback(this.this$0.hotSession);
-            } catch (Exception e) {
-                Log.w(MainActivity.TAG, "资源回退失败", e);
-            }
             this.this$0.root.removeView(webView);
             webView.destroy();
             this.this$0.webView = null;
             this.this$0.recreate();
             return true;
         }
-    }
-
-    public WebResourceResponse lambda$onCreate$1(String str) {
-        return this.hotUpdates.resource(this.hotSession, str);
     }
 
     class AnonymousClass2 extends WebChromeClient {
@@ -358,75 +337,6 @@ public final class MainActivity extends Activity {
             }).show();
             return true;
         }
-    }
-
-    private void checkHotUpdates() {
-        this.requests.execute(new Runnable() {
-            @Override
-            public final void run() {
-                MainActivity.this.lambda$checkHotUpdates$0();
-            }
-        });
-    }
-
-    public void lambda$checkHotUpdates$0() {
-        try {
-            final JSONObject jSONObjectCheck = this.hotUpdates.check(false);
-            runOnUiThread(new Runnable() {
-                @Override
-                public final void run() {
-                    MainActivity.this.lambda$checkHotUpdates$1(jSONObjectCheck);
-                }
-            });
-        } catch (Exception e) {
-            Log.d(TAG, "资源更新暂不可用，继续使用本地版本", e);
-        }
-    }
-
-    public void lambda$checkHotUpdates$1(JSONObject jSONObject) {
-        WebView webView;
-        if (isDestroyed() || (webView = this.webView) == null) {
-            return;
-        }
-        webView.evaluateJavascript("window.hgHotUpdateStatus && window.hgHotUpdateStatus(" + jSONObject + ")", null);
-    }
-
-    public void lambda$new$0() {
-        HotUpdateManager.Session session;
-        if (this.resourceReady || (session = this.hotSession) == null || !session.trial || isDestroyed()) {
-            return;
-        }
-        this.hotHandler.removeCallbacks(this.resourceTimeout);
-        try {
-            this.hotUpdates.rollback(this.hotSession);
-            this.hotSession = this.hotUpdates.beginSession();
-            this.repository = new DualContentRepository(this, ContentMode.get(this).active(), this.hotSession.site);
-            this.store.clearCache();
-            getSharedPreferences("hot-updates", 0).edit().putString("siteFingerprint", this.hotSession.site.fingerprint).apply();
-            this.webView.loadUrl("https://appassets.androidplatform.net/assets/app.html");
-            Log.w(TAG, "资源包启动异常，已回退至可用版本");
-        } catch (Exception e) {
-            Log.e(TAG, "资源回退失败", e);
-        }
-    }
-
-    public void applyPendingResources() {
-        if (!this.hotUpdates.hasPending() || this.webView == null || isDestroyed()) {
-            return;
-        }
-        this.webView.evaluateJavascript("window.hgCanApplyHotUpdate ? window.hgCanApplyHotUpdate() : false", new ValueCallback() {
-            @Override
-            public final void onReceiveValue(Object obj) {
-                MainActivity.this.lambda$applyPendingResources$0((String) obj);
-            }
-        });
-    }
-
-    public void lambda$applyPendingResources$0(String str) {
-        if (!"true".equals(str) || isDestroyed()) {
-            return;
-        }
-        recreate();
     }
 
     private boolean dark() {
@@ -500,10 +410,6 @@ public final class MainActivity extends Activity {
         WebView webView2 = this.webView;
         if (webView2 != null) {
             webView2.evaluateJavascript("window.hgResume && window.hgResume()", null);
-        }
-        if (this.hotUpdates != null && !this.migratingOrigin) {
-            applyPendingResources();
-            checkHotUpdates();
         }
         if (this.account != null && ParseUser.getCurrentUser() != null) {
             this.requests.execute(new Runnable() {
@@ -805,9 +711,10 @@ public final class MainActivity extends Activity {
         // 站点侧那个隐藏 WebView（见 SiteFetchWebView）。它挂在 decor 上，
         // 不销毁的话渲染进程会一直留着，定时器和视频缓冲都不退。
         SiteFetchWebView.shutdown();
-        // spider 宿主页同理：留着渲染进程的话，页面里的定时器和 spider 的
-        // 半截 Promise 都不会退。
-        SpiderRuntime.shutdown();
+        // spider 宿主同理：留着渲染进程的话，页面里的定时器和 spider 的
+        // 半截 Promise 都不会退。宿主在 :spider 进程里（SpiderService），
+        // 这里解绑 + 停服务，进程随之回收。
+        SpiderClient.shutdown();
         WebView webView = this.webView;
         if (webView != null) {
             webView.removeJavascriptInterface("AndroidHost");
@@ -819,41 +726,19 @@ public final class MainActivity extends Activity {
         super.onDestroy();
     }
 
-    private synchronized void rebindContent() throws Exception {
-        String strActive = ContentMode.get(this).active();
-        this.repository = new DualContentRepository(this, strActive, this.hotSession.site);
-        this.store = new AppStore(this, strActive);
-        this.account = new AccountService(this, this.store);
-        ParseUser currentUser = ParseUser.getCurrentUser();
-        this.store.activateUser(currentUser == null ? "" : currentUser.getObjectId());
-    }
 
     public Object dispatch(String str, JSONObject jSONObject) throws Exception {
-        ContentMode contentMode = ContentMode.get(this);
+        // 内容状态：双态（公开 / 私密）2026-10-19 整块拆掉了。
+        //
+        // 那个「私密库」是个内置源，而它早就没有接口（site-default.json 的 origin
+        // 是空串）—— 剩下的只有一套解锁流程和一份界面默认值，却把用户装的每个
+        // spider 源都判成了「私密模式」。命令留着是因为老前端还会问一句，
+        // 应答固定成公开态，不让它启动时卡在解锁上。
         if ("content-status".equals(str)) {
-            return contentMode.status();
-        }
-        if ("enter-private".equals(str)) {
-            JSONObject jSONObjectEnterPrivate = contentMode.enterPrivate(jSONObject.optString("password"));
-            if ("huangguo".equals(contentMode.active())) {
-                rebindContent();
-            }
-            return jSONObjectEnterPrivate;
-        }
-        if ("confirm-private-age".equals(str)) {
-            JSONObject jSONObjectFinishPrivateEntry = contentMode.finishPrivateEntry();
-            rebindContent();
-            return jSONObjectFinishPrivateEntry;
-        }
-        if ("leave-private".equals(str)) {
-            contentMode.startPublic();
-            rebindContent();
-            return contentMode.status();
-        }
-        synchronized (this) {
-            if (jSONObject.has("source")) {
-                contentMode.require(jSONObject.getString("source"));
-            }
+            return new JSONObject()
+                    .put("source", "hongguo")
+                    .put("unlocked", true)
+                    .put("needsAgeConfirmation", false);
         }
         Command command = this.commands.get(str);
         if (command == null) {
@@ -895,21 +780,11 @@ public final class MainActivity extends Activity {
      */
     private void registerCommands() {
         this.commands.put("app-version", jSONObject -> getPackageManager().getPackageInfo(getPackageName(), 0).versionName);
-        this.commands.put("hot-ready", jSONObject -> {
-            if (!this.migratingOrigin && jSONObject.optLong("revision", -1L) == this.hotSession.revision && this.hotSession.bootId.equals(jSONObject.optString("bootId"))) {
-                this.hotUpdates.markHealthy(this.hotSession);
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public final void run() {
-                        MainActivity.this.onHotRuntimeReady();
-                    }
-                });
-            }
-            return true;
-        });
+        // 热更已经停用（2026-10-19）。这条命令留着只为「老前端还发得出来时不至于抛异常」，
+        // 直接应答即可 —— 前端那边整块 UI 也一起删了。
+        this.commands.put("hot-ready", jSONObject -> true);
         this.commands.put("open-player", jSONObject -> {
-            ContentMode contentMode = ContentMode.get(this);
-            jSONObject.put("source", contentMode.active());
+            jSONObject.put("source", "hongguo");
             return true;
         });
         this.commands.put("cached", jSONObject -> services().store.cached(jSONObject.optString("key")));
@@ -945,15 +820,7 @@ public final class MainActivity extends Activity {
                 control(UserSource.HTTP_PREFIX, jSONObject));
         this.commands.put("check-update", jSONObject -> this.updates.check(jSONObject.optBoolean("manual")));
         this.commands.put("account", jSONObject -> services().account.profile());
-        this.commands.put("apply-hot-update", jSONObject -> {
-            runOnUiThread(new Runnable() {
-                @Override
-                public final void run() {
-                    MainActivity.this.applyPendingResources();
-                }
-            });
-            return true;
-        });
+        this.commands.put("apply-hot-update", jSONObject -> true);
         this.commands.put("logout", jSONObject -> {
             Services s = services();
             s.account.logout();
@@ -1048,11 +915,6 @@ public final class MainActivity extends Activity {
         });
         this.commands.put("window-insets", jSONObject -> Float.valueOf(this.statusBarInsetDp));
         this.commands.put("library", jSONObject -> services().store.library());
-        this.commands.put("confirm-age", jSONObject -> {
-            ContentMode contentMode = ContentMode.get(this);
-            contentMode.confirmAdult();
-            return true;
-        });
         this.commands.put("clear-content-cache", jSONObject -> {
             Services s = services();
             s.store.clearCache();
@@ -1060,7 +922,7 @@ public final class MainActivity extends Activity {
             return true;
         });
         this.commands.put("cached-update", jSONObject -> this.updates.cached());
-        this.commands.put("check-hot-update", jSONObject -> this.hotUpdates.check(true));
+        this.commands.put("check-hot-update", jSONObject -> new JSONObject().put("enabled", false));
         this.commands.put("clear-history", jSONObject -> {
             final Services s = services();
             s.store.clearHistory();
@@ -1078,12 +940,8 @@ public final class MainActivity extends Activity {
             }
             return true;
         });
-        this.commands.put("age-status", jSONObject -> {
-            ContentMode contentMode = ContentMode.get(this);
-            return Boolean.valueOf("hongguo".equals(contentMode.active()) || contentMode.adultConfirmed());
-        });
         this.commands.put("bookmark-state", jSONObject -> Boolean.valueOf(services().store.hasBookmark(jSONObject.optString(Text.ATTR_ID))));
-        this.commands.put("hot-update-status", jSONObject -> this.hotUpdates.status().put("enabled", true));
+        this.commands.put("hot-update-status", jSONObject -> new JSONObject().put("enabled", false));
         this.commands.put("get-progress", jSONObject -> services().store.getProgress(jSONObject.optString(Text.ATTR_ID), jSONObject.optInt("episode", 1)));
         this.commands.put("choose-avatar", jSONObject -> {
             if (ParseUser.getCurrentUser() == null) {
@@ -1126,11 +984,6 @@ public final class MainActivity extends Activity {
         Services s = services();
         String command = prefix + (args == null ? "" : args.optString(Text.ATTR_ID));
         return UserSource.handle(this, s.repository.profileForControl(), command);
-    }
-
-    public void onHotRuntimeReady() {
-        this.resourceReady = true;
-        this.hotHandler.removeCallbacks(this.resourceTimeout);
     }
 
     public void pickAvatar() {
@@ -1265,10 +1118,29 @@ public final class MainActivity extends Activity {
             }
         }
 
+        /**
+         * 按指令挑线程池。
+         *
+         * <p>三档，分的依据是「这条指令会不会被别人的慢请求拖住」：
+         *
+         * <ul>
+         *   <li>{@link #localRequests}（单线程）：纯本地读写 —— 缓存、观看记录、
+         *       收藏状态。它们不联网，几十毫秒就回来，但**用户按下去就在等**。</li>
+         *   <li>{@link #coverRequests}（2 线程）：封面解密。一屏二十张是常态，
+         *       混进通用池会把别的请求挤到队尾。</li>
+         *   <li>{@link #requests}（4 线程）：其余全部，内容动作都在这里。</li>
+         * </ul>
+         *
+         * <p>{@code library} 原来走通用池。spider 化之后一个内容动作要 2~5 秒
+         * （建页 + 网络 + 解析），而 {@code SpiderRuntime} 内部还是全局串行的，
+         * 于是四五个内容请求一起发出去时，池子里会有线程卡在等锁上；用户这时点
+         * 「我的」，一条纯本地请求排在它们后面 —— 表现就是「点我的卡几秒」。
+         * 本地指令落到单线程池就不会再被内容流量连坐。
+         */
         @JavascriptInterface
         public void request(final String str, final String str2, final String str3) {
             ExecutorService executorService;
-            if ("cached".equals(str2)) {
+            if (isLocalCommand(str2)) {
                 executorService = MainActivity.this.localRequests;
             } else {
                 boolean zEquals = "cover".equals(str2);
@@ -1281,6 +1153,30 @@ public final class MainActivity extends Activity {
                     Bridge.this.requestDone(str3, str2, str);
                 }
             });
+        }
+
+        /**
+         * 不联网、只读本机状态的指令。
+         *
+         * <p>漏一个进去不会错，只会慢；多一个进来会占住单线程池，所以宁可少列 ——
+         * 只收「用户点一下立刻要看结果」的那几个。
+         */
+        private boolean isLocalCommand(String command) {
+            if (command == null) return false;
+            switch (command) {
+                case "cached":
+                case "library":
+                case "bookmark-state":
+                case "get-progress":
+                case "window-insets":
+                case "app-version":
+                case "age-status":
+                case "cached-update":
+                case "hot-update-status":
+                    return true;
+                default:
+                    return false;
+            }
         }
 
         /*

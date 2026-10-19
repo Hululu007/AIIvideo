@@ -51,9 +51,23 @@ async function loadMarket(force = false) {
 }
 
 // 加源并在成功后重启（换源必须重建 Activity，理由见 restartAfterSource）。
+//
+// ⚠ 必须走 HGSetup.addOneSource，不能直接用 `source set`。
+//
+// 爬虫脚本是**刻意不打包进 APK 的**（SpiderStore 只扫 files/spiders/，不读 assets），
+// 所以「装配置」和「装脚本」是必须成对发生的两件事。裸 source set 只做前者，
+// 结果是配置生效了、spider 文件却不在于磁盘上 —— 之后每一次内容请求都报
+// 「找不到 spider: xxx」，用户看到的是一个装好了却什么都打不开的源。
 async function addSourceFromMarket(url) {
-  const result = await sourceCommand('set?url=' + encodeURIComponent(url));
-  if (!result || !result.ok) throw new Error((result && result.error) || '设置失败');
+  if (window.HGSetup && typeof window.HGSetup.addOneSource === 'function') {
+    const one = await window.HGSetup.addOneSource(url);
+    if (!one || one.ok === false) throw new Error((one && one.error) || '设置失败');
+    // 装的是「只有配置、脚本还没跟上」的源：把话说明白，别让人点进去撞空。
+    if (one.needsConfig) throw new Error('这个地址是爬虫脚本，还需要一份对应的源配置');
+  } else {
+    const result = await sourceCommand('set?url=' + encodeURIComponent(url));
+    if (!result || !result.ok) throw new Error((result && result.error) || '设置失败');
+  }
   toast('已切换到这个源，正在重启…');
   restartAfterSource(() => { try { location.reload(); } catch (error) {} });
 }

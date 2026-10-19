@@ -27,8 +27,34 @@ final class SiteProfile {
      * 的 Context，而这份逻辑最该被守住。
      */
     SiteProfile(Context context, JSONObject jSONObject) throws Exception {
-        this(new JSONObject(new String(HotUpdateManager.read(context.getAssets().open("site-default.json"), 131072), StandardCharsets.UTF_8)),
+        this(new JSONObject(new String(Assets.read(context.getAssets().open("site-default.json"), 131072), StandardCharsets.UTF_8)),
                 SourceConfig.has(context) ? SourceConfig.read(context) : jSONObject);
+    }
+
+    /**
+     * 当前生效配置，**不抛**。
+     *
+     * <p>用户配置是一个可以直接编辑、也会被装源流程写坏的文件。它坏了的时候，
+     * 正确行为是退回内置模板让应用能启动，而不是在 {@code onCreate} 里抛 ——
+     * 那表现就是「点开图标闪一下就没了」，用户连设置页都进不去，也就没法自己修。
+     *
+     * <p>热更层拆掉之后这里是唯一的取配置入口（原来绕一圈走
+     * {@code HotUpdateManager.currentSite()}）。
+     */
+    static SiteProfile current(Context context) {
+        try {
+            return new SiteProfile(context, null);
+        } catch (Throwable broken) {
+            UserSource.log("站点配置读不出来，退回内置模板：" + broken);
+            try {
+                return new SiteProfile(
+                        new JSONObject(new String(Assets.read(
+                                context.getAssets().open("site-default.json"), 131072), StandardCharsets.UTF_8)),
+                        new JSONObject());
+            } catch (Throwable fatal) {
+                throw new IllegalStateException("内置站点模板读不出来", fatal);
+            }
+        }
     }
 
     /**

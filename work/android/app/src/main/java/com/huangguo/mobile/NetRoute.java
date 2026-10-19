@@ -50,6 +50,18 @@ final class NetRoute {
     /** 当前源是否声明了 net 块。声明了就不再参考全局开关与 DirectHosts。 */
     private static volatile boolean declared = false;
 
+    /**
+     * 当前源声明的代理域名表（未声明返回空表）。给 {@link XrayConfig#routing} 用：
+     * 核心侧的 routing 规则要把这些域放到 proxy 出站，且优先级压过 geosite:cn。
+     *
+     * <p>为什么从静态表抄而不走参数：SiteProfile 构造时 {@link #configure} 已经装好
+     * 了这张表（全 App 唯一的组装点），核心启动时读一次即可，不值得为它把 build()
+     * 的签名一路改穿 ProxyConsole。
+     */
+    static List<String> declaredProxyHosts() {
+        return new ArrayList<String>(PROXY_HOSTS);
+    }
+
     private NetRoute() {}
 
     /**
@@ -102,6 +114,15 @@ final class NetRoute {
 
     /** 当前源有没有声明路由。没声明时调用方退回老规则。 */
     static boolean declared() {
+        return declared;
+    }
+
+    /**
+     * 同 {@link #declared()}，给 {@link AiiHttp} 的路由自愈（方案 A）用：
+     * 声明了 net 块的源，{@code mustProxy=false} 的域就是作者要的直连——
+     * 那是显式决定，连接层失败也不该被路由记忆改写。
+     */
+    static boolean isDeclared() {
         return declared;
     }
 

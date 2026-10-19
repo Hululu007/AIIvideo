@@ -35,6 +35,17 @@
 //    渲染路径。带上 `Cookie: ga=<任意值>` 之后 poster/mp4 才和列表卡片对上。
 //    所以第一次请求就要 keep:['ga'] 把站点的标记捡回来，之后每次带上。
 //
+// ⑦ **「这个站没有标签体系」是旧结论，错的。** 它没有话题标签，但顶部那排
+//    导航链接（`/v.php?category=ori|hot|top|hd|rf|tf|long|longer|md|mf`）就是
+//    它的标签栏 —— 一个分类就是一个标签。于是 tags() 从导航里抠，
+//    tag-list 复用 category（slug 就是 category code），两件事都不需要新的
+//    解析逻辑；导航抓不到时退回 CATEGORIES 那十个。
+//
+//    这条在 Java 时代修过一次（1.0.30「全部类型 0 个标签」），迁成 spider 时
+//    丢了：详情里 `tags: []` 是站点的形状没错，但「全部类型」页问的是整站的
+//    分类清单，那是有的。症状是点标签只看到一句「这个 spider 源暂不支持
+//    tag-list」—— 看起来像能力缺失，其实是这里少了一个函数。
+//
 // ── 白名单 ───────────────────────────────────────────────────────────
 // 站点域是镜像轮换的（DEFAULT_HOST 只是当前这一个），所以白名单同时写
 // 当前域和已知的老域；镜像换了要改这里 —— 这是 Java 侧 origin 由配置给的
@@ -56,6 +67,7 @@
   //   这里就是接入点：把 BASE 换成从配置里读的 origin，hosts 跟着从同一个值
   //   推导出来，那份写死的列表就可以删了。
   var BASE = 'https://901.26702.app';
+
 
   // ── 文本工具（对齐 HtmlKit）────────────────────────────────────────
 
@@ -251,6 +263,8 @@
   // 的代价（多一次首页请求），换来的是不依赖跨调用的隐藏状态。
   // 用 undefined 表示「还没试过」，'' 表示「试过了没拿到」。
   var guest = null;
+  // ensureGuest 那一次 /v.php 的正文（见 ensureGuest 里的说明）。
+  var guestPage = '';
 
   function headersWith(token) {
     var h = {};
@@ -300,6 +314,9 @@
   async function ensureGuest(ctx) {
     if (guest) return guest;
     var first = await fetchPage(ctx, BASE + '/v.php', true);
+    // 留一份首页正文：tags() 要的导航栏就在这一份里。不带标记时**列表和导航
+    // 都是对的**（只有详情会随机换片），所以这里可以直接复用，省掉一次 70KB 的请求。
+    guestPage = first.body;
     var token = '';
     if (first.cookies && typeof first.cookies.ga === 'string') {
       token = first.cookies.ga.trim();
@@ -544,6 +561,74 @@
     ['md', '讨论多'], ['mf', '最多收藏']
   ];
 
+  // 标签名**以站点导航原文为准**，表只做兜底。理由和 1.0.30 那次一样：
+  // 站点自己在改叫法（实测 2026-10-19：hot 叫「当前最热」不是「热门」，
+  // top 叫「本月最热」不是「本周榜」，rf 叫「最近加精」不是「精选」），
+  // 抄一份表就等于把名字冻在某一天的快照上，站点改名我们还显示旧名。
+  //
+  // 反过来也踩过：站点按 Accept-Language 分流（英文夹具里是 91 / Hot /
+  // Top this Mon.），所以文本一旦不像「一条分类名」（空、超长、带标签残留），
+  // 就退回表 —— 宁可显示旧中文名，也不要在标签页上显示一句英文句子。
+  var LABEL_MAX = 16;
+
+  function labelOf(code, raw) {
+    var text = unescape(stripHtml(raw || '')).replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+    if (text && text.length <= LABEL_MAX && text.indexOf('<') < 0) return text;
+    for (var i = 0; i < CATEGORIES.length; i++) {
+      if (CATEGORIES[i][0] === code) return CATEGORIES[i][1];
+    }
+    return text || code;
+  }
+
+  // 导航栏的 `<li><A href="…/v.php?category=ori&viewtype=basic">91</A></li>`。
+  // 大写 A 是站点自己的写法（夹具里就是 `<A>`），别写成 `<a` 不带 i。
+  var NAV_RE = /<a[^>]+href=["'](?:https?:\/\/[^"']*)?v\.php\?category=([0-9a-zA-Z_]+)[^"']*["'][^>]*>([\s\S]{0,160}?)<\/a>/gi;
+
+  // 导航 → 标签清单。同一条 code 会重复出现（top 有本周榜和上周榜两条，
+  // 只是 m 参数不同），按 code 去重、保留第一次。
+  //
+  // **不足 3 条就当没抓到。** 站点改版时可能只剩一个「分类」链接，
+  // 拿那一条去渲染整页「全部类型」比明确回退到 CATEGORIES 更糟 ——
+  // 用户看到的是「1 个标签」，会以为这个站缩水了。
+  function navigationTags(html) {
+    var out = [];
+    var seen = {};
+    var m;
+    NAV_RE.lastIndex = 0;
+    while ((m = NAV_RE.exec(String(html || ''))) !== null) {
+      var code = m[1];
+      if (!code || seen[code]) continue;
+      var name = labelOf(code, m[2]);
+      if (!name) continue;
+      seen[code] = 1;
+      out.push({ name: name, slug: code, group: 'category' });
+    }
+    return out.length >= 3 ? out : [];
+  }
+
+  function fallbackTags() {
+    return CATEGORIES.map(function (one) {
+      return { name: one[1], slug: one[0], group: 'category' };
+    });
+  }
+
+  // 分类页 / 标签页共用的一次请求。两件事在站点上是同一个页面，
+  // 唯一差别是入参名字（tag-list 给 slug，离线回归给 ref）。
+  async function categoryPage(ctx, args) {
+    var code = String((args && (args.slug || args.cateId || args.ref)) || '').trim();
+    var page = pageOf(args);
+    if (!code) code = 'ori';
+    await ensureGuest(ctx);
+    var url = BASE + '/v.php?category=' + enc(code) + '&viewtype=basic&page=' + page;
+    var res = await fetchPage(ctx, url, false);
+    var items = parseCards(res.body);
+    if (items.length === 0 && page === 1) {
+      throw new Error('porn91 分类「' + code + '」一页都没解析到卡片'
+        + '（可能：这个 code 不在站点的分类表里、或站点改版）');
+    }
+    return { items: items, page: page, hasMore: pageHasMore(page, items.length, res.body) };
+  }
+
   // ── 能力 ──────────────────────────────────────────────────────────
 
   function splitRef(ref) {
@@ -591,19 +676,103 @@
     // 不认识的 code 会被站点当成默认列表（回全站最新）**不会报错** ——
     // 所以校验靠分类表：只有那十个实测过的 code。
     async category(ctx, args) {
-      // 入参兼容两套名字：app.js 给 slug/cateId，离线回归（spider-check）给 ref。
-      var code = String((args && (args.slug || args.cateId || args.ref)) || '').trim();
-      var page = pageOf(args);
-      if (!code) code = 'ori';
+      return categoryPage(ctx, args);
+    },
+
+    // 标签列表 → 就是分类列表（坑 ⑦：这个站的标签栏跟分类栏是同一排链接）。
+    // 单独留一个 cap 名，是因为别的源（hanime1 / mrds66）的 tag-list 语义是
+    // 「话题标签」，前端按动作名分派，两边不能混着来。
+    async tagList(ctx, args) {
+      return categoryPage(ctx, args);
+    },
+
+    // 「全部类型」页的标签清单。首页导航栏就是标签栏。
+    //
+    // 拿不到首页**不报错**：分类表是静态的，退回那十条至少页面能用。
+    // 这条降级和 detail 的 tags:[] 不冲突 —— 一个是整站有哪些分类，
+    // 一个是这一部片挂了哪些标签（站点不提供）。
+    async tags(ctx) {
       await ensureGuest(ctx);
-      var url = BASE + '/v.php?category=' + enc(code) + '&viewtype=basic&page=' + page;
-      var res = await fetchPage(ctx, url, false);
-      var items = parseCards(res.body);
-      if (items.length === 0 && page === 1) {
-        throw new Error('porn91 分类「' + code + '」一页都没解析到卡片'
-          + '（可能：这个 code 不在站点的分类表里、或站点改版）');
+      var body = guestPage;
+      if (!body) {
+        // 正常走不到（ensureGuest 必然留下正文）。留着是防它哪天被改成缓存分支。
+        try {
+          body = (await fetchPage(ctx, BASE + '/v.php', false)).body;
+        } catch (e) {
+          ctx.call('log', { msg: 'porn91 标签导航抓取失败，用内置分类表：' + ((e && e.message) || e) });
+          return { items: fallbackTags() };
+        }
       }
-      return { items: items, page: page, hasMore: pageHasMore(page, items.length, res.body) };
+      var items = navigationTags(body);
+      if (items.length === 0) {
+        ctx.call('log', { msg: 'porn91 导航栏里没抠到分类链接，用内置分类表' });
+        return { items: fallbackTags() };
+      }
+      return { items: items };
+    },
+
+    // 列表卡片的标题/封面校正（坑 ⑧）。
+    //
+    // 站点在网格页上把**标题和封面挂到别的 viewkey 上**：同一页抓两次，23 条里
+    // 有 4 条的标题会变；点进去看到的是那个 viewkey 的真身，于是「货不对版」——
+    // 标题、封面、描述、视频全是另一部片，而三者内部还是自洽的，看着像串了。
+    //
+    // 唯一可信的是详情页（同一个 viewkey 连取三次，标题/封面/直链稳定且互相同号：
+    // thumb/1253049.jpg ↔ mp43/1253049.mp4）。
+    //
+    // ── 用 netAll，不用循环 net ─────────────────────────────────────
+    //
+    // `ctx.call('net')` 是同步桥，源里写 `Promise.all(ids.map(fetch))` 看着像并发，
+    // 实际一条一条排队。2026-10-19 实测：8 个 worker 拉 24 条详情跑到 45 秒被看门狗
+    // 杀掉，零结果 —— 当时只能把校正搬到服务器上做，等于给这个源加了一个外部依赖。
+    //
+    // netAll 是 Java 侧线程池：一次往返带 24 个请求，8 并发，实测 3 轮走完。
+    // 源又变回自包含的一个 js 文件。
+    async reconcile(ctx, args) {
+      var raw = (args && args.ids) || [];
+      if (typeof raw === 'string') raw = raw.split(',');
+      var ids = [];
+      for (var i = 0; i < raw.length; i++) {
+        var one = String(raw[i] == null ? '' : raw[i]).trim();
+        if (!one) continue;
+        // 和 detail 同一条校验：viewkey 只有纯数字和二十位十六进制两种。
+        if (!/^[0-9a-zA-Z]+$/.test(one)) continue;
+        if (ids.indexOf(one) >= 0) continue;
+        ids.push(one);
+        if (ids.length >= 24) break;      // 一页 24 条
+      }
+      if (ids.length === 0) return { items: [] };
+
+      // 校对详情页也要带游客标记，否则站点会给随机一部片（坑 ⑥）。
+      await ensureGuest(ctx);
+      var requests = [];
+      for (var k = 0; k < ids.length; k++) {
+        requests.push({
+          url: BASE + '/view_video.php?viewkey=' + enc(ids[k]),
+          headers: headersWith(guest)
+        });
+      }
+
+      var res;
+      try {
+        res = await ctx.call('netAll', { requests: requests, concurrency: 8 });
+      } catch (e) {
+        ctx.call('log', { msg: 'porn91 校正失败：' + ((e && e.message) || e) });
+        return { items: [] };
+      }
+      var results = (res && res.results) || [];
+      var out = [];
+      for (var j = 0; j < results.length && j < ids.length; j++) {
+        var got = results[j] || {};
+        if (got.ok !== true) continue;          // 单条失败保留原值
+        var html = String(got.body || '');
+        if (!html) continue;                    // 空响应（UA 被分流）也保留原值
+        var title = firstH4(html);
+        if (!title) title = stripHtml(between(html, '<title>', '</title>')).trim();
+        var cover = attr(html, 'poster');
+        if (title || cover) out.push({ id: ids[j], title: title || '', cover: cover || '' });
+      }
+      return { items: out };
     },
 
     // 搜索。空关键词**不发请求**：站点对空 search_id 会回首页那份列表，

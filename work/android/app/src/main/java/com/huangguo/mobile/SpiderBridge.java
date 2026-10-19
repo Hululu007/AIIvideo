@@ -12,7 +12,8 @@ import org.json.JSONObject;
  * 事 —— op 分发和 JSON 编解码。分开的理由很实际：这个类的方法会被 WebView 在多条
  * 线程上调，协议层一旦同时兼职状态层，出错时就分不清是「页面还活着」还是「Java 没清」。
  *
- * <p>三个 op 的形状见 {@code docs/2026-10-19-spider阶段0契约.md} §三。
+ * <p>op 的形状见 {@code docs/2026-10-19-spider阶段0契约.md} §三：
+ * {@code net} / {@code netAll} / {@code log} / {@code done}。
  *
  * <p><b>编码只有一层</b>：宿主页的 {@code __spider.call(op, args)} 负责把 args
  * 序列化一次再调进来（契约 §二），所以这里收到的一定是 JSON 文本，不需要再猜
@@ -57,6 +58,11 @@ final class SpiderBridge {
         try {
             if ("net".equals(op)) {
                 return SpiderRuntime.net(s, args).toString();
+            }
+            if ("netAll".equals(op)) {
+                // 批量请求：Java 侧线程池并发，一次往返。见 SpiderRuntime.netAll 里
+                // 「为什么必须有这个 op」—— 没有它，源里写不出真正的并发。
+                return SpiderRuntime.netAll(s, args).toString();
             }
             if ("log".equals(op)) {
                 // 直接用 Log.i 而不是套一层缓冲：spider 的日志就是给 adb logcat 看的，

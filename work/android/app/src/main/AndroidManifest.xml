@@ -46,5 +46,13 @@
             android:exported="false"
             android:screenOrientation="user"
             android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"/>
+
+        <!-- spider 宿主，独立进程。Android WebView 全 app 共享渲染主线程，
+             spider 抓取解析会把主页面的动画/滚动冻住 —— 进程隔离是根治
+             （证据链见 docs/2026-10-19-卡片动画卡顿排查.md）。 -->
+        <service
+            android:name="com.huangguo.mobile.SpiderService"
+            android:exported="false"
+            android:process=":spider"/>
     </application>
 </manifest>

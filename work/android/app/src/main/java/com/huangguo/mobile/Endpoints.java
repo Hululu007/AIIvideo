@@ -4,7 +4,7 @@ package com.huangguo.mobile;
  * 后端地址的唯一来源。
  *
  * 换域名只改这里，别在业务类里再写字符串。以前这些地址散在四个文件里
- * （HuangGuoApp、AccountService、HotUpdateManager、UpdateManager 两处），
+ * （HuangGuoApp、AccountService、UpdateManager 两处；热更那处随热更层一起删了），
  * 换一次要改五处，漏一处就是线上半瘫：可能热更拉得到、但账号登不上。
  *
  * ── 两条路径，走向不一样 ──
@@ -16,7 +16,7 @@ package com.huangguo.mobile;
  *
  * 更新这类**纯静态分发**（热更清单 + 热更包 + APK）2026-10-18 起全部搬出
  * 自己的机器，改走 GitHub + gh 镜像。理由很简单：内容是静态的，没有理由
- * 让它受某台机器的欠费、被封、磁盘满影响。见 UPDATE_MANIFEST / HOT_RAW。
+ * 让它受某台机器的欠费、被封、磁盘满影响。见 UPDATE_MANIFEST。
  *
  * ── 为什么 API 用 sslip.io ──
  * 便宜 VPS 没绑域名时，sslip.io 把 149.104.21.177.sslip.io 解析回 149.104.21.177，
@@ -46,31 +46,10 @@ final class Endpoints {
      * 刚发布的一版可能要等几分钟才生效。热更本来就不是秒级需求（客户端
      * 30 分钟才查一次，而且拿到之后下次启动才应用），这个延迟可以接受。
      */
-    private static final String HOT_RAW =
-            "https://raw.githubusercontent.com/zhaoruizhe81/AIIvideo/main/hot";
-
-    /**
-     * 热更清单的候选地址，按顺序试。和 nodesUrls 同一套思路：国内先走镜像。
-     *
-     * ── 为什么带一个随机查询串 ──
-     * raw.githubusercontent 和几个 gh 镜像前面都有 CDN，缓存大约 5 分钟。
-     * 2026-10-18 实测：刚发布的新 revision 推上去，三个候选全都还在吐旧的那份，
-     * 客户端 check 一遍得出结论「没有更新」—— 表现是「发布了，但没人收得到」，
-     * 而且下个周期可能又读到同一份缓存，一直卡住。
-     *
-     * 清单只有 589 字节，绕过 CDN 的代价可以忽略；真正大的是 340KB 的包，
-     * 那个地址写在签名信封里、不带查询串，照常吃 CDN。
-     *
-     * 换句话说：**清单要新鲜，包要缓存**。这是两件不同的事。
-     */
-    static java.util.List<String> hotIndexUrls() {
-        String bust = "?t=" + System.currentTimeMillis();
-        java.util.List<String> urls = new java.util.ArrayList<String>(3);
-        urls.add(AKAMS_A + "/" + HOT_RAW + "/hot-update.json" + bust);
-        urls.add(AKAMS_B + "/" + HOT_RAW + "/hot-update.json" + bust);
-        urls.add(HOT_RAW + "/hot-update.json" + bust);
-        return urls;
-    }
+    // ── 热更清单的地址已经删了（2026-10-19）──
+    //
+    // 前端热更整块停用：它会越级盖住 APK 里的新界面，而版本号看不出来。
+    // APK 自身的更新清单走 UPDATE_MANIFEST / manifestUrls()，那条没动。
 
     /**
      * 给一个 GitHub 上的地址派生镜像候选，第一个是最原始的。

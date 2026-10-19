@@ -154,10 +154,32 @@ public final class AiiHttp {
     }
 
     /**
+     * 进程级代理覆盖。**只有 :spider 服务进程会用到**（SpiderService.call 每次请求
+     * 前设置）：内置核心的本地 SOCKS 地址是主进程内存里的值，SharedPreferences
+     * 里没有它，独立进程自己读永远读出空 —— 不传这个覆盖，「源声明要走代理」
+     * 的源在隔离进程里全部退化成直连。主进程不设置（null），行为与原来完全一致。
+     */
+    private static volatile String processProxyMode;
+    private static volatile String processProxyEffective;
+
+    /** 给 SpiderService 用的注入点。两个值都来自主进程调用那一刻的快照。 */
+    static void applyProcessProxyOverride(String mode, String effective) {
+        processProxyMode = mode == null ? "" : mode;
+        processProxyEffective = effective == null ? "" : effective;
+    }
+
+    /**
      * 当前的代理串。每次建客户端时问一次，所以核心启停之后必须
      * invalidateClients()，否则旧客户端会一直用着上一个代理。
      */
     static String effectiveProxy() {
+        // 进程覆盖优先：:spider 进程没有核心、SharedPreferences 里也没有内置地址，
+        // 主进程传来的快照是那里唯一的代理事实来源。语义与 effectiveProxy(mode,…)
+        // 一致：direct 就是空串，否则用主进程算好的那条。
+        if (processProxyEffective != null) {
+            if (ProxyConsole.MODE_DIRECT.equals(processProxyMode)) return "";
+            return processProxyEffective;
+        }
         return effectiveProxy(proxyModeOrEmpty(), builtinProxy(), proxyRaw());
     }
 
@@ -308,11 +330,42 @@ public final class AiiHttp {
         log("GET " + hostOfUrl(url) + pathOfUrl(url));
         try {
             return getWith(client(profile), url, profile);
-        } catch (IOException e) {
+        } catch (Exception e) {
+            // 这里必须是 Exception，不能是 IOException。
+            //
+            // getWith → rawWith 的签名是 `throws Exception`，它会把 OkHttp 的错误
+            // 包成 java.lang.Exception 再抛出来。原来 catch IOException 永远不命中，
+            // 于是「降级重试」这条路径**一次都没执行过** —— 日志里只有
+            // `cap=home fail: unexpected end of stream`，从来没有「降级 HTTP/1.1」。
+            // 快速切页时每个请求都撞一次、每次都直接失败，用户看到的就是卡住。
             if (!isStreamBreak(e)) throw e;
             log("HTTP/2 被重置，降级 HTTP/1.1 重试 " + pathOfUrl(url));
-            return getWith(http1Client(profile), url, profile);
         }
+        // 降级之后再给两次机会。
+        //
+        // 2026-10-19 真机实测：`unexpected end of stream` 在 5G 上会连着出现
+        // （一次测试里 4 个请求中了 3 个）。只降级一次的话，第二次又撞上同一条
+        // 死链路就直接报「AGE动漫 请求失败」，用户看到的是内容停在缓存不再更新 ——
+        // 体感就是「点了没反应」。
+        //
+        // 中间让出 120ms：坏连接要一点时间才会被 OkHttp 的连接池剔掉，
+        // 立刻重试大概率还是它。
+        for (int attempt = 0; attempt < 2; attempt++) {
+            try {
+                return getWith(http1Client(profile), url, profile);
+            } catch (Exception e) {
+                boolean last = attempt == 1;
+                log("HTTP/1.1 重试 " + (attempt + 1) + " 失败：" + e.getMessage() + (last ? "（放弃）" : ""));
+                if (last || !isStreamBreak(e)) throw e;
+                try {
+                    Thread.sleep(120);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw e;
+                }
+            }
+        }
+        throw new IOException("请求失败：" + pathOfUrl(url));
     }
 
     private static byte[] getWith(OkHttpClient http, String url, SiteProfile profile) throws Exception {
@@ -388,7 +441,8 @@ public final class AiiHttp {
      * 同上，外加把 {@code Set-Cookie} 收进 {@code cookieOut}（null 就是不要）。
      *
      * <p>四参版本原样保留成一行转发，行为不变；真正干活的在这里。加 {@code cookieOut}
-     * 只多了一句 {@link #harvestCookies}，请求的构造、分流、状态码判据全部照旧。
+     * 只多了一句 {@link #harvestCookies}，请求的构造、状态码判据全部照旧，
+     * 分流与失败自愈统一走 {@link #routeAndSend}。
      */
     private static byte[] getWith(OkHttpClient http, String url, java.util.Map<String, String> headers,
                                   SiteProfile profile, java.util.Map<String, String> cookieOut) throws Exception {
@@ -399,35 +453,7 @@ public final class AiiHttp {
         }
         // 不要压缩。这条链路本来就慢，多一次解压不值当，也让响应体大小可预期。
         builder.header("Accept-Encoding", "identity");
-        // 分流：直连表里的域名现拼一个不带代理的 client（client(profile) 是按
-        // 代理串缓存的，可能挂着内置核心的 SOCKS）。见 rawWith 同一段注释。
-        if (NetRoute.directOnly(hostOfUrl(url))) {
-            OkHttpClient.Builder bypass = new OkHttpClient.Builder()
-                    .connectTimeout(http.connectTimeoutMillis(), TimeUnit.MILLISECONDS)
-                    .readTimeout(http.readTimeoutMillis(), TimeUnit.MILLISECONDS)
-                    // 和 rawWith 共用同一个决策函数：SmartDns 优先，其次 IPv4First。
-                    // 以前这里是 `http.dispatcher() != null && ...`，而 dispatcher 永远
-                    // 非 null —— 那个条件等于没写，读的人会以为这里还有第二种情况。
-                    .dns(dnsFor(http, profile));
-            http = bypass.build();
-        } else if (NetRoute.mustProxy(hostOfUrl(url)) && http.proxy() == null) {
-            // 自洽性兜底：路由说要走代理，可这个 client 身上没有代理。
-            // 只会发生在一处 —— 缓存的 client 是代理还没起来（effectiveProxy 空）
-            // 时建的，之后没被换掉。表现是「域名被 DNS 污染，直连 75 秒超时」。
-            // 不在这里修的话，错的那一次就一直是那一次，而且日志里看不出是路由的问题。
-            http = proxiedClient(profile, http);
-        }
-        Response response = http.newCall(builder.build()).execute();
-        try {
-            harvestCookies(response, cookieOut);
-            int code = response.code();
-            if (code < 200 || code >= 300) throw new IOException("HTTP " + code + " @ " + url);
-            ResponseBody body = response.body();
-            if (body == null) return new byte[0];
-            return body.bytes();
-        } finally {
-            response.close();
-        }
+        return routeAndSend(http, builder.build(), url, cookieOut, profile);
     }
 
 
@@ -437,6 +463,9 @@ public final class AiiHttp {
     public static void init(Context context) {
         if (context != null && appContext == null) {
             appContext = context.getApplicationContext();
+            // 路由记忆的落盘位置。两个进程（主 + :spider）都各自 init 一遍，
+            // 文件 + mtime 检查保证两边读到同一份。
+            RouteMemory.init(new java.io.File(appContext.getFilesDir(), "route-memory.json"));
             // 进程起来就把老的「手填地址 + 默认直连」迁成 external。
             // 不能等用户打开设置页才迁 —— 那之前所有请求都会变成直连，
             // 用户看到的是「升级完就全站连不上了」。
@@ -675,7 +704,114 @@ public final class AiiHttp {
     }
 
     private static byte[] rawWith(OkHttpClient http, Request request, String url) throws Exception {
-        return rawWith(http, request, url, null, null);
+        return routeAndSend(http, request, url, null, null);
+    }
+
+    // ── 路由判定 + 失败自愈（方案 A，2026-10-19）──────────────────────
+    //
+    // 优先级：NetRoute 强制分支（directOnly / 声明源 mustProxy，作者显式，失败也不
+    // 换路）> RouteMemory 记忆 > 老规则兜底。第一次尝试用初始路由；连接层失败
+    // （超时 / reset / TLS / 域名解析）换另一条路重试一次，成功即 RouteMemory.learn。
+    // HTTP 4xx/5xx 是站点自己的问题，不换路不学习。
+
+    /**
+     * 这个 URL 的初始路由。
+     *
+     * <p>声明的源里 {@code mustProxy=false} 的域是作者要的直连，所以声明源只认
+     * forced 两支；未声明的源记忆优先于「全局代理开 → 走代理」的老兜底。
+     */
+    private static String initialRoute(String url) {
+        final String host = hostOfUrl(url);
+        if (NetRoute.directOnly(host)) return RouteMemory.ROUTE_DIRECT;
+        final boolean declared = NetRoute.isDeclared();
+        if (declared && NetRoute.mustProxy(host)) return RouteMemory.ROUTE_PROXY;
+        final String mem = RouteMemory.opinion(host);
+        if (mem != null) return mem;
+        if (!declared && NetRoute.mustProxy(host)) return RouteMemory.ROUTE_PROXY;
+        return RouteMemory.ROUTE_DIRECT;
+    }
+
+    /** direct ↔ proxy 互换。其他值原样返回（调用方拿它判「有没有另一条路」）。 */
+    static String flipRoute(String route) {
+        if (RouteMemory.ROUTE_DIRECT.equals(route)) return RouteMemory.ROUTE_PROXY;
+        if (RouteMemory.ROUTE_PROXY.equals(route)) return RouteMemory.ROUTE_DIRECT;
+        return route;
+    }
+
+    /**
+     * 是不是「换个路由可能就好」的失败。
+     *
+     * <p>判据是排除式的：{@code rawWith} / {@code getWith} 对非 2xx 抛的
+     * {@code IOException("HTTP <code> @ …")} 说明<strong>请求已经到达了对方</strong>
+     * —— 路由是通的，失败是站点的，换路没有意义。剩下的（超时、连接被拒/重置、
+     * TLS、域名解析不出来）大概率是「这条路上不去」。
+     */
+    static boolean isConnectFailure(IOException e) {
+        if (e == null) return false;
+        final String m = e.getMessage();
+        return m == null || !m.startsWith("HTTP ");
+    }
+
+    /** 把路由落到 client 上：direct 现拼无代理 client（保留 SmartDns），proxy 兜 proxiedClient。 */
+    private static OkHttpClient clientFor(OkHttpClient http, String route, SiteProfile profile) {
+        if (RouteMemory.ROUTE_DIRECT.equals(route)) {
+            return new OkHttpClient.Builder()
+                    .connectTimeout(http.connectTimeoutMillis(), TimeUnit.MILLISECONDS)
+                    .readTimeout(http.readTimeoutMillis(), TimeUnit.MILLISECONDS)
+                    .dns(dnsFor(http, profile))
+                    .build();
+        }
+        if (RouteMemory.ROUTE_PROXY.equals(route) && http.proxy() == null) {
+            return proxiedClient(profile, http);
+        }
+        return http;
+    }
+
+    /**
+     * 统一的「选路 → 发请求 → 失败换路重试一次 → 学习」。
+     *
+     * <p>两条老路径（getWith / rawWith）的分流分支收拢到这里之后行为对齐：
+     * 以前 getWith 缺「代理路不可用时兜底直连」之外的一切自愈，rawWith 亦然。
+     */
+    private static byte[] routeAndSend(OkHttpClient http, Request request, String url,
+                                       java.util.Map<String, String> cookieOut,
+                                       SiteProfile profile) throws Exception {
+        final String host = hostOfUrl(url);
+        String route = initialRoute(url);
+        IOException first = null;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            final OkHttpClient client = clientFor(http, route, profile);
+            try {
+                Response response = client.newCall(request).execute();
+                try {
+                    harvestCookies(response, cookieOut);
+                    int code = response.code();
+                    if (code < 200 || code >= 300) throw new IOException("HTTP " + code + " @ " + url);
+                    ResponseBody body = response.body();
+                    return body == null ? new byte[0] : body.bytes();
+                } finally {
+                    response.close();
+                }
+            } catch (IOException e) {
+                final String flipped = flipRoute(route);
+                final boolean canFlip = !flipped.equals(route)
+                        && (!RouteMemory.ROUTE_PROXY.equals(flipped) || effectiveProxy().length() > 0);
+                if (!isConnectFailure(e) || !canFlip) {
+                    // 站点级失败，或者没有另一条路可换：原样上抛。
+                    throw e;
+                }
+                if (first == null) first = e;
+                log("路由自愈 " + host + "：" + route + " 失败（"
+                        + (e.getMessage() != null ? e.getMessage() : e.toString()) + "），改走 " + flipped + " 重试");
+                // 换路要用「新鲜」的请求体：上一次 execute 消费不掉的话 OkHttp 自己
+                // 会重建，Request 本身无状态，直接复用是安全的。
+                route = flipped;
+            }
+        }
+        // 两条路都失败到「换路也上不去」：学不了（不知道哪条对），把可能过时的
+        // 记忆清掉回落到规则层，抛第一个错。
+        RouteMemory.forget(host);
+        throw first != null ? first : new IOException("请求失败：" + url);
     }
 
     /**
@@ -696,8 +832,8 @@ public final class AiiHttp {
      *
      * <ul>
      *   <li>{@code cookieOut} 收 {@code Set-Cookie}（见上一段）。</li>
-     *   <li>{@code profile} <b>当前源配置</b>，只为一件事存在：{@code mustProxy} 兜底时
-     *       要拿它建 {@link SmartDns}。传 null 就等于「这次请求不知道源声明了什么」，
+     *   <li>{@code profile} <b>当前源配置</b>，只为一件事存在：路由兜底要拿它建
+     *       {@link SmartDns}。传 null 就等于「这次请求不知道源声明了什么」，
      *       兜底会退回 {@code like.dns()} —— 见 {@link #dnsFor}。</li>
      * </ul>
      *
@@ -705,37 +841,15 @@ public final class AiiHttp {
      * 同时可能有两个源在跑（主内容 + 播放解析）。路由恰好是最不该有第二份真相的东西 ——
      * 一个静态 {@code currentProfile} 会让「A 源的请求用上 B 源的 hosts 钉死」变成
      * 一个只在并发下复现的 bug，而症状是「偶尔连到错的 IP」，日志上看不出来。
+     *
+     * <p>分流与失败自愈统一在 {@link #routeAndSend}（2026-10-19 方案 A）——
+     * 它和 getWith 的老内联分支就「该不该换 client」做过同样的事，收拢成一处
+     * 之后两个出口的行为不会再分叉。
      */
     private static byte[] rawWith(OkHttpClient http, Request request, String url,
                                   java.util.Map<String, String> cookieOut,
                                   SiteProfile profile) throws Exception {
-        // 分流：直连表里的域名把代理摘掉。传进来的 client 可能已经挂着
-        // effectiveProxy（plainClient 是按代理串缓存的，不能改），所以命中时
-        // 现拼一个不带代理的 client —— 这类请求都是接口级、量不大，多 new 一次
-        // 可忽略；重要的事只有一个：绝不再进那条节点。
-        if (NetRoute.directOnly(hostOfUrl(url))) {
-            OkHttpClient.Builder bypass = new OkHttpClient.Builder()
-                    .connectTimeout(http.connectTimeoutMillis(), TimeUnit.MILLISECONDS)
-                    .readTimeout(http.readTimeoutMillis(), TimeUnit.MILLISECONDS)
-                    // 别把传进来 client 的 DNS 扔掉 —— 它可能是 SmartDns（DoH + 配置里
-                    // 钉死的地址）。见 dnsFor 的说明。
-                    .dns(dnsFor(http, profile));
-            http = bypass.build();
-        } else if (NetRoute.mustProxy(hostOfUrl(url)) && http.proxy() == null) {
-            // 同 getWith 那条兜底。**profile 必须往下传**：传给 proxiedClient 的是 null
-            // 的话，它退回 like.dns()，而 POST 用的 plainClient 是 OkHttp 默认 DNS ——
-            // 于是「源声明这个域要走代理」的 POST 既没有 SmartDns 也没有源的 hosts 钉死。
-            http = proxiedClient(profile, http);
-        }
-        Response response = http.newCall(request).execute();
-        try {
-            harvestCookies(response, cookieOut);
-            if (!response.isSuccessful()) throw new IOException("HTTP " + response.code() + " @ " + url);
-            ResponseBody body = response.body();
-            return body == null ? new byte[0] : body.bytes();
-        } finally {
-            response.close();
-        }
+        return routeAndSend(http, request, url, cookieOut, profile);
     }
 
     /**

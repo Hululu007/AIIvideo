@@ -193,9 +193,15 @@
           loadInto(image);
         });
       }, { root: scroll, rootMargin: '320px' });
+      // 首屏只立刻拉 6 张。
+      //
+      // 原来是 14 张。一屏 24 张卡、连续切几次分类，就是几十个 cover 请求同时在飞，
+      // 每个回来都要 JSON.parse 一段几十 KB 的 base64 再塞进 img.src —— 那是主线程上
+      // 一段一段的占用。单次点击看不出来（janky 1%），连点时累积成「卡」。
+      // 剩下的交给观察器，滚到哪儿拉哪儿。
       root.querySelectorAll('img[data-cover]').forEach((image, index) => {
         if (image.naturalWidth > 0) return;
-        if (index < 14 || image.classList.contains('hero-image')) loadInto(image);
+        if (index < 6 || image.classList.contains('hero-image')) loadInto(image);
         else observer.observe(image);
       });
     }

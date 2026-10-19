@@ -7,29 +7,22 @@ import org.json.JSONObject;
 /**
  * 双内容源仓库。
  *
- * 名字里的「双」指的是对外一个门面、对内可以有两套数据来源：这个类同时握着
- * {@link ContentMode}（当前是公开还是私密）和 {@link SiteRepository}（黄果源的
- * REST 拉取 + 封面缓存），构造时把 mode.active() 读到自己的 source 字段里锁住。
- * 上层 MainActivity 只在模式切换时重建一份（rebindContent），所以一次实例生命周期
- * 内的 source 不会变，请求不会串源。
+ * 「双」这个名字是历史遗留：以前它握着一个 {@code ContentMode}（公开 / 私密两态）
+ * 和两套仓库。2026-10-19 双态整块拆掉，现在只剩一条链路 —— {@link SiteRepository}
+ * （当前源的 REST 拉取 + 封面缓存）。
  *
- * 公开源那半边（HongguoRepository）连同 privateMode() 的分派已经整类去掉了：
- * 现在前端只跑黄果源这一条链路，所有方法直接落到 SiteRepository。source 和 mode
- * 两个字段暂时没被方法体用到，保留是因为门禁语义还在 ContentMode 里，桥指令那边
- * 仍然按 source 校验，随时可以把公开源接回来。
+ * 类名没改：改它要动 MainActivity 的字段类型和几处构造，收益只是少两个字。
+ * 上层仍在换源之后调用 {@code rebindContent()} 重建一份，因为 SiteProfile
+ * （paths / cover / 白名单）是构造时读的。
  */
 final class DualContentRepository {
     private final SiteRepository huangguo;
-    private final ContentMode mode;
-    private final String source;
 
     DualContentRepository(Context context) {
-        this(context, ContentMode.get(context).active(), HotUpdateManager.get(context).currentSite());
+        this(context, SiteProfile.current(context));
     }
 
-    DualContentRepository(Context context, String source, SiteProfile siteProfile) {
-        this.source = source;
-        this.mode = ContentMode.get(context);
+    DualContentRepository(Context context, SiteProfile siteProfile) {
         this.huangguo = new SiteRepository(context, siteProfile);
     }
 

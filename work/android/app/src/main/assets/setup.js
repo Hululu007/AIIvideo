@@ -50,8 +50,6 @@
     // 通知 Java 重算返回键归属。设置页显示时必须保持「JS 接管」，
     // 否则 Java 会把返回回调注销掉，按返回直接退到后台，连 hgBack() 都不会被调。
     if (showIt) window.AndroidHost?.setBackEnabled?.(true);
-    // 设置页出现 = 这一版前端跑通了，热更新 trial 可以确认（与 app.js 的兜底同一目的）。
-    if (showIt && typeof window.markHotUpdateHealthy === 'function') setTimeout(window.markHotUpdateHealthy, 800);
     if (showIt) {
       // 自动聚焦会让安卓把软键盘顶起来，短暂挡住半屏。延迟一点等过渡结束。
       setTimeout(() => { try { input.focus(); } catch (error) {} }, 320);

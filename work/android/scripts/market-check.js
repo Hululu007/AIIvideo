@@ -60,9 +60,15 @@ function loadSpider(source, expectId) {
   if (!Array.isArray(site.hosts) || site.hosts.length === 0) {
     throw new Error('hosts 是空的（net 白名单为空 = 这个源什么都抓不到）');
   }
-  const caps = ['home', 'category', 'search', 'detail', 'play']
-    .filter(c => typeof site[c] === 'function');
-  return { site, caps };
+  // 必需的五条：一个源少了任何一条，前端都会在某个页面撞上一句「没有实现」。
+  const required = ['home', 'category', 'search', 'detail', 'play'];
+  // 可选的两条（标签清单 / 类型列表）。不是每个站都有标签体系，缺了不算错，
+  // 但**有的话要能看见** —— 91porn 就是补了 tags/tagList 却没人从这份检查里
+  // 看出来（原来固定数 5，多实现了也显示 5）。
+  const optional = ['tags', 'tagList'];
+  const caps = required.filter(c => typeof site[c] === 'function');
+  const extraCaps = optional.filter(c => typeof site[c] === 'function');
+  return { site, caps, extraCaps };
 }
 
 (async () => {
@@ -130,6 +136,7 @@ function loadSpider(source, expectId) {
       continue;
     }
     ok('源码 ' + expectedId + '.js 可加载，caps=' + loaded.caps.length
+      + (loaded.extraCaps.length ? '(+' + loaded.extraCaps.join(',') + ')' : '')
       + '，hosts=' + loaded.site.hosts.length);
 
     if (loaded.caps.length < 5) {

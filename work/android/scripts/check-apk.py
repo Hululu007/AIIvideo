@@ -13,7 +13,6 @@ REQUIRED = [
     "assets/app.css",
     "assets/site-default.json",
     "assets/site-web.js",
-    "assets/hot-update-public.pem",
     # app.js 拆出来的分片。少一个不会编译失败 —— index.html 里那条 <script src>
     # 指向不存在的文件只在运行时 404，页面照常起来，坏的是某个二级页面里的一整块。
     # 所以这三条必须钉在这里，让 check-apk 在出包时就把它拦下来。

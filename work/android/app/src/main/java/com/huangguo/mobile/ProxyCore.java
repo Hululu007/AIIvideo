@@ -99,6 +99,13 @@ public final class ProxyCore {
                 //   改 envPath 不会让 geoip 找不到，别在这上面浪费时间排查。
                 //
                 // key：XUDP 的 base key，传空串即不启用。我们不用 XUDP。
+                // go.Seq.setContext 必须在 initCoreEnv 之前调（2026-10-19）：
+                // gomobile 的 asset 包读 geoip.dat / geosite.dat 前要 JVM context，
+                // 没注册就直接 `asset: no current JVM` → Go 里 os.Exit(1) → 整个
+                // 主进程无声消失（现象 = 点图标闪退，无 Java 崩溃栈）。v2rayNG
+                // 同款调用。旧配置从未引用 geosite，这条死路是 routing 接入
+                // geosite:cn（方案 B）后才第一次被踩到。
+                go.Seq.setContext(appContext);
                 Libv2ray.initCoreEnv(appContext.getFilesDir().getParent(), "");
                 envReady = true;
                 log("核心就绪 " + version);

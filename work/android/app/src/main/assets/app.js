@@ -4,7 +4,8 @@ let requestNumber = 0;
 let contentSource = 'hongguo';
 let contentReady;
 const bridgeInstance = Date.now() + '-' + Math.random().toString(36).slice(2);
-const privateMode = () => contentSource === 'huangguo';
+// contentSource 只有一个值了（'hongguo'），双态那套判断整块删掉。
+// 留这行注释是因为下面还有几处历史注释提到 privateMode()，读代码时别去找函数。
 // 「恢复出厂设置」跑到一半留下的标记。它只交代一件事：那一次登出如果没等到网络
 // 回来，下一次启动补一刀（见 finishResetLogout）。住在 localStorage 里，所以
 // **必须最后写** —— 写早了会被重置自己的那次全量 clear() 一起清掉。
@@ -201,14 +202,68 @@ const CONTENT_ACTIONS = new Set(['home', 'category', 'search', 'tags', 'tag-list
 // 源的配置里只要有 web.spider，内容就由运行时提供，前端不再拼任何 URL ——
 // 这是 web.paths 退役的那一步。判断放在 api() 最前面：一条源的形态是二选一
 // （路径 or spider），不该两种都走一遍再挑一个。
-const SPIDER_CAP = { home: 'home', category: 'category', search: 'search', detail: 'detail' };
+// 内容动作 → spider 能力名。**这张表只回答「这个动作该调哪个函数」**，
+// 不回答「这个源有没有」—— 后者由源自己说了算（见 spiderMetaOf）。
+//
+// 以前这里是「映射表 + 黑名单」两张表：黑名单里列着的动作，前端直接抛
+// 「这个 spider 源暂不支持」。91porn 补了 tags / tagList 之后前端照样拦着，
+// 用户看到的是「源不支持」，其实源已经实现了。问题不在那张表列了什么，
+// 在于**前端不该替所有源做这个判决**。现在改成问源。
+const SPIDER_CAP = {
+  home: 'home', category: 'category', search: 'search', detail: 'detail',
+  tags: 'tags', 'tag-list': 'tagList', recommend: 'recommend', newest: 'newest'
+};
 
-// 内容动作里 spider 接不住的那几个。列在这儿不是为了「以后补」，是为了**报错**：
-// 它们一旦落回 shape.apiPathFor()，会拼出一个 /api 路径，而 Java 侧那套适配器
-// 分流这一轮结束就删。到那时请求打到不存在的地址，报错是「接口响应缺少 data」——
-// 从现象完全看不出是这个源没实现这个能力。
-const SPIDER_MISSING = new Set(['tags', 'tag-list', 'recommend', 'newest']);
-const SPIDER_SUPPORTS = '首页 / 分类 / 搜索 / 详情 / 播放';
+/**
+ * 源的能力集，按 id 缓存。
+ *
+ * ── 从哪来 ─────────────────────────────────────────────────────────
+ * `spider` 桥的 `__meta` 伪能力：注入源码之后读一遍 __spiderSite，枚举里面的函数名。
+ * 它不是源里写的字面量声明，是运行时事实 —— 源加一个函数，壳立刻知道；忘了同步
+ * 一份 caps 数组也不会出现「实现了但前端说没有」。
+ *
+ * ── 为什么缓存 ───────────────────────────────────────────────────
+ * 每次探测要开一个 WebView（几百毫秒）。api() 是热路径，不缓存等于每次翻页多花
+ * 半秒。缓存粒度是 id：同一个源装一次问一次，重装源时清（见 HG_SPIDER_META_RESET）。
+ */
+const spiderMetaCache = new Map();
+let spiderMetaPending = null;
+
+async function spiderMetaOf(id) {
+  const key = String(id || '');
+  if (!key) return { caps: [], meta: null };
+  if (spiderMetaCache.has(key)) return spiderMetaCache.get(key);
+  if (spiderMetaPending && spiderMetaPending.key === key) return spiderMetaPending.promise;
+  const promise = (async () => {
+    try {
+      const payload = await bridgeCall('spider', { op: 'call', id: key, cap: '__meta', args: {}, timeoutMs: 15000 });
+      const info = {
+        caps: asArray(payload && payload.caps).map(one => String(one)),
+        meta: (payload && payload.meta) || null
+      };
+      spiderMetaCache.set(key, info);
+      console.log('[spider-meta] ' + key + ' caps=' + info.caps.join(','));
+      return info;
+    } catch (error) {
+      // 探测失败当空能力集：不拦任何调用，让源自己报「没有实现 xxx」。
+      // 拦错方向的代价比漏判大 —— 用户会以为源坏了。
+      console.log('[spider-meta] ' + key + ' 探测失败：' + (error.message || error));
+      const empty = { caps: [], meta: null };
+      spiderMetaCache.set(key, empty);
+      return empty;
+    } finally {
+      if (spiderMetaPending && spiderMetaPending.key === key) spiderMetaPending = null;
+    }
+  })();
+  spiderMetaPending = { key, promise };
+  return promise;
+}
+
+// 装源/删源之后要重新问一次 —— 源码换了，能力集可能跟着变。
+window.HG_SPIDER_META_RESET = function () {
+  spiderMetaCache.clear();
+  spiderMetaPending = null;
+};
 
 /**
  * 这个源用哪个 spider。
@@ -293,6 +348,10 @@ function spiderArgsFor(action, args) {
   const base = (() => {
     if (action === 'home') return {};
     if (action === 'category') return { slug: args.id || args.slug || '', page };
+    if (action === 'tag-list') return { slug: args.slug || args.id || '', label: args.label || '', page };
+    // tags 是一次性清单，没有分页也没有入参。给空对象，别让标签页看起来像
+    // 缺参数的分类页（spider 那边会把 undefined 当空串，行为一样，但日志脏）。
+    if (action === 'tags') return {};
     if (action === 'search') return { keyword: args.query || '', page };
     if (action === 'detail') return { ref: String(args.id || '') };
     if (action === 'episode') {
@@ -319,7 +378,7 @@ async function spiderApi(action, args) {
   const id = spiderIdOf();
   if (!id) throw new Error('这个源没有声明 web.spider');
   const cap = spiderCapFor(action);
-  if (!cap) throw new Error('这个 spider 源暂不支持「' + action + '」（当前支持 ' + SPIDER_SUPPORTS + '）');
+  if (!cap) throw new Error('前端不认识这个内容动作：「' + action + '」（SPIDER_CAP 里没有映射）');
   const model = window.HGModel;
   if (!model) throw new Error('模型层没加载：model.js 不在页面里');
   const spiderArgs = spiderArgsFor(action, args);
@@ -327,12 +386,36 @@ async function spiderApi(action, args) {
   // 有 home/detail 的日志、没有 play 的，说不清是「没走这条」还是「走了但命中缓存」。
   // 这条日志就是为了让那种情况一眼可辨：进这一行 = 走了 spider。
   console.log('[spider-api] ' + action + ' → cap=' + cap + ' args=' + JSON.stringify(spiderArgs));
-  const payload = await bridgeCall('spider', {
-    op: 'call', id, cap, args: spiderArgs, timeoutMs: 45000
-  });
+  let payload;
+  try {
+    payload = await bridgeCall('spider', {
+      op: 'call', id, cap, args: spiderArgs, timeoutMs: 45000
+    });
+  } catch (error) {
+    throw spiderErrorOf(action, error);
+  }
   const out = model.fromBridge(payload, cap);
   if (action === 'episode') return episodeShapeOf(out);
   return out;
+}
+
+// spider 内部报的一类错需要翻译一下再交给用户。
+//
+// 「spider 没有实现 tags」是**源没写这个能力**，不是这个源的形态不兼容 ——
+// 前者该说的是「换/升级这个源」，后者说的是「这个源根本干不了这件事」。
+// 宿主页只报方法名，这里补上动作的中文名。认不出来就原样抛，不改写别人的错误。
+const SPIDER_ACTION_TITLE = {
+  home: '首页', category: '分类', search: '搜索', detail: '详情', episode: '播放',
+  play: '播放', tags: '全部类型', 'tag-list': '类型列表',
+  recommend: '精选推荐', newest: '最新'
+};
+
+function spiderErrorOf(action, error) {
+  const raw = String((error && error.message) || error || '');
+  const hit = /没有实现\s*([A-Za-z0-9_-]+)/.exec(raw);
+  if (!hit) return error instanceof Error ? error : new Error(raw);
+  const title = SPIDER_ACTION_TITLE[action] || action;
+  return new Error('这个源没有实现「' + title + '」（spider 里没有 ' + hit[1] + ' 函数）');
 }
 
 /**
@@ -367,6 +450,75 @@ function episodeShapeOf(out) {
   };
 }
 
+/**
+ * 源没实现某个内容能力时的退路。
+ *
+ * ── 为什么需要 ─────────────────────────────────────────────────────
+ *
+ * 「全部类型」和「类型列表」这两个动作，在绝大多数站上**不是新东西**：一个站的
+ * 分类本来就写在它的配置里（`web.categories` + `ui.categoryIds/categoryLabels`），
+ * 点一个分类就是 `category`。只有 91porn 那种「导航栏就是标签栏、还要按站点原文
+ * 取名」的站才值得单独实现 tags。
+ *
+ * 没有这层退路时的表现是最糟的那种：源完全正常，用户在首页点一个类型，页面直接
+ * 「加载失败 — 这个源没有实现「类型列表」（spider 里没有 tagList 函数）」。
+ * 一句技术报错，还把内部函数名漏给了用户。
+ *
+ * ── 两条退路 ─────────────────────────────────────────────────────
+ *
+ *   tag-list → category：slug 就是 cateId，模型的 paged() 形状完全一致。
+ *   tags     → 用配置里的分类现拼：`ui.categoryIds` 配 `categoryLabels` 取名字，
+ *              没有就退回 `web.categories`（cateId → 显示名）。
+ *
+ * 源自己实现了就优先用源的（91porn 的标签是站点原文，配置里那份是旧名字）。
+ */
+function siteTagFallback() {
+  const ui = siteUi();
+  const ids = ui.categoryIds || {};
+  const labels = ui.categoryLabels || {};
+  const titles = ui.categoryTitles || {};
+  const out = [];
+  const seen = new Set();
+  const push = (slug, name) => {
+    const key = String(slug == null ? '' : slug).trim();
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    out.push({ name: String(name || key), slug: key, group: 'category' });
+  };
+
+  Object.keys(ids).forEach((tab) => {
+    const list = asArray(ids[tab]);
+    const names = asArray(labels[tab]);
+    list.forEach((slug, i) => {
+      // 一个 tab 对一个分类时，tab 的标题就是最好的名字（yhdm 的「日本」→「日本动漫」）；
+      // 一个 tab 对多个时只能用 categoryLabels 的同位名字。
+      const fallbackName = names[i] || (list.length === 1 ? titles[tab] : '') || '';
+      push(slug, fallbackName);
+    });
+  });
+
+  if (!out.length) {
+    const cats = (window.HG_SITE && window.HG_SITE.categories) || {};
+    Object.keys(cats).forEach((slug) => {
+      const label = cats[slug];
+      push(slug, label && label !== slug ? label : slug);
+    });
+  }
+  return { items: out };
+}
+
+function contentFallback(action, caps, args) {
+  if (action === 'tag-list' && caps.indexOf('category') >= 0) {
+    // 标签就是分类。slug 原样交给 category，模型的 paged() 形状一模一样。
+    return spiderApi('category', { id: (args && (args.slug || args.id)) || '', page: (args && args.page) || 1 });
+  }
+  if (action === 'tags') {
+    const items = siteTagFallback().items;
+    if (items.length) return Promise.resolve({ items });
+  }
+  return null;
+}
+
 function api(action, args = {}) {
   const run = async () => {
     // 源声明了 spider 就整条内容通路都走它，不再碰 /api 路径。
@@ -374,9 +526,21 @@ function api(action, args = {}) {
     // 剩下的（account / library / theme / 热更…）不是内容动作，照旧走 Java 桥。
     // 所以「spider 源 + 内容动作」永远走不到下面 apiPathFor 那一行。
     if (spiderIdOf()) {
-      if (spiderCapFor(action)) return spiderApi(action, args);
-      if (SPIDER_MISSING.has(action)) {
-        throw new Error('这个 spider 源暂不支持「' + action + '」（当前支持 ' + SPIDER_SUPPORTS + '）');
+      const cap = spiderCapFor(action);
+      if (cap) {
+        // 先问源支持什么。**探测失败（空 caps）时不拦**，直接交给 spider 自己报错 ——
+        // 拦错的代价是「源明明是好的，前端说它不支持」，那种 bug 比一句技术报错更难查。
+        const info = await spiderMetaOf(spiderIdOf());
+        if (info.caps.length && info.caps.indexOf(cap) < 0) {
+          const fallback = contentFallback(action, info.caps, args);
+          if (fallback) return fallback;
+          const title = SPIDER_ACTION_TITLE[action] || action;
+          throw new Error('这个源没有实现「' + title + '」（spider 里没有 ' + cap + ' 函数）');
+        }
+        return spiderApi(action, args);
+      }
+      if (CONTENT_ACTIONS.has(action)) {
+        throw new Error('这个源没有可用的 ' + action + ' 接口路径：检查 web.paths.' + action + '，或这次请求的参数是否齐全');
       }
       return bridgeCall(action, args);
     }
@@ -509,30 +673,35 @@ function renderDock() {
 function categoryTabs() {
   const configured = (siteUi().categoryLabels || {})[state.tab];
   if (configured && configured.length) return configured;
-  const adult = state.tab === 'adult';
-  if (!privateMode()) return [adult ? '短剧' : '漫剧'];
-  return adult ? ['成人短剧', '成人漫剧'] : ['AI换脸', 'AI魔改'];
+  // 没有配置就用 tab 名当一个「分区」。空数组会让「XX作品」变成「作品」，
+  // 看起来像少了个字。
+  const tab = (siteUi().tabs || []).find(one => one.key === state.tab);
+  return [String((tab && tab.label) || state.tab || '全部')];
 }
 
 // 分类页标题，同样可被配置覆盖（web.ui.categoryTitles）。
 function categoryTitle() {
   const configured = (siteUi().categoryTitles || {})[state.tab];
-  // 只认字符串。配错了（比如塞了数组）就退回默认 —— 不然插进 innerHTML 会变成
+  // 只认字符串。配错了（比如塞了数组）就退回 tab 名 —— 不然插进 innerHTML 会变成
   // 「电影片,连续剧,综艺片,…」几十个名字串成一行的巨大标题。
   if (typeof configured === 'string' && configured) return configured;
-  const adult = state.tab === 'adult';
-  if (!privateMode()) return adult ? '短剧' : '漫剧';
-  return adult ? '成人剧场' : 'AI专区';
+  // 没有配置就用 tab 自己的名字。以前这里有一套默认（短剧 / 漫剧 / 成人剧场 /
+  // AI专区），那是黄果源的分类词汇，对别的源是错的。
+  const tab = (siteUi().tabs || []).find(one => one.key === state.tab);
+  return String((tab && tab.label) || state.tab || '分类');
 }
 
-// 分类页副标题。默认那两句是黄果专用的（「短剧与漫剧，走进不同的人生。」），
-// 换个源之后就是错的 —— 一样做成可配置。
+// 分类页副标题：**只用配置**，没配就不显示。
+//
+// 这里原来有一套默认文案（「短剧与漫剧，走进不同的人生。」「换脸与魔改，探索影像
+// 新可能。」），是黄果源自己的宣传语。套在别的源上就是纯噪音 —— 切到 hanime1 的
+// 3DCG 分类，标题下面写着「探索热门漫剧。」，跟页面内容半点关系没有。
+//
+// 「没配就不显示」比「猜一句通用文案」好：一句对不上内容的副标题，比没有副标题
+// 更让人困惑。副标题本来就是源自己的语气，写在源的 ui.categoryLeads 里。
 function categoryLead() {
   const configured = (siteUi().categoryLeads || {})[state.tab];
-  if (typeof configured === 'string' && configured) return configured;
-  const adult = state.tab === 'adult';
-  if (!privateMode()) return adult ? '真人演的看了不烧心' : '探索热门漫剧。';
-  return adult ? '短剧与漫剧，走进不同的人生。' : '换脸与魔改，探索影像新可能。';
+  return typeof configured === 'string' ? configured : '';
 }
 const state = {
   route: 'home', tab: 'home', sub: { adult: 0, ai: 0 }, home: null,
@@ -561,7 +730,7 @@ function bridgeDirect(action, args = {}) {
   return new Promise((resolve, reject) => {
     const id = bridgeInstance + ':' + (++requestNumber);
     callbacks.set(id, { resolve, reject });
-    try { AndroidHost.request(id, action, JSON.stringify({ ...args, source: 'huangguo' })); }
+    try { AndroidHost.request(id, action, JSON.stringify({ ...args, source: 'hongguo' })); }
     catch (error) { callbacks.delete(id); reject(error); }
   });
 }
@@ -569,15 +738,27 @@ contentReady = (async () => {
   // 热更新 trial 的确认兜底：只要 JS 跑到这里，说明这一版前端能正常启动。
   // 正常路径是 renderHome 里那一枪；但停在首启设置页的机器永远到不了 renderHome，
   // 没有这个兜底，每个热更新都会被判失败、下次启动回滚并拉黑。
-  setTimeout(() => { try { markHotUpdateHealthy(); } catch (error) {} }, 2500);
   let status;
   try { status = await bridgeDirect('content-status'); }
-  catch (error) { status = { source: 'huangguo', unlocked: true }; }
-  if (status.source !== 'huangguo') {
-    if (!status.unlocked) status = await bridgeDirect('enter-private', { password: 'ssgnb' });
-    status = await bridgeDirect('confirm-private-age');
-  }
-  contentSource = 'huangguo';
+  catch (error) { status = { source: 'hongguo', unlocked: true }; }
+
+  // ── 2026-10-19：不再自动进内置那个「私密库」 ─────────────────────
+  //
+  // 这一段原来是「冷启动固定进黄果源」：先 enter-private（密码 ssgnb 写死在
+  // 前端），再 confirm-private-age，最后把 contentSource 锁成 'huangguo'。
+  //
+  // 问题是「黄果源」已经没有内容能力了 —— site-default.json 里 origin 是空串，
+  // 没有 paths、没有 api。它剩下的是：一套解锁流程 + 一份界面默认值
+  // （tabs / categoryIds / popularTags），以及前端几十处 privateMode 分支。
+  //
+  // 而 contentSource 被锁成 huangguo 之后，**用户装的任何 spider 源也都算
+  // 「私密模式」**：分类页套黄果的模板（「换脸与魔改，探索影像新可能」+ 一个
+  // 只有一个按钮的分区选择器），首页标题写「热门漫剧」，标签页按黄果的分组渲染。
+  //
+  // 现在：内容源只有一种 —— 用户自己装的那个。内置态留在公开态（hongguo），
+  // 不解锁、不确认年龄、不覆盖 contentSource。要进「私密库」的那套 UI 等真的
+  // 有内容源可迁的时候再说。
+  contentSource = 'hongguo';
   document.title = 'AIIvideo';
   return status;
 })();
@@ -889,139 +1070,6 @@ applyTheme();
 syncNativeTheme();
 api('theme').then(window.hgTheme).catch(() => {});
 
-// ── 前端热更新 ────────────────────────────────────────────────────────
-// 原生 HotUpdateManager 负责验签、下载、暂存和回滚；这里只做三件事：
-// 显示状态、触发检查、告诉原生现在能不能 recreate。
-let hotStatus = null;
-let hotCheckPending = false;
-// 原生 HotUpdateManager 在 minVersionCode 高于已装版本时抛「资源包需要更新应用版本」。
-// 这条不是「没有更新」，是「先装新版 APK」，得和普通错误分开说。
-let hotNeedsNewApp = '';
-let hotNoticeRevision = 0;
-let hotHealthyMarked = false;
-
-/** 「内置界面」还是「r20261018103000」。设置页那行副标题只要这一句。 */
-function uiRevisionLabel(status = hotStatus) {
-  const revision = Number(status?.revision) || 0;
-  return revision ? `界面 r${revision}` : '内置界面';
-}
-function syncHotStatus(status) {
-  if (!status || typeof status !== 'object') return;
-  hotStatus = status;
-  if (state.route === 'settings') renderSettingsKeepScroll();
-  const pending = Number(status.pending) || 0;
-  if (pending && pending !== hotNoticeRevision) {
-    hotNoticeRevision = pending;
-    toast(`前端更新 r${pending} 已下载，下次启动生效`);
-  }
-}
-window.hgHotUpdateStatus = syncHotStatus;
-// 原生 applyPendingResources() 会在 onResume 里问这一句。只在设置页返回 true，
-// 避免用户在首页滚到一半被 recreate 打断；其他页面等下次冷启动自动切换。
-window.hgCanApplyHotUpdate = () => Boolean(hotStatus && Number(hotStatus.pending) > 0)
-  && state.route === 'settings' && !document.hidden;
-
-// 更新这一块：**一行**。
-//
-// 旧版是两个 section 各带一段解释（界面文件走签名包、当前运行哪一版、有没有
-// 待应用的更新……），一屏塞不下。用户真正要知道的只有：现在是什么版本、
-// 要不要点。所以压成一行 —— 左边图标 + 「版本」+ 副标题，右边一个状态胶囊，
-// 检查按钮只在需要动作时出现（renderUpdateCheck 换的是这一行的尾巴）。
-function updateSection() {
-  const status = hotStatus;
-  const pending = Number(status?.pending) || 0;
-  const blocked = Number(status?.blocked) || 0;
-  const revision = Number(status?.revision) || 0;
-  const bundled = Number(status?.bundled) || 0;
-  const showBlocked = blocked > revision && revision > 0;
-  // 正在跑的界面到底是哪一版。revision 为 0 = 用的 APK 内置那份，这时要说的是
-  // 「内置 rX」而不是含糊的「内置界面」—— 和热更包用同一套编号，用户才能自己
-  // 比对谁新谁旧（也解释了为什么装完新 APK 界面就变了）。
-  const uiLabel = revision ? `热更 r${revision}` : bundled ? `内置 r${bundled}` : '内置界面';
-  return `<section class="settings-card" aria-label="版本与更新">
-    <div class="settings-row is-static" id="update-check-area">
-      <button type="button" class="settings-icon" data-secret-entry aria-label="当前版本 ${esc(appVersion || '读取中')}，${esc(uiLabel)}">${icon('update')}</button>
-      <span class="settings-body"><strong>版本</strong><small>${appVersion ? `v${esc(appVersion)}` : '读取中…'} · ${esc(uiLabel)}</small></span>
-      <span class="settings-tail" id="update-check-tail">${updateTailMarkup()}</span>
-    </div>
-    ${pending ? `<div class="settings-row is-action"><button type="button" class="settings-cta" data-hot-apply="1">立即应用新界面</button></div>` : ''}
-    ${hotNeedsNewApp ? `<div class="settings-row is-action"><button type="button" class="settings-cta" data-goto-app-update="1">去更新应用</button></div>` : ''}
-    ${showBlocked ? `<div class="settings-row is-static"><small class="settings-note">r${blocked} 没能启动，已回退到内置界面</small></div>` : ''}
-  </section>`;
-}
-
-/**
- * 版本行右边那一格。
- *
- * 三种形态，宽度都控制在一颗胶囊 / 一个按钮之内，所以这一行的高度永远不变 ——
- * 旧版是整块 innerHTML 替换（提示句 / 进度条 / 按钮各一种高度），每换一次页面
- * 就抖一下。
- */
-function updateTailMarkup() {
-  const u = updateCheck;
-  const status = hotStatus;
-  const pending = Number(status?.pending) || 0;
-  const checking = hotCheckPending || Boolean(status?.checking);
-  if (u.phase === 'downloading') {
-    const pct = Math.min(100, Math.floor(u.progress));
-    const speed = u.progress < 100 ? fmtSpeed(updateSpeed.bps) : '';
-    return `<span class="update-progress"><span class="update-progress-bar"><i style="width:${pct}%"></i></span><small>${pct}%${speed ? ' · ' + speed : ''}</small></span>`;
-  }
-  if (u.phase === 'checking' || checking) return '<span class="settings-chip">检查中</span>';
-  if (u.phase === 'error') {
-    return `<button type="button" class="settings-mini" data-check-update="1">重试</button>`;
-  }
-  if (u.phase === 'available') {
-    const version = esc(u.info?.version || '');
-    return `<button type="button" class="settings-mini is-primary" data-download-update="1">更新到 v${version}</button>`;
-  }
-  if (pending) return `<span class="settings-chip is-ok">r${pending} 待应用</span>`;
-  if (hotNeedsNewApp) return '<span class="settings-chip is-warn">需要新版</span>';
-  if (u.phase === 'none') return '<span class="settings-chip is-ok">已是最新</span>';
-  return '<button type="button" class="settings-mini" data-check-update="1">检查</button>';
-}
-
-async function checkHotUpdate() {
-  if (hotCheckPending) return;
-  hotCheckPending = true;
-  if (state.route === 'settings') renderSettingsKeepScroll();
-  try {
-    const status = await api('check-hot-update');
-    hotStatus = status;
-    hotNeedsNewApp = '';
-    if (Number(status?.pending) > 0) toast(`发现前端更新 r${status.pending}，下次启动生效`);
-    else toast('已经是最新界面');
-  } catch (error) {
-    const message = String(error.message || '');
-    if (message.indexOf('需要更新应用版本') >= 0) {
-      hotNeedsNewApp = '新的界面需要更新的应用版本，先装新版 APK';
-      toast('这个界面需要新版应用，先去「应用更新」', true);
-    } else {
-      toast(message || '检查更新失败', true);
-    }
-  } finally {
-    hotCheckPending = false;
-    if (state.route === 'settings') renderSettingsKeepScroll();
-  }
-}
-function applyHotUpdate() {
-  if (!hotStatus || !Number(hotStatus.pending)) return;
-  api('apply-hot-update').catch(error => toast(error.message || '应用更新失败', true));
-}
-function markHotUpdateHealthy() {
-  if (hotHealthyMarked) return;
-  const runtime = window.HotRuntime || {};
-  if (!runtime.revision || !runtime.bootId) return;
-  // 「启动成功」的判据不能只有首页：还没配源的机器会一直停在设置页，
-  // 首页永远不出现 —— 那样每个热更新都会被当成启动失败，下次启动回滚并拉黑。
-  // 设置页能显示出来，就说明 HTML/CSS/JS 都跑通了，算健康。
-  const setupOpen = !document.getElementById('setup-overlay')?.hidden;
-  const homeReady = Boolean(document.querySelector('#content .home-page'));
-  if (!setupOpen && !homeReady) return;
-  hotHealthyMarked = true;
-  bridgeCall('hot-ready', { revision: runtime.revision, bootId: runtime.bootId }).catch(() => { hotHealthyMarked = false; });
-}
-api('hot-update-status').then(syncHotStatus).catch(() => {});
 
 // ── 列表校正：网格页在乱写，拿详情页盖一遍 ──────────────────────────────
 //
@@ -1038,6 +1086,57 @@ api('hot-update-status').then(syncHotStatus).catch(() => {});
 // 首页和分类页的两个数组里（两个不同对象），只记「请求过」的话，第二个列表永远
 // 补不上（真机踩到：首页补好了，切到高清 tab 又变回假封面）。
 const reconciledFixes = new Map();
+// 试过一次「源没有 reconcile 能力」就记住，别再对同一个源反复问。
+// 不为这个加一套能力协商：一次失败的调用换来本会话的静默，够了。
+const reconcileUnsupported = new Set();
+
+// ── 校正结果落盘 ────────────────────────────────────────────────
+//
+// 校正很贵：真机上单条详情要 5-6 秒（走代理），一页 24 条哪怕并发 8 也要近 20 秒。
+// 只在内存里记，冷启动一次就白干一次；用户每次开 App 都得等那 20 秒。
+//
+// 存 localStorage，按源分区（不同源的 id 可能撞车，91porn 是纯数字 viewkey）。
+// 加时间戳，超过 7 天整份丢掉 —— 同一个 viewkey 的标题基本不变，但站点的片子
+// 会下架、会被投稿者改标题，留太久就会拿一份过期真值盖掉新的正确值。
+const RECONCILE_TTL_MS = 7 * 24 * 3600 * 1000;
+const RECONCILE_LIMIT = 400;
+let reconcileStoreLoaded = false;
+
+function reconcileStoreKey() {
+  return 'hgreconcile:' + (spiderIdOf() || 'default');
+}
+
+function loadReconcileStore() {
+  if (reconcileStoreLoaded) return;
+  reconcileStoreLoaded = true;
+  try {
+    const raw = localStorage.getItem(reconcileStoreKey());
+    if (!raw) return;
+    const box = JSON.parse(raw);
+    if (!box || !box.savedAt || Date.now() - box.savedAt > RECONCILE_TTL_MS) {
+      localStorage.removeItem(reconcileStoreKey());
+      return;
+    }
+    Object.keys(box.items || {}).forEach((id) => {
+      const fix = box.items[id];
+      if (fix && (fix.title || fix.cover)) reconciledFixes.set(id, fix);
+    });
+  } catch (error) {
+    // 存储坏了就当成空 —— 校正失败最多是回到站点的原样，不影响主流程。
+  }
+}
+
+function saveReconcileStore() {
+  try {
+    const entries = [...reconciledFixes.entries()].slice(-RECONCILE_LIMIT);
+    const items = {};
+    entries.forEach(([id, fix]) => { items[id] = fix; });
+    localStorage.setItem(reconcileStoreKey(), JSON.stringify({ savedAt: Date.now(), items }));
+  } catch (error) {
+    // 超配额就放弃这次写入，内存里那份照样生效。
+  }
+}
+
 function homeItems(data) {
   return [...asArray(data?.featured), ...asArray(data?.homepageRecommend), ...asArray(data?.homepageNewest),
           ...asArray(data?.recommend?.items), ...asArray(data?.newest?.items)];
@@ -1055,16 +1154,27 @@ function applyFixes(items) {
   return touched;
 }
 async function reconcileCards(items, onPatched) {
-  // spider 源不校正，直接返回。
+  // 网格页的标题/封面会错位，用详情页盖一遍。
   //
-  // 两件事：ABI 里没有 reconcile 这个能力（硬调只会抛「未知的能力名」）；
-  // 更重要的是它压根不需要 —— 那套「网格页 id 重复、拿详情页盖一遍」的补丁是
-  // 抓 HTML 时代的产物（91porn 一页 40 张卡里 12 个重复 viewkey）。spider 的
-  // 卡片是它自己从详情页里取的 id，一上来就是真的。
+  // ── 2026-10-19 改：spider 源也要校正 ──────────────────────────────
   //
-  // Java 版当年实现它是「不需要校正但必须应答，否则日志比正常请求还密」；
-  // spider 版没有这个应答，所以干脆不问。让源去实现一个空壳才是错的方向。
-  if (spiderIdOf()) return;
+  // 这里原来有一句 `if (spiderIdOf()) return;`，理由写得很像回事：「spider 的
+  // 卡片是它自己从详情页里取的 id，一上来就是真的」。**那句话是错的。**
+  // porn91.js 的 parseCards 是从网格页抠 href + 标题 + <img src>，和 Java 时代
+  // 一模一样，站点那套迷魂阵原样回来了：
+  //
+  //   列表卡  viewkey=1536834169  标题「调教07母狗…」  封面 thumb/1252773.jpg
+  //   详情页  viewkey=1536834169  标题「怪兽酒馆…」    封面 thumb/1252788.jpg
+  //   真身    viewkey=1514471335  标题「调教07母狗…」  封面 thumb/1252737.jpg
+  //
+  // 也就是标题和封面被挂到了第三个 viewkey 上，点进去就是「货不对版」。
+  // 实测 5 条里错 2 条，不是偶发。
+  //
+  // 现在：源里实现了 reconcile 才问（能力集自报，见 spiderMetaOf）；一次调用、
+  // 源内用 netAll 并发拉详情（Java 侧线程池，8 并发，24 条约 7 秒）。
+  // 逐条走 bridge 的老路不能要 —— 一次 detail 调用的开头就要重捡一次游客标记，
+  // 24 条等于 24 倍请求量。
+  loadReconcileStore();
   const list = asArray(items).filter(item => item && item.id);
   if (!list.length) return;
   // 已经校正过的 id 立刻套一遍（不花请求，也不等网络）
@@ -1074,17 +1184,42 @@ async function reconcileCards(items, onPatched) {
   const missing = [...new Set(list.map(item => item.id))].filter(id => !reconciledFixes.has(id)).slice(0, 30);
   if (!missing.length) return;
 
-  let data = null;
-  try {
-    const reply = await bridgeCall('detail', { id: '/api/reconcile?ids=' + encodeURIComponent(missing.join(',')) });
-    const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
-    data = (result && (result.data || result)) || null;
-  } catch (error) {
-    return;                       // 整批失败：什么都不记，下次进来还能重试
+  let fixed = [];
+  if (spiderIdOf()) {
+    const spiderId = spiderIdOf();
+    // 源里实现了 reconcile 才问。**开关不再写在配置里**（`web.reconcile`）：
+    // 那是把源的实现细节漏到了源配置的结构里，而配置是给人填参数用的。
+    // 能力集里有没有这个函数，才是这件事本身。
+    if (reconcileUnsupported.has(spiderId)) return;
+    const info = await spiderMetaOf(spiderId);
+    if (info.caps.length && info.caps.indexOf('reconcile') < 0) return;
+    try {
+      const payload = await bridgeCall('spider', {
+        op: 'call', id: spiderId, cap: 'reconcile', args: { ids: missing }, timeoutMs: 45000
+      });
+      fixed = asArray(payload && payload.items);
+    } catch (error) {
+      const why = String((error && error.message) || error);
+      // **超时不能记成「源不支持」**：超时是网络或预算问题，下一次可能就通了，
+      // 记住它等于这一会话再也不校正，用户会一直看到错卡。
+      if (why.indexOf('没有实现') >= 0) reconcileUnsupported.add(spiderId);
+      console.log('[reconcile] ' + spiderId + ' 本轮没校正：' + why);
+      return;                       // 整批失败：什么都不记，下次进来还能重试
+    }
+  } else {
+    let data = null;
+    try {
+      const reply = await bridgeCall('detail', { id: '/api/reconcile?ids=' + encodeURIComponent(missing.join(',')) });
+      const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
+      data = (result && (result.data || result)) || null;
+    } catch (error) {
+      return;                       // 整批失败：什么都不记，下次进来还能重试
+    }
+    fixed = asArray(data && data.items);
   }
-  const fixed = asArray(data && data.items);
   if (!fixed.length) return;
   fixed.forEach(entry => { if (entry && entry.id) reconciledFixes.set(entry.id, entry); });
+  saveReconcileStore();
   const touched = applyFixes(list);
   if ((touched || fixed.length) && typeof onPatched === 'function') onPatched();
 }
@@ -1104,7 +1239,10 @@ function section(title, items, kind = '') {
 }
 function homeTagBar() {
   const ui = siteUi();
-  const choices = privateMode() ? (ui.popularTags || []) : (ui.publicPopularTags || []);
+  // 首页「按类型浏览」那排。publicPopularTags 是给公开源用的，popularTags 是
+  // 更早的一版字段；两份都空就只剩「全部类型」一个按钮（不是错误，只是空）。
+  const choices = (ui.publicPopularTags && ui.publicPopularTags.length)
+    ? ui.publicPopularTags : (ui.popularTags || []);
   return `<nav class="home-tags" aria-label="按类型浏览"><button type="button" class="all-tags-link" data-all-tags="1">全部类型 ${icon('arrow')}</button>
     <div class="home-tag-scroll">${choices.map(([slug, name]) => `<button type="button" class="home-tag" data-tag-slug="${slug}" data-tag-name="${name}">${name}</button>`).join('')}</div></nav>`;
 }
@@ -1152,7 +1290,7 @@ function goCampaign(item) {
     + '<section class="campaign-message"><h2>共庆好时光</h2><p>' + esc(item.message || '') + '</p><button type="button" data-back>返回首页</button></section></article>';
   scroll.scrollTop = 0;
 }
-function isBannerRoute() { return state.route === 'home' || (state.route === 'category' && !privateMode()); }
+function isBannerRoute() { return state.route === 'home' || state.route === 'category'; }
 function bannerSlides() { return state.route === 'category' ? asArray(state.category?.items).slice(0, 5) : homeSlides(); }
 function bannerIndex() { return state.route === 'category' ? state.categoryBanner : state.banner; }
 function restoreBannerIndex() {
@@ -1294,13 +1432,10 @@ function renderHome() {
       ${homeTagBar()}
       <div class="home-continue">${continueWatchingMarkup()}</div>
       ${section('精选推荐', asArray(data.homepageRecommend).length ? asArray(data.homepageRecommend) : asArray(data.recommend?.items).slice(0, 12), 'recommend')}
-      ${section(privateMode() ? '最近上新' : '热门漫剧', asArray(data.homepageNewest).length ? asArray(data.homepageNewest) : asArray(data.newest?.items).slice(0, 12), 'newest')}</div>`;
+      ${section('最新上架', asArray(data.homepageNewest).length ? asArray(data.homepageNewest) : asArray(data.newest?.items).slice(0, 12), 'newest')}</div>`;
   cover.hydrate();
   slides.forEach(item => { if (item.cover) cover.get(item.cover).catch(() => {}); });
   scheduleBannerAuto();
-  // 热更新 session 的 trial 只有在首页真的画出来之后才算健康；否则下次启动
-  // beginSession 会把它回滚到上一版。延迟一拍，等首屏图片和新 DOM 稳定。
-  setTimeout(markHotUpdateHealthy, 400);
 }
 
 function renderTags() {
@@ -1308,9 +1443,9 @@ function renderTags() {
   // ── 2026-10-17 修：非 private 模式原来**不看配置** ──────────────────
   //
   // 原代码：
-  //   const sections = privateMode() ? (siteUi().tagGroups || []) : [['short','短剧类型'],['comic','漫剧类型']];
+  //   const sections = （曾经按双态分叉，现在只剩配置这一条）
   //
-  // 而 privateMode() 只对内置的黄果源为 true（contentSource === 'huangguo'）。
+  // 而当时的双态判断只对内置源成立。
   // 于是**所有用户自带源**都被按死在那一对短剧/漫剧上：配置里写了什么
   // tagGroups 都没用，标签的 group 只要不是 short/comic 就一个都渲染不出来。
   //
@@ -1320,8 +1455,10 @@ function renderTags() {
   // 现在的顺序：**配置优先**。只有配置里没写 tagGroups 时才退回内置分组，
   // 这样黄果那套和旧的短剧/漫剧源行为不变。
   const configured = siteUi().tagGroups || [];
-  const base = configured.length ? configured
-    : (privateMode() ? [] : [['short', '短剧类型'], ['comic', '漫剧类型']]);
+  // 配置里没写组就空着 —— 下面那段「数据里出现的组按需补上」会把它们捡回来，
+  // 分组标题用 GROUP_TITLE 兜底。原来这里默认塞「短剧类型 / 漫剧类型」，
+  // 那是内置源的分组词汇，对别的源是错的。
+  const base = configured;
   // **数据里出现的组必须都能渲染。** 配置是「这份源有哪些组」的声明，但源是会
   // 变的（91porn 就是：标签页列的是站点分类栏，组名叫 category，而它那份
   // user-source.json 是更早的版本生成的，里面根本没有 tagGroups）。只按配置
@@ -1367,22 +1504,11 @@ function categoryId() {
   const ids = siteUi().categoryIds || {};
   return (ids[state.tab] || [])[subIndex(state.tab)];
 }
-function compactMarkup() {
-  if (!privateMode()) return '';
-  const adult = state.tab === 'adult';
-  const tabs = categoryTabs();
-  return `<strong>${categoryTitle()}</strong><div class="compact-tabs${tabs.length > 2 ? ' many' : ''}" role="tablist">${tabs.map((name, index) => `<button type="button" role="tab" aria-selected="${index === subIndex(state.tab)}" data-sub="${index}" class="${index === subIndex(state.tab) ? 'selected' : ''}">${name}</button>`).join('')}</div>`;
-}
-function updateCompact() {
-  const eligible = privateMode() && state.route === 'category';
-  if (!eligible || scroll.scrollTop <= 0) state.compactHeld = false;
-  else if (scroll.scrollTop > 92) state.compactHeld = true;
-  const visible = eligible && state.compactHeld;
-  compact.classList.toggle('visible', visible);
-  compact.setAttribute('aria-hidden', String(!visible));
-  compact.inert = !visible;
-  content.querySelector('.category-page')?.classList.toggle('is-collapsed', visible);
-}
+// 分类页顶部那根「滚动时收成一条」的紧凑头，是内置私密源的双分区产物。
+// 双态拆掉之后它没有触发条件了，留两个空函数是为了不动调用点（renderCategory
+// 和 scroll 监听都在用）——真要复用得先想清楚它对单分区的源是什么语义。
+function compactMarkup() { return ''; }
+function updateCompact() { compact.classList.remove('visible'); }
 scroll.addEventListener('scroll', updateCompact, { passive: true });
 
 function renderCategory(keepCompact = false) {
@@ -1391,19 +1517,28 @@ function renderCategory(keepCompact = false) {
   const tabs = categoryTabs();
   const items = asArray(state.category?.items);
   const lead = items[0] || null;
-  const slides = privateMode() ? [] : items.slice(0, 5);
+  const slides = items.slice(0, 5);
   const banner = Math.min(state.categoryBanner, Math.max(0, slides.length - 1));
   state.categoryBanner = banner;
-  const spotlight = !privateMode() && slides.length ? `<div class="hero category-spotlight category-carousel">${categorySlide(slides[banner], banner, slides.length)}</div><div class="hero-dots">${slides.map((_, index) => `<i class="${index === banner ? 'active' : ''}" data-slide="${index}"></i>`).join('')}</div>` : lead ? `<div class="category-spotlight"><img data-cover="${esc(lead.cover)}" alt=""><div class="category-spotlight-copy"><h2>${esc(lead.title)}</h2><button type="button" data-open-id="${esc(lead.id)}">查看作品 ${icon('arrow')}</button></div></div>` : '';
+  const spotlight = slides.length ? `<div class="hero category-spotlight category-carousel">${categorySlide(slides[banner], banner, slides.length)}</div><div class="hero-dots">${slides.map((_, index) => `<i class="${index === banner ? 'active' : ''}" data-slide="${index}"></i>`).join('')}</div>` : lead ? `<div class="category-spotlight"><img data-cover="${esc(lead.cover)}" alt=""><div class="category-spotlight-copy"><h2>${esc(lead.title)}</h2><button type="button" data-open-id="${esc(lead.id)}">查看作品 ${icon('arrow')}</button></div></div>` : '';
   // 分类多于两个时挂 `many`：CSS 那边 .segmented 是写死的两列网格（黄果就两个），
   // 塞八个进去会塌成四行、高度还卡在 51px，于是盖住下面的卡片。
   // 挂上类之后改成横向滚动，两个的源看起来跟原来一模一样。
-  const switcher = privateMode() ? `<div class="segmented${tabs.length > 2 ? ' many' : ''}" role="tablist">${tabs.map((name, index) => `<button type="button" role="tab" data-sub="${index}" aria-selected="${index === subIndex(state.tab)}" class="${index === subIndex(state.tab) ? 'selected' : ''}">${name}</button>`).join('')}</div>` : '';
-  content.innerHTML = `<div class="category-page"><div class="category-head"><h1>${categoryTitle()}</h1><p>${categoryLead()}</p></div>
+  // 一个 tab 底下有多个分类才需要这排切换器。原来它只在「私密态」渲染，
+  // 于是苹果CMS 那种一个 tab 挂四十多个分类的源永远切不到别的分类。
+  const switcher = tabs.length > 1 ? `<div class="segmented${tabs.length > 2 ? ' many' : ''}" role="tablist">${tabs.map((name, index) => `<button type="button" role="tab" data-sub="${index}" aria-selected="${index === subIndex(state.tab)}" class="${index === subIndex(state.tab) ? 'selected' : ''}">${name}</button>`).join('')}</div>` : '';
+  // 副标题只有配置给了才画（见 categoryLead）；加载中画骨架卡，不是一片空白。
+  //
+  // 原来加载时这里是「已显示 0 部」+ 空网格 + 一行「正在加载…」—— 一屏全黑，
+  // 用户唯一能判断「它在动」的就是那行小字。骨架至少有形状：6 张海报位在那儿
+  // 呼吸，用户知道「这一屏马上有东西」。
+  const leadText = categoryLead();
+  const loading = !state.category;
+  content.innerHTML = `<div class="category-page"><div class="category-head"><h1>${categoryTitle()}</h1>${leadText ? `<p>${esc(leadText)}</p>` : ''}</div>
     ${switcher}
     ${spotlight}
-    <section class="category-section"><div class="section-heading"><h2>${tabs[subIndex(state.tab)]}作品</h2><span class="category-count">已显示 ${items.length} 部</span></div>
-    <div class="search-grid category-grid">${items.map(itemCard).join('')}</div><div class="category-footer">${categoryFooter()}</div></section></div>`;
+    <section class="category-section"><div class="section-heading"><h2>${tabs[subIndex(state.tab)]}作品</h2><span class="category-count">${loading ? '正在加载…' : `已显示 ${items.length} 部`}</span></div>
+    <div class="search-grid category-grid">${loading ? skeletonCards(6) : items.map(itemCard).join('')}</div><div class="category-footer">${categoryFooter()}</div></section></div>`;
   compact.innerHTML = compactMarkup();
   scroll.scrollTop = keepCompact ? 150 : 0;
   state.compactHeld = keepCompact;
@@ -1412,10 +1547,14 @@ function renderCategory(keepCompact = false) {
   observeCategoryEnd();
   slides.forEach(item => { if (item.cover) cover.get(item.cover).catch(() => {}); });
   scheduleBannerAuto();
+  scheduleCategoryWarmup();
 }
 
 function categoryFooter() {
   const category = state.category;
+  // 壳刚画出来、数据还没到：这时候上面已经是骨架卡 + 「正在加载…」了，
+  // 这里再写一句就是同一个词在一屏里出现两次。留空比重复好。
+  if (!category) return '';
   if (category?.error) return '<button type="button" data-retry-category="1">加载失败，点击重试</button>';
   if (category?.loading) return '<span role="status">正在加载更多…</span>';
   if (category?.refreshing) return '<span role="status">正在更新列表…</span>';
@@ -1494,6 +1633,51 @@ function appearanceSection() {
         <span class="settings-seg-label">${label}</span>
       </button>`).join('')}</div>
   </section>`;
+}
+
+/**
+ * 设置页的「版本与更新」一行。
+ *
+ * <p>热更那半截（界面资源包、待应用、需要新版 APK）2026-10-19 整块拆掉了：
+ * 它的问题是**越级覆盖** —— 装一版带新界面的 APK 之后，设备上跑的仍然是旧热更包
+ * 里的前端，而「关于」页的版本号完全看不出来，于是「我明明装了新版」和
+ * 「怎么还是老样子」会同时成立。现在界面只有 APK 里那一份，装了什么就是什么。
+ *
+ * <p>剩下的只有 APK 更新：检查清单、下载、拉起安装器，都是原生 UpdateManager 在跑。
+ */
+function updateSection() {
+  return `<section class="settings-card" aria-label="版本与更新">
+    <div class="settings-row is-static" id="update-check-area">
+      <button type="button" class="settings-icon" data-secret-entry aria-label="当前版本 ${esc(appVersion || '读取中')}">${icon('update')}</button>
+      <span class="settings-body"><strong>版本</strong><small>${appVersion ? `v${esc(appVersion)}` : '读取中…'}</small></span>
+      <span class="settings-tail" id="update-check-tail">${updateTailMarkup()}</span>
+    </div>
+  </section>`;
+}
+
+/**
+ * 版本行右边那一格。
+ *
+ * <p>四种形态，宽度都控制在一颗胶囊 / 一个按钮之内，所以这一行的高度永远不变 ——
+ * 整块 innerHTML 替换的话（提示句 / 进度条 / 按钮各一种高度），每换一次页面就抖一下。
+ */
+function updateTailMarkup() {
+  const u = updateCheck;
+  if (u.phase === 'downloading') {
+    const pct = Math.min(100, Math.floor(u.progress));
+    const speed = u.progress < 100 ? fmtSpeed(updateSpeed.bps) : '';
+    return `<span class="update-progress"><span class="update-progress-bar"><i style="width:${pct}%"></i></span><small>${pct}%${speed ? ' · ' + speed : ''}</small></span>`;
+  }
+  if (u.phase === 'checking') return '<span class="settings-chip">检查中</span>';
+  if (u.phase === 'error') {
+    return `<button type="button" class="settings-mini" data-check-update="1">重试</button>`;
+  }
+  if (u.phase === 'available') {
+    const version = esc(u.info?.version || '');
+    return `<button type="button" class="settings-mini is-primary" data-download-update="1">更新到 v${version}</button>`;
+  }
+  if (u.phase === 'none') return '<span class="settings-chip is-ok">已是最新</span>';
+  return '<button type="button" class="settings-mini" data-check-update="1">检查</button>';
 }
 
 function renderSettings() {
@@ -1754,17 +1938,20 @@ function finishResetLogout() {
 }
 
 function renderSearch() {
-  const filters = privateMode() ? [['all', '全部'], ['ai-duanju', '成人短剧'], ['ai-manju', '成人漫剧'], ['ai-huanlian', 'AI换脸'], ['ai-mogai', 'AI魔改']] : [['all', '全部'], ['short', '短剧'], ['comic', '漫剧']];
-  const all = asArray(state.search?.items);
-  const items = state.filter === 'all' ? all : all.filter(item => {
-    if (item.category) return item.category === state.filter;
-    const title = String(item.title || '');
-    if (state.filter === 'ai-huanlian') return /AI\s*换脸/.test(title);
-    if (state.filter === 'ai-mogai') return /AI\s*魔改/.test(title);
-    if (state.filter === 'ai-manju') return /漫剧/.test(title);
-    return !/AI\s*(换脸|魔改)|漫剧/.test(title);
-  });
-  content.innerHTML = `<div class="search-page"><h1>搜索结果</h1><p>${esc(state.query)} · ${items.length} 部作品</p>${searchFeedback()}<div class="filter-row">${filters.map(([id, label]) => `<button type="button" data-filter="${id}" class="${state.filter === id ? 'active' : ''}">${label}</button>`).join('')}</div>
+  // 搜索结果就是搜索结果，**不带分类胶囊**。
+  //
+  // 这里原来有一排写死的过滤条：黄果源那套「成人短剧 / 成人漫剧 / AI换脸 / AI魔改」，
+  // 别的源换成「短剧 / 漫剧」。两个问题：
+  //
+  //   ① 它跟搜索词毫无关系。搜「爱」也照样挂在标题下面，看起来像「你搜的结果被
+  //      这几类分好了」。
+  //   ② 那个过滤是拿标题猜的 —— `/AI\s*换脸/.test(标题)`、`/漫剧/.test(标题)`。
+  //      猜错的结果是「少了几个结果」，不报错；用户只会觉得「搜索不全」。
+  //      而用户自带的 spider 源每家分类都不一样，写死一份必然对不上。
+  //
+  // 要按分类找东西有「全部类型」，那里列的是源自己的分类。搜索只负责搜索。
+  const items = asArray(state.search?.items);
+  content.innerHTML = `<div class="search-page"><h1>搜索结果</h1><p>${esc(state.query)} · ${items.length} 部作品</p>${searchFeedback()}
     ${items.length ? `<div class="search-grid">${items.map(itemCard).join('')}</div>` : '<div class="empty-state">没有找到匹配的影片</div>'}</div>`;
   cover.hydrate();
 }
@@ -1803,8 +1990,10 @@ function renderListing() {
   const listing = state.listing;
   if (!listing?.items.length && listing?.refreshing) { renderSkeleton(); return; }
   const tagName = String(listing.label || listing.slug).replace(/^#+/, '');
-  const tagTitle = privateMode() ? `#${tagName}` : `${listing.slug?.startsWith('comic:') ? '漫剧' : '短剧'} · ${tagName}`;
-  const title = listing.kind === 'tag-list' ? tagTitle : listing.kind === 'recommend' ? '精选推荐' : privateMode() ? '最近上新' : '热门漫剧';
+  // 标签页标题就是标签本身。原来在公开态会拼成「短剧 · XXX」，那是内置源
+  // 按短剧/漫剧分标签的写法，别的源套上就是错的。
+  const tagTitle = `#${tagName}`;
+  const title = listing.kind === 'tag-list' ? tagTitle : listing.kind === 'recommend' ? '精选推荐' : '最新上架';
   const backLabel = listing.kind === 'tag-list' && state.listingReturn?.route === 'tags' ? '返回全部类型' : '返回首页';
   content.innerHTML = `<div class="listing-page"><button class="listing-back" type="button" data-back="1">${icon('back')} ${backLabel}</button>
     <h1>${esc(title)}</h1><p>已显示 ${listing.items.length} 部作品</p>
@@ -1835,6 +2024,20 @@ function searchFeedback() {
 function renderSearchLoading() {
   content.innerHTML = `<section class="search-loading" role="status" aria-live="polite" aria-busy="true"><span class="search-spinner search-spinner--large" aria-hidden="true"></span><h1>正在搜索…</h1><p>${esc(state.query)}</p></section>`;
 }
+/**
+ * 网格位上的骨架卡。分类页 / 标签页 / 搜索页加载时都用这个。
+ *
+ * 首页那块整套 skeleton-home 是「大图 + 一行卡」，而这三处是纯网格 —— 用首页那套
+ * 会画出一个不属于这里的横幅位。
+ */
+function skeletonCards(count = 6) {
+  let out = '';
+  for (let i = 0; i < count; i += 1) {
+    out += '<div class="skeleton-card" aria-hidden="true"><div class="skeleton skeleton-poster"></div><div class="skeleton skeleton-card-title"></div></div>';
+  }
+  return out;
+}
+
 function renderSkeleton() {
   content.innerHTML = '<div class="skeleton-home" role="status" aria-label="正在加载内容"><div class="skeleton skeleton-hero"></div><div class="skeleton skeleton-title"></div><div class="skeleton-row"><div class="skeleton skeleton-poster"></div><div class="skeleton skeleton-poster"></div><div class="skeleton skeleton-poster"></div></div><div class="skeleton skeleton-line"></div></div>';
 }
@@ -1982,22 +2185,24 @@ function updateBackEnabled() {
 }
 
 let viewEnterTimer;
+/**
+ * 切页的入场动画 —— **已停用**（2026-10-19）。
+ *
+ * <p>它原来是每次路由变化都给 {@code #content} 的子元素挂一段 0.4s 的
+ * {@code view-enter}（从 opacity 0 平移 14px 浮上来）。三个问题叠在一起：
+ *
+ * <ol>
+ *   <li>内容要花 400ms 才「到位」，点一下之后眼睛看着它慢慢浮，体感就是迟滞；</li>
+ *   <li>为了能重启动画，连点时每次都要 {@code void app.offsetWidth} ——
+ *       那是一次**强制同步布局**，正好发生在用户刚点下去、最不该卡的那一帧；</li>
+ *   <li>连点 N 次就有 N 段动画排着队，屏幕上同时有好几层在动。</li>
+ * </ol>
+ *
+ * <p>切页要的是「立刻到位」。淡入留给详情页那种真正的转场（card-transition 管）。
+ */
 function playViewEnter(route) {
   const app = document.getElementById('app');
-  // 详情页的进场由 card-transition 自己接管，这里再叠一层会两个动画抢同一个元素。
-  // 从详情返回时 state.previous 还在，卡片刚合上再淡入一次首页会像抖了两下。
-  if (route === 'detail' || state.previous || (reducedMotionQuery && reducedMotionQuery.matches)) {
-    app.classList.remove('view-enter');
-    return;
-  }
-  // 只有上一段动画还在（快速连按）时才需要强制一次布局让移除生效；
-  // 平常这条路径不读 offsetWidth，省掉导航时的一次额外布局。
-  const restarting = app.classList.contains('view-enter');
-  app.classList.remove('view-enter');
-  if (restarting) void app.offsetWidth;
-  app.classList.add('view-enter');
-  clearTimeout(viewEnterTimer);
-  viewEnterTimer = setTimeout(() => app.classList.remove('view-enter'), 560);
+  if (app.classList.contains('view-enter')) app.classList.remove('view-enter');
 }
 
 function setRoute(route) {
@@ -2012,7 +2217,7 @@ function setRoute(route) {
   app.classList.toggle('route-detail', route === 'detail');
   window.AndroidHost?.setDetailMode?.(route === 'detail');
   headerSettings.hidden = route !== 'library';
-  searchInput.placeholder = libraryArea ? '搜索观看历史和收藏' : privateMode() ? '搜索剧名或 #标签' : '搜索剧名';
+  searchInput.placeholder = libraryArea ? '搜索观看历史和收藏' : '搜索剧名或 #标签';
   searchInput.setAttribute('aria-label', libraryArea ? '搜索观看历史和收藏' : '搜索剧名或标签');
   if (route === 'library') searchInput.value = state.libraryQuery;
   updateBackEnabled();
@@ -2146,14 +2351,181 @@ window.hgPredictiveBackCommit = () => {
   return true;
 };
 
-function setNav(tab) {
+/**
+ * 换底部高亮。
+ *
+ * `keepState` 是给「折叠面板里换分类」用的：那种场景是从分类页**内部**切换，
+ * 用户没有离开当前滚动位置，所以不能顺手把折叠面板收掉、把滚动条弹回顶部 ——
+ * 那会让他在第八十部作品上点一下「AI」，回来发现位置没了。
+ *
+ * 但**高亮必须跟着换**。原来这个函数被整个跳过（`if (!keepCompact) setNav(tab)`），
+ * 于是折叠面板里点分类，页面内容换了、底部还亮着上一个 tab —— 就是
+ * 「页面换过去了按钮没换过去」。
+ */
+/**
+ * 源连不上时的冷却窗口。
+ *
+ * <p>2026-10-19 实测：手机网络到 {@code api.agedm.io} 的 HTTPS 在 TLS 之后被掐
+ * （curl 直接 `Empty reply from server`，同一台机器上百度/GitHub 都是 200）。
+ * 这种情况下每次切页都要重新撞一次墙：一个请求 1.8 秒，还带 2s/5s/12s 的退避重试。
+ *
+ * <p>用户看不到「连不上」，只看到「点了半天没反应」。所以失败之后闭嘴一分钟：
+ * 直接用缓存渲染，不再发请求，也不再重试。用户这时换源或开代理，下一次正常。
+ */
+const NET_COOLDOWN_MS = 60000;
+function netCoolingDown() {
+  return Date.now() - (state.netFailAt || 0) < NET_COOLDOWN_MS;
+}
+function noteNetFailure() {
+  state.netFailAt = Date.now();
+}
+function noteNetSuccess() {
+  state.netFailAt = 0;
+}
+
+/**
+ * 分类页的静默预热。
+ *
+ * <p>本地实测（2026-10-19 真机）：同一个分类第二次点进来是 **14~25ms**，第一次是
+ * **1679ms**。差的全部是 spider 那一趟网络。也就是说「快」和「慢」的唯一区别是
+ * 缓存里有没有这份数据。
+ *
+ * <p>那就提前把它填好：用户停在分类页 2.5 秒不动，后台把当前 tab 下**其他**分类的
+ * 第一页各拉一遍，写进同一套缓存。之后点哪个都是十几毫秒。
+ *
+ * <p>三条约束：
+ * <ul>
+ *   <li>只拉当前 tab 的，且跳过还新鲜的缓存；</li>
+ *   <li>每拉一个停 400ms，把 spider 那条串行通道让出来 —— 用户这时候点别的，
+ *       最多等一次往返，而不是排在一串预取后面；</li>
+ *   <li>路线一换（切 tab、离开分类页）立刻停，已经发出去的请求会被世代机制作废。</li>
+ * </ul>
+ */
+let warmupTimer = 0;
+let warming = false;
+
+function scheduleCategoryWarmup() {
+  clearTimeout(warmupTimer);
+  warmupTimer = setTimeout(runCategoryWarmup, 2500);
+}
+
+async function runCategoryWarmup() {
+  if (warming || state.route !== 'category') return;
+  warming = true;
+  const tab = state.tab;
+  try {
+    const ids = (siteUi().categoryIds || {})[tab] || [];
+    for (let i = 0; i < ids.length; i++) {
+      if (state.route !== 'category' || state.tab !== tab) return;
+      const cacheKey = `category:${ids[i]}:1`;
+      const cached = readCache(cacheKey);
+      if (cached?.data && Date.now() - (cached.at || 0) < 120000) continue;
+      try {
+        const data = await api('category', { id: ids[i], page: 1 });
+        if (data) writeCache(cacheKey, data);
+      } catch (error) {
+        // 预取失败不打扰用户：他真点进去时那条路自己会报错。
+      }
+      await new Promise(resolve => setTimeout(resolve, 400));
+    }
+  } finally {
+    warming = false;
+  }
+}
+
+/**
+ * 把「当前选中哪个子分类」立刻画到界面上。
+ *
+ * <p>这件事原来只发生在 {@code renderCategory()} 生成 HTML 的那一刻。于是有缓存时
+ * 点下去就有反馈（几百毫秒内重画），**没缓存时走进度条分支、不重建 DOM，子 tab 的
+ * 高亮就一直停在旧的那个**，直到 1.5 秒后数据回来。
+ *
+ * <p>用户看到的：点了「运动」，那一排还是「搞笑」亮着，页面也没动 —— 判断成「没点中」，
+ * 再点一次。连点几次之后彻底分不清自己在哪一屏。所谓「连续点击很卡」，核心是这个地方。
+ *
+ * <p>所以选中态必须跟手：切换时同步改 class，与数据到不到无关。
+ */
+function applySubSelection(sub) {
+  const page = content.querySelector('.category-page');
+  const hosts = [page, compact].filter(Boolean);
+  hosts.forEach(host => {
+    host.querySelectorAll('[data-sub]').forEach(button => {
+      const on = Number(button.dataset.sub) === sub;
+      button.classList.toggle('selected', on);
+      button.setAttribute('aria-selected', String(on));
+    });
+  });
+  // 区块标题（「搞笑作品」→「运动作品」）也是同一件事：它描述的是「你要看什么」，
+  // 不是「已经拿到了什么」。
+  const heading = page?.querySelector('.category-section .section-heading h2');
+  if (heading) {
+    const tabs = categoryTabs();
+    if (tabs[sub]) heading.textContent = tabs[sub] + '作品';
+  }
+  // 旧卡片还挂在那儿，明确标成「这条不是你要的」，免得标题和内容对不上。
+  page?.querySelector('.category-grid')?.classList.add('is-stale');
+}
+
+function clearStaleCards() {
+  content.querySelector('.category-grid')?.classList.remove('is-stale');
+}
+
+function setNav(tab, keepState = false) {
   listingObserver?.disconnect();
   categoryObserver?.disconnect();
   document.querySelectorAll('#dock [data-nav]').forEach(button => button.classList.toggle('active', button.dataset.nav === tab));
+  if (keepState) return;
   compact.classList.remove('visible');
   compact.inert = true;
   state.compactHeld = false;
   scroll.scrollTop = 0;
+}
+
+/**
+ * 分类切换时的顶栏进度条。
+ *
+ * <p>只做视觉，不挡交互：内容仍然是上一屏，用户还能继续滑动、还能再点一次。
+ * 这比「把整屏清成骨架屏」好一个量级 —— 后者在 1.5 秒里什么都点不了，
+ * 用户对「卡」的全部感受就来自那一段。
+ */
+function setCategoryBusy(on) {
+  const app = document.getElementById('app');
+  if (!app) return;
+  let bar = document.getElementById('category-busy');
+  if (on) {
+    if (!bar) {
+      bar = document.createElement('i');
+      bar.id = 'category-busy';
+      bar.className = 'busy-bar';
+      app.appendChild(bar);
+    }
+    bar.classList.add('visible');
+    return;
+  }
+  if (bar) bar.classList.remove('visible');
+}
+
+/**
+ * 手指一落下就把底部高亮换过去。
+ *
+ * <p>为什么不用 click：click 要等 touchend 之后（实测 4ms，本身不慢），但它排在
+ * 整个页面共用的事件处理器最后面 —— 那个处理器要从上到下走几十个 {@code closest()}
+ * 才轮到 `[data-nav]`。主线程只要在忙（封面解密回来的那一批回调），这段排队就会
+ * 变成肉眼可见的「按下去按钮不动」。
+ *
+ * <p>pointerdown 比 click 早一个阶段（手指按下就发），而且这里只改一个 class，
+ * 不进任何网络/渲染路径。真正切页仍然由后面的 click → tapDock → goXxx 完成，
+ * 所以按下划走也不会误导航 —— 最多留下一格高亮，下一次导航自己会纠正。
+ */
+function bindDockPressFeedback() {
+  const dock = document.getElementById('dock');
+  if (!dock) return;
+  dock.addEventListener('pointerdown', event => {
+    const button = event.target.closest('[data-nav]');
+    if (!button) return;
+    dock.querySelectorAll('[data-nav]').forEach(other =>
+      other.classList.toggle('active', other.dataset.nav === button.dataset.nav));
+  }, { passive: true });
 }
 
 async function goHome() {
@@ -2162,12 +2534,40 @@ async function goHome() {
   setRoute('home'); state.tab = 'home'; setNav('home');
   // 三级兜底，顺序不能反：内存 → localStorage → 骨架屏。
   // localStorage 是同步读的，冷启动第一帧就有内容，不用等网络也不用等桥。
+  let cachedHome = null;
   if (!state.home) {
-    const cached = readCache('home');
-    if (cached) state.home = cached.data;
+    cachedHome = readCache('home');
+    if (cachedHome?.data) {
+      state.home = cachedHome.data;
+      state.homeAt = cachedHome.at || 0;
+    }
   }
   if (state.home) renderHome(); else renderSkeleton();
+  // 首屏 DOM 建完再钉一次高亮：上面那次 setNav 的样式变更可能和这批 DOM
+  // 落在同一帧里被合并，表现就是「页面换了、按钮还停在上一格」。
+  // 这里只改高亮不动滚动（keepState），重复调用没有副作用。
+  setNav('home', true);
+  // 首页和分类用同一套新鲜度判断：两分钟内不再打网络。
+  //
+  // 原来首页每次进都发一次请求（1.4~1.6 秒），期间屏幕上一直是上一次的内容 ——
+  // 用户点「首页」看到的是「没反应」，过一会儿内容自己跳一下。分类早就有这个
+  // 窗口了，首页漏了。
+  const HOME_FRESH_MS = 120000;
+  if (state.home && state.homeAt && Date.now() - state.homeAt < HOME_FRESH_MS) {
+    // 两分钟内不再打网络，但**已经拿到手的真值还是要套一遍**。
+    // writeCache 存的是网格页原样（未校正），所以「跳过刷新」如果连
+    // reconcileCards 也一起跳过，第二次进首页看到的就是旧标题 —— 而校正结果
+    // 明明已经在 localStorage 里。这一句只花内存查找；真的缺 id 才会发请求，
+    // 那也是后台的，不挡首屏。
+    reconcileCards(homeItems(state.home), () => renderHome());
+    return;
+  }
   const refreshing = api('home');
+  // 先挂一个空 catch。这个 promise 可能在下面 await 之前就 reject ——
+  // spider 那条世代机制会把被取代的调用判死，而 V8 在微任务清空时发现
+  // 没有 handler 就会打一条 Uncaught (in promise)，把控制台刷红。
+  // 错误本身由下面的 await 处理，这里只挡噪音。
+  refreshing.catch(() => {});
   const library = await api('library').catch(() => null);
   if (token !== routeToken) return;
   state.library = library;
@@ -2178,12 +2578,12 @@ async function goHome() {
     // 接口挂了但手上有缓存：留着旧内容，只提示一下。把已经画好的首页换成
     // 错误页是最糟的选择——用户看到的是一片空白，而内容其实就在本地。
     if (token !== routeToken) return;
-    if (!state.home) {
-      renderError(error, 'home');
-      // 这条线路是间歇性的（实测同一个域名三次里有一次能通），所以失败后
-      // 自动退避重试，而不是把「重新尝试」丢给用户点。
-      scheduleHomeRetry(token);
-    } else toast('内容更新失败，正在显示缓存', true);
+    noteNetFailure();
+    if (!state.home) renderError(error, 'home');
+    else toast('源暂时连不上，稍后自动重试', true);
+    // 这条线路是间歇性的（实测同一个域名三次里有一次能通），所以失败后
+    // 自动退避重试，而不是把「重新尝试」丢给用户点 —— 也不分有没有缓存。
+    scheduleHomeRetry(token);
     return;
   }
   if (token !== routeToken) return;
@@ -2191,6 +2591,8 @@ async function goHome() {
     const changed = state.home && homeSignature(state.home) !== homeSignature(fresh);
     const firstLoad = !state.home;
     state.home = fresh;
+    state.homeAt = Date.now();
+    noteNetSuccess();
     writeCache('home', fresh);
     if (firstLoad || changed) renderHome();
     else refreshMissingImages([...asArray(fresh.featured), ...asArray(fresh.recommend?.items), ...asArray(fresh.newest?.items)]);
@@ -2217,6 +2619,7 @@ async function goTags() {
   if (state.route !== 'tags') state.tagsReturn = captureScreen();
   setRoute('tags'); state.tab = 'home'; setNav('home');
   const refreshing = api('tags');
+  refreshing.catch(() => {});
   const cached = readCache('tags');
   if (token !== routeToken) return;
   state.tags = cached?.data || state.tags;
@@ -2243,9 +2646,10 @@ async function goTag(slug, label) {
   // 「短剧·/漫剧·」这个前缀只在源真的按短剧/漫剧分标签时才有意义。别的源
   // （比如 91porn，它的标签就是分类栏）套上会变成「#短剧·高清版」，纯噪音。
   const dramaTagged = (siteUi().tagGroups || []).some(([id]) => id === 'short' || id === 'comic');
-  const prefix = dramaTagged && !privateMode() ? (slug.startsWith('comic:') ? '漫剧·' : '短剧·') : '';
+  const prefix = dramaTagged ? (slug.startsWith('comic:') ? '漫剧·' : '短剧·') : '';
   searchInput.value = `#${prefix}${String(label).replace(/^#+/, '')}`;
   const refreshing = api('tag-list', { slug, label, page: 1 });
+  refreshing.catch(() => {});
   const cached = readCache(`tag:${slug}:1`);
   if (token !== routeToken) return;
   const firstLoad = !cached?.data;
@@ -2287,8 +2691,8 @@ async function goTagQuery(query) {
     catch { toast('标签暂时无法加载，请重试', true); return; }
   }
   const normalize = value => String(value || '').replace(/^#+/, '').trim().toLocaleLowerCase();
-  const matches = item => normalize(item.name) === normalize(name) || (!privateMode() &&
-    normalize(`${item.group === 'comic' ? '漫剧' : '短剧'}·${item.name}`) === normalize(name));
+  const matches = item => normalize(item.name) === normalize(name)
+    || normalize(`${item.group === 'comic' ? '漫剧' : '短剧'}·${item.name}`) === normalize(name);
   let tag = tags.find(matches);
   if (!tag) {
     try { const fresh = await api('tags'); state.tags = fresh; tag = asArray(fresh.items).find(matches); }
@@ -2380,23 +2784,61 @@ async function goCategory(tab, sub = subIndex(tab), keepCompact = false) {
   categoryObserver?.disconnect();
   if (state.route === 'home') rememberScreen();
   setRoute('category'); state.tab = tab; state.sub[tab] = sub; state.category = null; state.categoryBanner = 0;
-  if (!keepCompact) setNav(tab);
-  renderSkeleton();   // 同理：先出骨架，别让上一个页面一直挂着
+  setNav(tab, keepCompact);
+  // 选中态先跟手，再谈数据。见 applySubSelection 的注释。
+  applySubSelection(sub);
+  // 先读缓存再决定画什么。
+  //
+  // 原来是 renderSkeleton() → 发请求 → readCache() → 有缓存再 renderCategory()。
+  // 那中间有一次多余的骨架屏：缓存明明在手，用户还是要先看见一屏闪白，再被内容
+  // 替换掉。`readCache` 是同步读 localStorage，几十微秒的事，放在骨架屏之前没有代价。
   const id = categoryId();
-  const refreshing = api('category', { id, page: 1 });
-  // 缓存先画：分类页要等接口 + 20 张封面，先出上一次的列表能省掉整段白屏。
   const cached = readCache(`category:${id}:1`);
   if (token !== routeToken) return;
-  state.category = cached?.data ? { ...cached.data, refreshing: true, loading: false, error: false } : null;
-  if (state.category) renderCategory(keepCompact); else renderSkeleton();
+  // 缓存够新就直接用，不发请求。
+  //
+  // 原来无论缓存多新都要走一趟 spider：网络 1.4~1.6 秒，而用户只是从「运动」
+  // 切回「搞笑」看一眼。那 1.5 秒他什么也做不了，感觉就是卡。
+  // 两分钟这个窗口是权衡：列表页的内容两分钟内不会变，而用户来回切分类
+  // 基本都在这个尺度内。
+  const CACHE_FRESH_MS = 120000;
+  const cacheAge = cached?.at ? Date.now() - cached.at : Infinity;
+  const freshEnough = Boolean(cached?.data) && cacheAge < CACHE_FRESH_MS;
+  state.category = cached?.data
+    ? { ...cached.data, refreshing: !freshEnough, loading: false, error: false }
+    : null;
+  // 永远先把分类页的「壳」画出来，有没有数据都一样。
+  //
+  // 这一条是死规矩。原来的分支是「没缓存 → renderSkeleton()」，而骨架屏里
+  // **没有那一排子 tab**：用户点下去 closest('[data-sub]') 匹配不到任何东西，
+  // 事件直接被丢掉，goCategory 根本不执行 —— 界面一动不动。
+  //
+  // 实测日志（2026-10-19 真机，冷启动后第一次进分类页）：
+  //   [sub] sub=0 page=false btns=-1        ← page 是 null，一个可点的按钮都没有
+  // 这就是「连续点击很卡」的真正来源：不是慢，是那几下点击压根没被接收。
+  //
+  // renderCategory 对 state.category 为 null 是安全的：它把 items 当空数组，
+  // 画出来的就是「有标题、有子 tab、有区块标题、列表为空」的一屏，正好可以点。
+  renderCategory(keepCompact);
+  if (state.category) {
+    setCategoryBusy(false);
+    if (freshEnough) return;   // 缓存判定够新 —— 到此为止，不碰网络
+  } else {
+    setCategoryBusy(true);
+  }
+  setNav(tab, true);
+  const refreshing = api('category', { id, page: 1 });
+  refreshing.catch(() => {});
   try {
     const fresh = await refreshing;
     if (token !== routeToken) return;
+    setCategoryBusy(false);
     const changed = state.category && listSignature(state.category) !== listSignature(fresh);
     const firstLoad = !state.category;
     const previousScroll = scroll.scrollTop;
     state.category = { ...fresh, refreshing: false, loading: false, error: false };
     state.categoryItems = asArray(fresh.items);
+    noteNetSuccess();
     writeCache(`category:${id}:1`, fresh);
     if (firstLoad || changed) {
       renderCategory(keepCompact || state.compactHeld);
@@ -2414,10 +2856,11 @@ async function goCategory(tab, sub = subIndex(tab), keepCompact = false) {
     });
   } catch (error) {
     if (token !== routeToken) return;
-    if (!state.category) {
-      renderError(error, 'category');
-      scheduleCategoryRetry(token, id);
-    } else { state.category.refreshing = false; updateCategoryFooter(); toast('列表更新失败，已显示缓存内容', true); }
+    setCategoryBusy(false);
+    noteNetFailure();
+    if (!state.category) renderError(error, 'category');
+    else { state.category.refreshing = false; updateCategoryFooter(); toast('源暂时连不上，稍后自动重试', true); }
+    scheduleCategoryRetry(token, id);
   }
 }
 
@@ -2430,6 +2873,7 @@ async function goLibrary(tab = 'history') {
   // 桥调用统一排在 4 个线程的池子里，而真机上网络请求要 25 秒才超时 ——
   // 池子被慢请求占满时这里就得排队，干等骨架屏就成了「点我的要加载很久」。
   if (state.library) renderLibrary(); else renderSkeleton();
+  setNav('library', true);
   try {
     const library = await api('library');
     if (token !== routeToken) return;
@@ -2464,12 +2908,13 @@ async function goSearch(query) {
   const token = ++routeToken;
   if (state.route === 'home') rememberScreen();
   state.previous = { route: state.route, tab: state.tab };
-  setRoute('search'); state.query = query.trim(); state.filter = 'all'; state.search = null;
+  setRoute('search'); state.query = query.trim(); state.search = null;
   state.searchPending = true; state.searchError = '';
   scroll.scrollTop = 0;
   renderSearchLoading();
   let timeout;
   const refreshing = api('search', { query: state.query });
+  refreshing.catch(() => {});
   // 同步读缓存：上一次搜同一个词的记录先顶上，不用等接口。
   const cachedSearch = readCache(`search:${state.query}`);
   if (cachedSearch?.data) { state.search = cachedSearch.data; renderSearch(); }
@@ -2527,7 +2972,15 @@ async function goDetail(id, trigger) {
     return;
   }
   const token = ++routeToken;
-  const entrySource = bannerChanging && trigger?.closest('.hero') ? null : HGCardTransition.capture(trigger);
+  // 卡片过渡动画的开关必须**先于** capture 生效：capture 里有两趟 cloneNode
+  // （页头 + 折叠面板），关着动画还照跑就是纯浪费；更严重的是它让 entrySource
+  // 恒为真，下面 `hasDetailData && !entrySource` 永远不成立 —— 明明有缓存，
+  // 从卡片进详情还是要白等一趟网络。2026-10-19 用户反馈动画消失 + 缓存失效，
+  // 根子都在这行没跟着开关走。动画重新打开（用户要求），capture 跟着开关走。
+  const CARD_TRANSITION_ENABLED = true;
+  const entrySource = !CARD_TRANSITION_ENABLED || (bannerChanging && trigger?.closest('.hero'))
+    ? null
+    : HGCardTransition.capture(trigger);
   // 从播放器回来时 content 里可能还留着「正在打开播放器…」的 boot 占位页，
   // 把它当返回目标存下来，返回时就会还原出那一屏残页。占位页不算页面。
   const placeholder = state.route === 'feed' || content.firstElementChild?.classList?.contains('feed-boot');
@@ -2535,7 +2988,7 @@ async function goDetail(id, trigger) {
   rememberScreen();
   state.previous = {
     route: state.route, tab: state.tab, sub: subIndex(state.tab), query: state.query,
-    filter: state.filter, scrollTop: scroll.scrollTop, compactHeld: state.compactHeld,
+    scrollTop: scroll.scrollTop, compactHeld: state.compactHeld,
     horizontalScroll: [...content.querySelectorAll('.film-row,.filter-row,.home-tag-scroll')].map(row => row.scrollLeft),
     pageNode: content.firstElementChild
   };
@@ -2552,7 +3005,8 @@ async function goDetail(id, trigger) {
   scroll.scrollTop = 0;
   updateCompact();
   renderDetail();
-  if (entrySource) {
+  // 开关和取舍说明在 entrySource 那一段（上面）。这里的旧注释已并入那边。
+  if (entrySource && CARD_TRANSITION_ENABLED) {
     detailCard = new HGCardTransition({
       app: document.getElementById('app'), scroll, content, source: entrySource, snapshot: state.previous,
       isDetail: () => state.route === 'detail',
@@ -2563,12 +3017,38 @@ async function goDetail(id, trigger) {
   const refreshing = fetchDetail(id);
   const cached = readCache(`detail:${id}`);
   if (token !== routeToken) return;
+  // 「用动画盖加载」：放大动画进行中 #content 保持 prepare() 时克隆的那一屏，
+  // 任何要重建详情 DOM 的渲染都排到 onOpened（动画落定）之后 —— 动画中途的
+  // innerHTML 重建 + 封面 hydrate 就是「点一下直接变大」那个掉帧的来源。
+  // 没有过渡动画（重试、无卡片入口）时 detailCard 为空，渲染照旧立即执行。
+  const queueDetailRender = render => {
+    if (!detailCard || detailCard.phase === 'opened' || detailCard.phase === 'closed') { render(); return; }
+    const previous = detailCard.onOpened;
+    detailCard.onOpened = () => { if (typeof previous === 'function') previous(); render(); };
+  };
   let hasDetailData = Boolean(cached?.data);
-  if (hasDetailData) { state.detail = cached.data; state.detailLoading = false; renderDetail(); }
-  api('bookmark-state', { id }).then(saved => { if (token === routeToken) { state.bookmarked = saved; if (state.detail) renderDetail(); } }).catch(() => {});
+  // 有缓存就先渲染缓存，不等网络 —— 即便这次点击带了过渡动画。
+  // 缓存渲染顶掉的只是首屏那一份列表数据，数据回来后「内容没变就不重建」
+  // 的判断会挡住第二次白做（见下面 changed）。
+  if (hasDetailData) { state.detail = cached.data; state.detailLoading = false; queueDetailRender(() => renderDetail()); }
+  api('bookmark-state', { id }).then(saved => { if (token === routeToken) { state.bookmarked = saved; if (state.detail) queueDetailRender(() => renderDetail()); } }).catch(() => {});
   try {
     const fresh = await refreshing;
-    if (token === routeToken) { state.detail = fresh; state.detailLoading = false; renderDetail(); }
+    if (token === routeToken) {
+      // 只有「内容真的变了」才重建整页 DOM。
+      //
+      // 卡片点进去时先用手上那份（列表里的 title/cover）渲染了一屏，数据回来后
+      // 原来无条件 renderDetail() —— 又是几十个节点的 innerHTML 重建 + 封面 hydrate，
+      // 正好落在动画结束那几百毫秒里。多数时候标题封面是一样的，这一次重建纯属白做。
+      const changed = !state.detail
+        || state.detail.title !== fresh.title
+        || state.detail.cover !== fresh.cover
+        || state.detail.description !== fresh.description
+        || asArray(state.detail.episodes).length !== asArray(fresh.episodes).length;
+      state.detail = fresh;
+      state.detailLoading = false;
+      if (changed) queueDetailRender(() => renderDetail());
+    }
   } catch (error) {
     if (!hasDetailData && token === routeToken) { state.detailLoading = false; renderError(error, 'detail'); }
   }
@@ -2582,7 +3062,6 @@ function returnFromDetail() {
   state.tab = previous.tab;
   if (previous.route === 'category') state.sub[previous.tab] = previous.sub;
   state.query = previous.query || '';
-  state.filter = previous.filter || 'all';
   state.compactHeld = previous.compactHeld;
   content.replaceChildren(previous.pageNode);
   state.previous = null;
@@ -2966,13 +3445,11 @@ document.addEventListener('click', async event => {
     if (themeChoice.getAttribute('aria-checked') !== 'true') setThemeMode(themeChoice.dataset.themeMode);
     return;
   }
-  if (event.target.closest('[data-hot-check]')) { checkHotUpdate(); return; }
   if (event.target.closest('[data-goto-app-update]')) {
     // 这条链已经并成一行了，不用再滚动定位；直接查。
     checkAppUpdate();
     return;
   }
-  if (event.target.closest('[data-hot-apply]')) { applyHotUpdate(); return; }
   if (event.target.closest('[data-secret-entry]')) { handleVersionTap(); return; }
   if (event.target.closest('[data-account-management]')) { goAccountManagement(); return; }
   if (event.target.closest('[data-proxy-settings]')) { goProxySettings(); return; }
@@ -3121,6 +3598,17 @@ document.addEventListener('click', async event => {
       // 两张表 —— 本工程最容易出事的地方，为这点事不值得。
       await sourceCommand('refresh?url=' + encodeURIComponent(refetchUrl));
       if (status) status.textContent = '已拉回来，正在应用…';
+      // 配置拉完还得把脚本补上。
+      //
+      // 爬虫是刻意不随 APK 打包的（SpiderStore 只扫 files/spiders/），所以
+      // 「重新拉配置」如果只拉 json，用户拿到的是一份指向不存在脚本的配置 ——
+      // 之后每一次内容请求都报「找不到 spider: xxx」，而这个按钮看起来明明成功了。
+      //
+      // addOneSource 里已经写了「读 web.spider → 下载那份 js → 落盘」那一步，
+      // 直接复用它，不另写一份。
+      if (window.HGSetup && typeof window.HGSetup.addOneSource === 'function') {
+        await window.HGSetup.addOneSource(refetchUrl).catch(() => {});
+      }
       const result = await sourceCommand('use?url=' + encodeURIComponent(refetchUrl));
       const spent = Number(result && result.ms) || 0;
       // use 走了缓存分支（cached=true）是**正常的**：新配置刚被 refresh 写进缓存，
@@ -3162,12 +3650,22 @@ document.addEventListener('click', async event => {
     const status = document.getElementById('source-error');
     if (status) { status.hidden = false; status.textContent = '正在切换…'; }
     try {
-      const result = await sourceCommand('use?url=' + encodeURIComponent(pickUrl));
-      // 把「这次是吃缓存还是等网络」说出来。换源快不快是用户能直接感觉到的，
-      // 而这两个数字（缓存命中 / 拉取耗时）是唯一能解释它的东西。
-      const spent = Number(result && result.ms) || 0;
-      const how = result && result.cached ? `本地缓存 ${spent}ms` : `刚从服务器拉了 ${spent}ms`;
-      if (status) status.textContent = `已切换（${how}），正在重启…`;
+      // 走 addOneSource，不是裸 use。
+      //
+      // 区别只有一件事，但它是致命的：addOneSource 会读新配置里的 web.spider，
+      // 把那份脚本装进 SpiderStore。市场里切到一个从没装过脚本的源时，
+      // files/spiders/ 下没有对应文件，之后任何内容动作都报
+      // 「找不到 spider: xxx」—— 而用户完全不知道「切源」还包含「装脚本」。
+      //
+      // set 和 use 在 Java 侧走的是同一条 applySource（SourceConfig:957），
+      // 所以换走这条路不会丢切换语义。
+      if (window.HGSetup && typeof window.HGSetup.addOneSource === 'function') {
+        const one = await window.HGSetup.addOneSource(pickUrl);
+        if (!one || one.ok === false) throw new Error((one && one.error) || '切换失败');
+      } else {
+        await sourceCommand('use?url=' + encodeURIComponent(pickUrl));
+      }
+      if (status) status.textContent = '已切换（含脚本），正在重启…';
       restartAfterSource(() => {
         if (status) status.textContent = '已切换，但没能自动重开，请退出后重新打开';
         pickButton.disabled = false;
@@ -3253,8 +3751,8 @@ document.addEventListener('click', async event => {
     if (card.closest('.hero') && performance.now() < heroSuppressClickUntil) return;
     goDetail(card.dataset.openId, card); return;
   }
-  const filter = event.target.closest('[data-filter]');
-  if (filter) { state.filter = filter.dataset.filter; renderSearch(); return; }
+  // 搜索页的分类胶囊取消了（见 renderSearch 的注释）：它跟搜索词无关，
+  // 而且过滤是靠标题正则猜的。按分类找东西走「全部类型」。
   const slide = event.target.closest('[data-slide]');
   if (slide) { const target = Number(slide.dataset.slide); changeBanner(target, target > bannerIndex() ? 1 : -1); return; }
   if (event.target.closest('[data-back]')) { window.hgBack(); return; }
@@ -3349,14 +3847,14 @@ api('app-version').then(version => {
 // github.com/MrSsg/HuangguoAPP-for-Andriod 的 Releases，而那个仓库已经 404。
 // 每次冷启动白打一次外网，拿不回任何东西，已移除。见 UpdateManager.check 的注释。
 function startHome() { goHome(); }
-document.getElementById('age-confirm').addEventListener('click', async () => { await api('confirm-private-age'); location.reload(); });
-document.getElementById('age-exit').textContent = '暂不进入';
-document.getElementById('age-exit').addEventListener('click', () => { document.getElementById('age-gate').hidden = true; });
+// 年龄门的两颗按钮跟着私密入口一起去掉了（那条命令 Java 侧也删了，
+// 留着监听只会在用户误触时拿到一句「未知请求」）。DOM 仍在 app.html 里，
+// 但 age-gate 没有任何打开路径，恒 hidden。
 // 启动链：contentReady → 源配置闸门 → startHome。
 //
-// 顺序不能颠倒。contentReady 负责把 contentSource 钉成 'huangguo'（并解锁年龄门槛），
-// 而 bridgeCall 会把它带进每个请求；先过闸门的话，设置页那次 source:get 会带着
-// 默认的 'hongguo' 发出去，被路由到红果源，报一个跟源配置毫无关系的错。
+// 顺序不能颠倒。contentReady 负责把 contentSource 钉成当前内容态（现在恒为
+// 'hongguo'），而 bridgeCall 会把它带进每个请求；闸门放在它之后，才能在拉接口
+// 之前把没配源的用户拦下。
 // 闸门放在它之后：既不影响 contentReady，又能在拉接口之前把没配源的用户拦下。
 //
 // 代理核心**不能挂在闸门后面**：HGSetup.ensure() 在没配源的机器上永远不 resolve
@@ -3370,6 +3868,7 @@ contentReady
       // 闸门过了 = HG_SITE 已经是这个源的配置，这时候画底部导航才画得对。
       // app.html 里那两格是内置默认，配置不一样就在这一步被换掉。
       renderDock();
+      bindDockPressFeedback();
       // 代理设置只为设置页那一行文案服务，不阻塞启动 —— 拿不到就当中直连。
       sourceCommand('proxy:get').then(result => { state.proxy = String(result.proxy || ''); }).catch(() => {});
       refreshSources().catch(() => {});
@@ -3377,49 +3876,19 @@ contentReady
     .then(() => startHome())
   .catch(error => renderError(error, 'home'));
 
-// 热更新的状态、检查和切换入口统一放在文件上方的「前端热更新」块里
-// （window.hgCanApplyHotUpdate 也是在那里定义的）。这里不再挂恒 false 的
-// 旧实现，否则会把真正可用的更新入口覆盖掉。
 
 
 let versionTapCount = 0, versionTapAt = 0;
+// 「连点版本号 5 次 → 输入密码 → 过年龄门 → 进私密库」这套入口删了。
+//
+// 那个私密库是内置源，没有接口（site-default.json 的 origin 是空串），密码
+// 「ssgnb」还是写死在前端的。它唯一的效果是把用户装的每个源都判成私密态、
+// 套上内置源的界面模板。入口一删，unlock-overlay / age-gate 两块 DOM 永远
+// hidden（留着是因为返回键那几处还在读它们的 hidden 状态，删了要连带改逻辑）。
 function closeUnlock() {
   unlockOverlay.hidden = true;
   updateBackEnabled();
-  document.getElementById('unlock-password').value = '';
-  content.querySelector('[data-secret-entry]')?.focus();
 }
-async function enterPrivate(password = '') {
-  const result = await api('enter-private', { password });
-  closeUnlock();
-  if (result.needsAgeConfirmation) document.getElementById('age-gate').hidden = false;
-  else location.reload();
-}
-async function handleVersionTap() {
-  const now = performance.now();
-  versionTapCount = now - versionTapAt <= 1500 ? versionTapCount + 1 : 1;
-  versionTapAt = now;
-  if (versionTapCount < 5) return;
-  versionTapCount = 0;
-  if (privateMode()) return;
-  try {
-    const status = await api('content-status');
-    if (status.unlocked) { await enterPrivate(); return; }
-    document.getElementById('unlock-error').hidden = true;
-    unlockOverlay.hidden = false;
-    updateBackEnabled();
-    document.getElementById('unlock-password').focus();
-  } catch (error) { toast(error.message, true); }
-}
-document.getElementById('unlock-close').addEventListener('click', closeUnlock);
-document.getElementById('unlock-form').addEventListener('submit', async event => {
-  event.preventDefault();
-  const button = event.target.querySelector('button[type="submit"]');
-  button.disabled = true;
-  try { await enterPrivate(document.getElementById('unlock-password').value); }
-  catch (error) { const label = document.getElementById('unlock-error'); label.textContent = error.message; label.hidden = false; }
-  finally { button.disabled = false; }
-});
 
 // ---- 卡片铺满：数据不足一屏时撑开，避免右侧留白 ----
 // 布局是「固定 2 行 + 横向滚动、每列 106px」，412px 宽能排 3 列。
@@ -3543,8 +4012,12 @@ function scheduleHomeRetry(token, attempt = 0) {
   if (attempt >= HOME_RETRY_DELAYS.length) return;
   clearTimeout(scheduleHomeRetry.timer);
   scheduleHomeRetry.timer = setTimeout(async () => {
-    // 用户已经离开首页、或已经拿到内容了，就别再打了
-    if (token !== routeToken || state.route !== 'home' || state.home) return;
+    // 用户已经离开首页就别再打了。但**已经拿到缓存也要重试** —— 缓存不是「更新成功」，
+    // 只是「上次成功过」，而这次失败的内容用户正盯着看。
+    if (token !== routeToken || state.route !== 'home') return;
+    // 刚失败过就别在后台反复撞了。用户主动点还是照常响应（那条路不受冷却约束）——
+    // 区别在于：主动点是「用户要一次答案」，后台重试是「系统自己猜要不要再试」。
+    if (netCoolingDown()) return;
     try {
       const fresh = await api('home');
       if (token !== routeToken || state.route !== 'home') return;
@@ -3565,7 +4038,10 @@ function scheduleCategoryRetry(token, id, attempt = 0) {
   clearTimeout(scheduleCategoryRetry.timer);
   scheduleCategoryRetry.timer = setTimeout(async () => {
     if (token !== routeToken || state.route !== 'category' || categoryId() !== id) return;
-    if (state.category) return;
+    if (netCoolingDown()) return;   // 同上：只拦后台重试
+    // 这里原来有一句 `if (state.category) return;` —— 有缓存就不重试。
+    // 结果是：网络抖一下（unexpected end of stream 在 5G 上很常见），界面停在旧内容，
+    // 只弹一句 toast 就完了。用户看到的就是「点了没反应、内容还是上一个分类」。
     try {
       const fresh = await api('category', { id, page: 1 });
       if (token !== routeToken || state.route !== 'category' || categoryId() !== id) return;

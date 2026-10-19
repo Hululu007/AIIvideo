@@ -459,6 +459,63 @@
     return { id: raw.substring(0, i), ep: raw.substring(i + 1) };
   }
 
+  // ── 标签面板（240 个，7 个分区）────────────────────────────────────
+  //
+  // 站点把它塞在任意分类页的模态框里：`<h4>內容標籤</h4>` 之后是 7 个 `<h5>分区名</h5>`，
+  // 每个分区下面一串
+  //
+  //   <label class="hentai-tags-wrapper">
+  //     <input name="tags[]" type="checkbox" value="無碼"/>
+  //
+  // **它不是「标签 → URL」表，是多选表单**。所以点一个标签不是访问某个地址，
+  // 而是走 `tagList` 拼 `?genre=…&tags%5B%5D=…`（两个坑见下面 tagList 的注释）。
+  //
+  // 分区名 → 配置里 ui.tagGroups 的 id。站点是繁体，两份都收 —— 站点切语言时
+  // 不该整页标签掉进 other。
+  var SECTION_GROUP = {
+    '影片屬性': 'hanime-attr', '影片属性': 'hanime-attr',
+    '人物關係': 'relationship', '人物关系': 'relationship',
+    '角色設定': 'hanime-role', '角色设定': 'hanime-role',
+    '外貌身材': 'style',
+    '情境場所': 'setting', '情境场所': 'setting',
+    '故事劇情': 'plot', '故事剧情': 'plot',
+    '性交體位': 'hanime-act', '性交体位': 'hanime-act'
+  };
+
+  /** 从分类页 HTML 里抠出 [{title, tags:[名字…]}]。抠不到返回空数组。 */
+  function tagSections(html) {
+    var src = String(html || '');
+    // 先截到「內容標籤」到 </form> 之间：页面里还有别的 h5，不截会收进无关的东西。
+    var start = src.indexOf('內容標籤');
+    if (start < 0) start = src.indexOf('内容标签');
+    if (start < 0) return [];
+    var stop = src.indexOf('</form>', start);
+    var area = src.substring(start, stop > start ? stop : src.length);
+
+    var out = [];
+    var sections = /<h5[^>]*>([\s\S]{1,40}?)<\/h5>([\s\S]*?)(?=<h5|<\/form>|$)/gi;
+    var m;
+    while ((m = sections.exec(area)) !== null) {
+      var title = stripTags(m[1]).trim();
+      if (!title) continue;
+      var tags = [];
+      var seen = {};
+      var labels = /<label[^>]*hentai-tags-wrapper[\s\S]{0,400}?<\/label>/gi;
+      var lm;
+      while ((lm = labels.exec(m[2])) !== null) {
+        var block = lm[0];
+        var value = /value=["']([^"']+)["']/i.exec(block);
+        var name = value ? unescape(value[1]).trim()
+          : stripTags((/<span[^>]*checkmark[^>]*>([\s\S]*?)<\/span>/i.exec(block) || [])[1] || '').trim();
+        if (!name || seen[name]) continue;
+        seen[name] = 1;
+        tags.push(name);
+      }
+      if (tags.length) out.push({ title: title, tags: tags });
+    }
+    return out;
+  }
+
   function pageOf(args) {
     var n = parseInt((args && args.page) || 1, 10);
     return isFinite(n) && n > 0 ? n : 1;
@@ -513,6 +570,54 @@
       var page = pageOf(args);
       if (!genre) genre = GENRES[0];     // 兜底用最大的分类，不是筛选意图
       var html = await fetchHtml(ctx, HOST + '/search?genre=' + enc(genre) + '&page=' + page);
+      var items = parseCards(html);
+      return { items: items, page: page, hasMore: hasMore(page, items.length) };
+    },
+
+    /**
+     * 全部类型：站点那 240 个细标签，7 个分区。
+     *
+     * 这是这个站最值钱的一层 —— 10 个 genre 只是导航，真正决定「找不找得到」
+     * 的是这些标签（无码 / 巨乳 / NTR / 手交…）。
+     *
+     * 面板在任意分类页里，所以这里就是打一次分类页把它抠出来。**不缓存**：
+     * 标签集是站点自己维护的，加一个少一个都不该等发版。一次分类页 111KB，
+     * 用户点进「全部类型」才发生一次。
+     */
+    async tags(ctx) {
+      var html = await fetchHtml(ctx, HOST + '/search?genre=' + enc(GENRES[0]) + '&page=1');
+      var sections = tagSections(html);
+      if (sections.length === 0) {
+        throw new Error('hanime1 标签面板没抠到（可能：模态框结构改了、或这一页没带面板）');
+      }
+      var out = [];
+      for (var i = 0; i < sections.length; i++) {
+        var group = SECTION_GROUP[sections[i].title] || 'other';
+        for (var j = 0; j < sections[i].tags.length; j++) {
+          out.push({ name: sections[i].tags[j], slug: sections[i].tags[j], group: group });
+        }
+      }
+      return { items: out };
+    },
+
+    /**
+     * 按标签列内容。
+     *
+     * 两个坑（2026-10-17 实测，今天原样还在）：
+     *
+     * ① **方括号要编码成 %5B%5D**。直接写 `tags[]=` 有时被中间层吃掉，
+     *    表现是「点了标签出来的还是默认列表」，而且不报错。
+     * ② **必须带 genre**。只给 `tags[]` 时站点回默认全站列表，标签像没生效。
+     *    所以这里挂一个 GENRES[0] 当 seed —— 那是兜底不是筛选意图，
+     *    站点要有一个 genre 才肯认真过滤标签。
+     */
+    async tagList(ctx, args) {
+      var tag = String((args && (args.slug || args.label || args.ref)) || '').trim();
+      var page = pageOf(args);
+      if (!tag) throw new Error('hanime1 标签为空，没有发请求');
+      var url = HOST + '/search?genre=' + enc(GENRES[0])
+        + '&tags%5B%5D=' + enc(tag) + '&page=' + page;
+      var html = await fetchHtml(ctx, url);
       var items = parseCards(html);
       return { items: items, page: page, hasMore: hasMore(page, items.length) };
     },

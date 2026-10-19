@@ -29,7 +29,7 @@
     },
     {
       "name": "91porn",
-      "desc": "spider · KVS / 需代理 / 靠游客标记纠正首页迷魂阵",
+      "desc": "spider · KVS / 需代理 / 10 个类型 / 卡片错位自动校正 / 首页靠游客标记纠正",
       "url": "https://149.104.21.177.sslip.io/spiders/porn91.json"
     },
     {
@@ -41,6 +41,11 @@
       "name": "ASMR基佬中心",
       "desc": "spider · 音声 / 文件站 / 需代理 / 无海报",
       "url": "https://149.104.21.177.sslip.io/spiders/openlist.json"
+    },
+    {
+      "name": "黄果短剧",
+      "desc": "spider · AI成人短剧 / 9 个分区 156 个标签 / 需代理 · 走内置核心",
+      "url": "https://149.104.21.177.sslip.io/spiders/huangguo.json"
     }
   ]
 }

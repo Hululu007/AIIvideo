@@ -56,13 +56,17 @@ final class AppStore {
     private final SharedPreferences preferences;
     final String source;
 
+    /**
+     * 本地数据目录固定成一个。
+     *
+     * 原来按 ContentMode 分两个文件（私密态 "huangguo-data"、公开态
+     * "dual-data-hongguo"）。2026-10-19 双态拆掉之后只剩一个内容源，
+     * 再分文件只会让「换一次源，收藏和历史看起来没了」。这里固定用公开态那份
+     * —— 私密态那个文件里的记录对应的是已经不存在的内容 id。
+     */
     AppStore(Context context) {
-        this(context, ContentMode.get(context).active());
-    }
-
-    AppStore(Context context, String source) {
-        this.source = source;
-        this.preferences = context.getSharedPreferences("huangguo".equals(source) ? "huangguo-data" : "dual-data-hongguo", 0);
+        this.source = "hongguo";
+        this.preferences = context.getSharedPreferences("dual-data-hongguo", 0);
     }
 
     /** 登录后把键名加上 user:&lt;objectId&gt;: 前缀，未登录原样返回。 */

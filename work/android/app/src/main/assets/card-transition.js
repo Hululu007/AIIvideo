@@ -204,6 +204,7 @@
     }
 
     stop() {
+      if (this.watchdog) { clearInterval(this.watchdog); this.watchdog = null; }
       this.spring?.destroy(); this.spring = null;
       if (this.frame) cancelAnimationFrame(this.frame);
       this.frame = null;
@@ -215,14 +216,36 @@
       const start = { ...this.current };
       const finish = () => {
         this.spring = null;
+        if (this.watchdog) { clearInterval(this.watchdog); this.watchdog = null; }
         this.cleanup();
         this.phase = closing ? 'closed' : 'opened';
         if (closing) this.onClose();
+        // 打开动画落定后再回调：goDetail 用它把真正的详情渲染推迟到这一刻，
+        // 让「放大」在时间上盖住「重建 DOM / 等首包」，动画中途不再被主线程
+        // 的 innerHTML 重建打断（否则掉帧，看起来像一帧跳到全屏）。
+        else if (typeof this.onOpened === 'function') this.onOpened();
       };
       if (this.reduced) { finish(); return; }
+      // 帧停顿看门狗。真机上（Android 16 / 23113RKC6C）实测打开动画偶尔被
+      // 一个 ~2s 的渲染线程停顿整个冻住 —— rAF 断流、渲染进程无长任务、与
+      // 舞台里具体哪个图层无关（背景快照/封面/阴影逐一摘除都复现），是外部
+      // 在同一条渲染主线程上抢时间。表现就是「点一下、冻住、然后直接变大」。
+      // 兜底策略：onUpdate 超过 150ms 没有推进，就不再等——直接画到终态收场，
+      // 让「落定即内容」的承诺兑现，而不是冻在半路等线程缓过来再跳。
+      let lastUpdate = performance.now();
+      this.watchdog = setInterval(() => {
+        if (!this.spring || performance.now() - lastUpdate <= 150) return;
+        console.warn('[card-transition] 帧停顿，跳到终态');
+        const spring = this.spring;
+        this.stop();
+        this.draw(target);
+        spring.destroy();
+        finish();
+      }, 60);
       this.spring = FlipToolkit.spring({
         config: { stiffness: closing ? 360 : 300, damping: 34, overshootClamping: true },
-        onUpdate: p => this.draw(interpolate(start, target, clamp(p))), onComplete: finish
+        onUpdate: p => { lastUpdate = performance.now(); this.draw(interpolate(start, target, clamp(p))); },
+        onComplete: finish
       });
     }
 

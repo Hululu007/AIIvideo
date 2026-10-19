@@ -1,13 +1,10 @@
 package com.huangguo.mobile;
 
 import android.annotation.SuppressLint;
-import android.app.Activity;
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
-import android.view.View;
-import android.view.ViewGroup;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -15,7 +12,6 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.FrameLayout;
 
 import androidx.webkit.WebViewAssetLoader;
 
@@ -27,7 +23,12 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 
@@ -98,6 +99,16 @@ final class SpiderRuntime {
 
     private static final String[] EMPTY_HOSTS = new String[0];
 
+    /**
+     * 探测能力集用的伪 cap。它不是 spider 的一个能力，是一次「读一遍 __spiderSite」
+     * 的请求：不跑驱动脚本、不等 done，注入完源码直接求值。
+     *
+     * <p>为什么不用安装时解析文件头的正则：{@code caps} 是运行时的事实（源里定义了
+     * 哪个函数），正则只能猜字面量。而猜错的代价是「源明明实现了，前端说没有」——
+     * 这正是这一轮在修的 bug。求值一次几百毫秒，按 id 缓存在前端，一次会话一次。
+     */
+    static final String META_CAP = "__meta";
+
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
     /**
@@ -109,10 +120,40 @@ final class SpiderRuntime {
      */
     private static final Semaphore CALL_LOCK = new Semaphore(1, true);
 
+    /**
+     * 一个 WebView 对象连续服务多少次调用之后强制重建。
+     *
+     * <p>复用的收益是省掉 {@code new WebView()} 那一段渲染进程初始化（实测
+     * 100~300ms，低端机更久）；风险是页面状态会攒 —— 渲染线程的堆、WebView 内部
+     * 的缓存、spider 如果漏了定时器也会一直挂着。所以不无限复用，跑够一轮就换新的。
+     *
+     * <p>24 这个数没有理论依据，是「一天里正常的切换次数」量级：少于它就是
+     * 频繁重建，多于它就要开始担心内存。
+     */
+    private static final int MAX_REUSE = 24;
+
+    /** 当前这个 WebView 已经复用了几次。**只在主线程读写**。 */
+    private static int reuseCount = 0;
+
+    /**
+     * 调用世代。每次 {@link #call} 领一个号，号最大的那次才算数。
+     *
+     * <p>为什么需要它：{@link #CALL_LOCK} 是串行的，而用户会在 1 秒内连点三个分类。
+     * 于是队列里排着三次调用、每次 1.4~1.6 秒 —— 用户点第三下之后要等前两次跑完才
+     * 轮到他真正想看的那一屏，体感就是「快速切换特别卡」。
+     *
+     * <p>而前端那边 {@code routeToken} 早就把前两次的结果丢掉了（它只认最后一次导航）。
+     * 也就是说那些排队的时间是**纯粹白等的**：跑出来的数据没人要。
+     *
+     * <p>所以：排队等锁的那几次，拿到锁第一件事是看自己的号还在不在最新 —— 不在就
+     * 立刻让出，不跑。
+     */
+    private static final java.util.concurrent.atomic.AtomicLong GENERATION =
+            new java.util.concurrent.atomic.AtomicLong();
+
     // ── 单例状态（全部只在主线程写，读的时候容忍旧值）────────────────────
 
     private static WebView webView;
-    private static View holder;
     private static WebViewAssetLoader loader;
 
     /** 当前这一次调用的会话。bridge 从这里取，见 {@link #currentSession()}。 */
@@ -133,6 +174,8 @@ final class SpiderRuntime {
         final String cap;
         final String spiderSource;
         final String argsJson;
+        /** 领到的世代号。见 {@link #GENERATION}。 */
+        final long gen;
         final long timeoutMs;
         final long beganAt = System.currentTimeMillis();
         final CountDownLatch done = new CountDownLatch(1);
@@ -155,6 +198,9 @@ final class SpiderRuntime {
         /** onPageFinished 可能对同一页触发多次（子框架、重定向），注入只做一次。 */
         volatile boolean injected;
 
+        /** 这次只探测元信息，不跑能力。见 {@link #META_CAP}。 */
+        final boolean metaOnly;
+
         /** done 回来（或超时/关闭）之后置位，之后 bridge 的一切 op 都丢弃。 */
         volatile boolean finished;
 
@@ -164,11 +210,13 @@ final class SpiderRuntime {
         JSONObject result;
         String error;
 
-        Session(String cap, String spiderSource, String argsJson, long timeoutMs) {
+        Session(String cap, String spiderSource, String argsJson, long timeoutMs, long gen) {
             this.cap = cap;
+            this.metaOnly = META_CAP.equals(cap);
             this.spiderSource = spiderSource;
             this.argsJson = argsJson;
             this.timeoutMs = timeoutMs;
+            this.gen = gen;
             this.watchdog = watchdog(this);
         }
     }
@@ -199,28 +247,40 @@ final class SpiderRuntime {
         }
         final long budget = timeoutMs > 0 ? timeoutMs : NET_TIMEOUT_S * 1000L;
 
-        final Activity activity = activityOf(ctx);
-        if (activity == null) {
-            throw new IOException("界面还没起来，spider 跑不了（稍等一下再试）。");
-        }
-        if (activity.isFinishing() || activity.isDestroyed()) {
-            throw new IOException("界面正在退出，spider 跑不了。");
+        // 2026-10-19：宿主搬进 :spider 独立进程（SpiderService），这边不再有
+        // Activity 可挂 —— WebView 改成免窗口 headless 跑（见 startPage）。
+        // 应用上下文全程够用：assets 供给、cookie、JS 执行都不依赖 window。
+        final Context app = ctx.getApplicationContext();
+        if (app == null) {
+            throw new IOException("spider 跑不了：拿不到应用上下文。");
         }
 
+        // 领号要尽早：越早领，前面那次越早知道自己已经过期。
+        final long gen = GENERATION.incrementAndGet();
         final Session s = new Session(cap, spiderSource,
-                args == null ? "{}" : args.toString(), budget);
+                args == null ? "{}" : args.toString(), budget, gen);
         // 当前生效的源配置。取不到就留 null，net 退回全局路由（见 Session.profile）。
-        s.ctx = activity.getApplicationContext();
+        s.ctx = app.getApplicationContext();
         // profile 是 net 走哪条路由的唯一依据。取不到就别硬撑 —— 那就退回老的
         // 全局路由（不带 NetRoute），并在日志里说清楚，否则「App 能取、spider 不能」
         // 这种问题会被误判成站点抽风。
         try {
-            s.profile = HotUpdateManager.get(s.ctx).currentSite();
+            s.profile = SiteProfile.current(s.ctx);
         } catch (Throwable e) {
             UserSource.log("spider 拿不到当前源配置：" + e);
         }
         // 不兜底构造：currentSite() 是「当前生效配置」的唯一入口，它给了 null 说明
         // 配置本身有问题，那时候再拼一份出来只会掩盖真正的错。日志里说清楚就够。
+
+        // 只作废「还在排队」的，不动「正在跑」的那一次。
+        //
+        // 试过连正在跑的也杀掉（省掉它剩下的那一两秒），但 session 字段是在拿到锁
+        // 之后才赋值的，于是「新请求检查 session」和「旧请求赋值 session」之间有窗口：
+        // 实测四连点时，最后生效的反而是第三次，第四次被自己误杀了。
+        // 结果比慢更糟 —— 用户看到的不是他最后点的那一屏。
+        //
+        // 现在的语义：正在跑的一定跑完（它顶多多花一次往返），排队的一个都不跑。
+        // 四连点的总耗时 = 第一次剩余 + 最后一次，两段网络时间封顶。
 
         // 排队也算在预算里：等锁等掉的钱不该再从看门狗里另算一份，
         // 否则用户点一下要等 30 秒才看到「超时」。
@@ -228,8 +288,13 @@ final class SpiderRuntime {
             throw new IOException("spider 排队超时（另一个调用还占着宿主）。");
         }
         try {
+            // 拿到锁的第一件事：还是不是最新那次？不是就立刻让出去 ——
+            // 抢在 startPage 之前判断，省掉的正是用户最不耐烦的那一两秒。
+            if (gen != GENERATION.get()) {
+                throw new IOException("被更新的请求取代");
+            }
             session = s;
-            startPage(activity, s);
+            startPage(app, s);
             if (!s.done.await(s.timeoutMs + AWAIT_GRACE_MS, TimeUnit.MILLISECONDS)) {
                 // 走不到这里正常情况：看门狗到点会自己 countDown。只有主线程长时间
                 // 被占住才会落到这条兜底上 —— 那也仍然是「超时」，处置一样：杀页。
@@ -246,7 +311,8 @@ final class SpiderRuntime {
     }
 
     /**
-     * 释放宿主。<b>Activity onDestroy 必须调</b>，漏了渲染进程常驻。
+     * 释放宿主。<b>Service onDestroy 必须调</b>（SpiderService，:spider 进程），
+     * 漏了渲染进程常驻。
      *
      * <p>和 SiteFetchWebView 一样：只在 field 上置 null 是不够的，渲染进程不会退，
      * 页面里的定时器还在跑。另外这里顺手把在飞的调用打断，别让调用方干等到超时。
@@ -355,34 +421,32 @@ final class SpiderRuntime {
             byte[] raw;
             if ("GET".equals(method)) {
                 SiteProfile prof = s.profile;
-                // 重试一次。出口节点抖的时候实测就是这个形态：第一次 15~30 秒后
-                // Connection reset，第二次直接过（App 自己的 /api/home 也是靠
-                // 第二次才成功的，见 00:23:33 那条「预热完成 … 32329ms」）。
-                // 不重试的话 spider 比 App 内在路径更脆，而用户分不清两者的差别。
-                raw = null;
-                IOException last = null;
-                for (int attempt = 0; attempt < 2 && raw == null; attempt++) {
-                    try {
-                        // 有 cookieOut 就走带 Map 的那个重载（AiiHttp.getRaw 的四参
-                        // 版本，行为和三参完全一致，只是顺手把 Set-Cookie 收进来）。
-                        // 没有 profile 的那条路（源配置取不到）没有 cookie 重载，
-                        // 退回三参 —— 那种情况下宁可拿不到 cookie，也不能因为
-                        // 「想拿 cookie」去碰一条没验证过的路由。
-                        if (cookieJar != null && prof != null) {
-                            raw = AiiHttp.getRaw(url, headers, NET_TIMEOUT_S, prof, cookieJar);
-                        } else if (cookieJar != null) {
-                            raw = AiiHttp.getRaw(url, headers, NET_TIMEOUT_S, cookieJar);
-                        } else {
-                            raw = prof == null
-                                    ? AiiHttp.getRaw(url, headers, NET_TIMEOUT_S)
-                                    : AiiHttp.getRaw(url, headers, NET_TIMEOUT_S, prof);
-                        }
-                    } catch (IOException e) {
-                        last = e;
-                        if (attempt == 0) {
-                            android.util.Log.w("HG.Spider", "op=net 重试一次：" + e.getMessage());
-                        }
+                // 只打一次。
+                //
+                // 这里原来套了个「失败再试一次」的循环，而 AiiHttp.getRaw 内部本来
+                // 就有 h2 → h1.1 的降级 —— 两层叠起来，一个连不上的地址要打 4 次：
+                // 实测 14:14:14 到 14:14:21，整整 7.2 秒才报失败。用户点一下首页，
+                // 屏幕 7 秒不动，然后什么都没有 —— 那就是他说的「卡」。
+                //
+                // 而真正连不上的时候（api.agedm.io 在手机网络上 TLS 握手后被掐，
+                // curl 直接 Empty reply），多打两次不会变通，只是多等 5 秒。
+                // 要重试也是上层（界面 + 退避）该管的事，不是在这里原地重打。
+                raw = null;   // 失败时保持 null，下面的兜底靠它判断
+                Exception httpFailure = null;
+                try {
+                    if (cookieJar != null && prof != null) {
+                        raw = AiiHttp.getRaw(url, headers, NET_TIMEOUT_S, prof, cookieJar);
+                    } else if (cookieJar != null) {
+                        raw = AiiHttp.getRaw(url, headers, NET_TIMEOUT_S, cookieJar);
+                    } else {
+                        raw = prof == null
+                                ? AiiHttp.getRaw(url, headers, NET_TIMEOUT_S)
+                                : AiiHttp.getRaw(url, headers, NET_TIMEOUT_S, prof);
                     }
+                } catch (Exception e) {
+                    // 先记下来，交给下面的 WebView 兜底判断；兜底也不行时把它原样报出去。
+                    httpFailure = e;
+                    android.util.Log.w("HG.Spider", "op=net okhttp 失败：" + e.getMessage());
                 }
                 // ── 盾后站点的兜底：交给真 WebView ────────────────────────
                 //
@@ -412,11 +476,14 @@ final class SpiderRuntime {
                         // WebView 也过不去时，把两边的失败一起报出来 —— 只报
                         // okhttp 那句「HTTP 403」会让人以为是站点挂了。
                         throw new IOException("net 失败：" + host + " 在 Cloudflare 后面，okhttp 被挡（"
-                                + (last == null ? "无响应" : last.getMessage())
+                                + (httpFailure == null ? "无响应" : httpFailure.getMessage())
                                 + "），改用真浏览器内核也没过：" + e.getMessage());
                     }
                 }
-                if (raw == null) throw last == null ? new IOException("net 失败") : last;
+                if (raw == null) {
+                    throw httpFailure != null ? new IOException("net 失败：" + httpFailure.getMessage(), httpFailure)
+                            : new IOException("net 失败：没有任何响应");
+                }
             } else if (jsonFormat) {
                 // JSON 体。OpenList/AList 的 /api/fs/list、/api/fs/get、/api/fs/search
                 // 只收 application/json —— 表单体过去它当空对象，回「path 不能为空」，
@@ -477,6 +544,99 @@ final class SpiderRuntime {
      *
      * <p>参数在 bridge 里已经解成 Java 值（那边负责 JSON 编解码），这里只做状态迁移。
      */
+    // ── 批量 net ─────────────────────────────────────────────────────
+
+    /**
+     * 一次 netAll 最多带多少个子请求。一页 24 条，30 留余量。
+     * 上限存在的理由和白名单一样：源能要多少资源该有个明确的数。
+     */
+    private static final int NETALL_MAX_REQUESTS = 30;
+
+    /** 默认并发。8 是实测出来的：24 条详情 3 轮走完，站点没有触发限流。 */
+    private static final int NETALL_MAX_CONCURRENCY = 8;
+
+    /** 复用线程池。只在 :spider 进程里，最多 8 条线程，不值得每次调用重建。 */
+    private static final ExecutorService NETALL_POOL =
+            Executors.newFixedThreadPool(NETALL_MAX_CONCURRENCY);
+
+    /**
+     * 批量 {@code net}：<b>在 Java 侧真并发</b>，一次 bridge 往返带 N 个请求。
+     *
+     * <p>══ 为什么必须有这个 op ══
+     *
+     * <p>spider 里的 {@code ctx.call('net')} 是同步桥：JS 在渲染线程上阻塞，等 Java
+     * 回包。所以源里写 {@code Promise.all(ids.map(fetch))} 看着像并发，实际一条一条
+     * 排队 —— 2026-10-19 在 91porn 上实测，8 个 worker 拉 24 条详情跑到 45 秒被看门狗
+     * 杀掉，零结果。当时只能把校正搬到服务器上做，等于给源加了一个外部依赖。
+     *
+     * <p>现在这条路通了：源把 N 个请求一次交过来，Java 用线程池并发，结果按原顺序
+     * 返回。源不再需要「一次一个」，也不再需要外部服务。
+     *
+     * <p>══ 形状 ══
+     *
+     * <pre>
+     *   入参 {"requests":[{"url":…, "headers":…}, …], "concurrency":8}
+     *   出参 {"results":[{"ok":true,"status":200,"body":…} | {"ok":false,"error":…}, …]}
+     * </pre>
+     *
+     * <p><b>单项失败不抛异常</b>：批量请求里坏一条是常态（片子下架、id 打错），
+     * 整批失败会让调用方一条都拿不到。失败的那一项带 {@code ok:false} 占位，
+     * 顺序和入参一一对应 —— 源按索引映射回自己的 id，不需要再猜。
+     */
+    static JSONObject netAll(Session s, JSONObject args) throws Exception {
+        final JSONArray requests = args.optJSONArray("requests");
+        if (requests == null || requests.length() == 0) {
+            throw new IOException("netAll 缺少 requests 数组");
+        }
+        final int count = Math.min(requests.length(), NETALL_MAX_REQUESTS);
+        int concurrency = args.optInt("concurrency", NETALL_MAX_CONCURRENCY);
+        if (concurrency <= 0) concurrency = NETALL_MAX_CONCURRENCY;
+        final Semaphore gate = new Semaphore(Math.min(concurrency, NETALL_MAX_CONCURRENCY));
+
+        final List<Future<JSONObject>> futures = new ArrayList<Future<JSONObject>>(count);
+        for (int i = 0; i < count; i++) {
+            final JSONObject one = requests.optJSONObject(i);
+            futures.add(NETALL_POOL.submit(new java.util.concurrent.Callable<JSONObject>() {
+                @Override
+                public JSONObject call() {
+                    try {
+                        gate.acquire();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    try {
+                        return net(s, one == null ? new JSONObject() : one);
+                    } catch (Throwable e) {
+                        final String why = e.getMessage() == null ? String.valueOf(e) : e.getMessage();
+                        try {
+                            return new JSONObject().put("ok", false).put("error", why);
+                        } catch (Throwable ignored) {
+                            return new JSONObject();
+                        }
+                    } finally {
+                        gate.release();
+                    }
+                }
+            }));
+        }
+
+        final JSONArray results = new JSONArray();
+        for (int i = 0; i < futures.size(); i++) {
+            try {
+                // 单项超时给得比 net 自己宽 5 秒：先让 net 自己报超时，它那句更具体。
+                results.put(futures.get(i).get(NET_TIMEOUT_S + 5L, TimeUnit.SECONDS));
+            } catch (Throwable e) {
+                try {
+                    results.put(new JSONObject().put("ok", false).put("error", "netAll 单项超时"));
+                } catch (Throwable ignored) {
+                    results.put(JSONObject.NULL);
+                }
+            }
+        }
+        Log.i(TAG, "cap=" + s.cap + " netAll n=" + count + " conc=" + concurrency);
+        return new JSONObject().put("results", results);
+    }
+
     static void finish(Session s, boolean ok, Object payload, String error) {
         if (s == null) return;
         synchronized (s) {
@@ -509,7 +669,7 @@ final class SpiderRuntime {
 
     /** 主线程：建页、挂 bridge、loadUrl、上看门狗。 */
     @SuppressLint("SetJavaScriptEnabled")
-    private static void startPage(final Activity activity, final Session s) throws Exception {
+    private static void startPage(final Context ctx, final Session s) throws Exception {
         final CountDownLatch created = new CountDownLatch(1);
         final IOException[] failed = new IOException[1];
 
@@ -517,12 +677,30 @@ final class SpiderRuntime {
             @Override
             public void run() {
                 try {
+                    // 复用判定。见 reuseCount 的注释：正常收尾的页面留着，下一轮接着用。
+                    final boolean reuse = webView != null && reuseCount < MAX_REUSE;
+                    if (reuse) {
+                        reuseCount++;
+                        // 重载宿主页 = 换一个干净的文档作用域。__spiderSite、
+                        // spider 自己挂的定时器、上一轮留下的 Promise 全在这一下里没了，
+                        // 但 WebView 实例和它的渲染线程留着 —— 省掉的正是 new WebView
+                        // 那一两百毫秒。
+                        webView.stopLoading();
+                        webView.loadUrl(HOST_PAGE);
+                        MAIN.postDelayed(s.watchdog, s.timeoutMs);
+                        return;
+                    }
                     // 上一页不管是超时留下来的还是 shutdown 没清干净的，这里先兜一次。
                     // 必须执行在主线程上，且和下面的新建在同一个 runnable 里，
                     // 这样「销毁旧的 → 建新的」不会被另一次调用插队。
                     destroyOnMain();
+                    reuseCount = 0;
 
-                    WebView wv = new WebView(activity);
+                    // 免窗口 headless（2026-10-19）：宿主在 :spider 进程的 Service 里，
+                    // 没有 decorView 可挂。不 attach 的 WebView 照常 loadUrl /
+                    // evaluateJavascript / 触发生命周期回调（页面本来就该不可见），
+                    // 唯一放弃的是「像素级渲染」，而 spider 只吃 DOM 和网络，用不到。
+                    final WebView wv = new WebView(ctx.getApplicationContext());
                     WebSettings ws = wv.getSettings();
                     ws.setJavaScriptEnabled(true);
                     // 宿主页由 WebViewAssetLoader 从 assets 里供给，不需要 file:// 访问；
@@ -555,7 +733,13 @@ final class SpiderRuntime {
 
                         @Override
                         public void onPageFinished(WebView view, String url) {
-                            inject(view, s);
+                            // 收尾时那一枪 about:blank 也会走到这里，它不该触发注入。
+                            if (url != null && url.startsWith("about:")) return;
+                            // 读静态 session 而不是闭包里的 s：页面会被复用，
+                            // 同一个 WebViewClient 会为下一次调用再触发一次这里。
+                            // 闭包里那份是建页时的旧会话，拿它注入等于把这次调用的
+                            // spider 源码执行在上一轮的上下文里。
+                            inject(view, session);
                         }
                     });
                     wv.setWebChromeClient(new WebChromeClient() {
@@ -570,16 +754,7 @@ final class SpiderRuntime {
                     // 桥的全局名写死成 __hgSpider：契约 §二 的宿主页代码里就是它。
                     wv.addJavascriptInterface(new SpiderBridge(), "__hgSpider");
 
-                    // 1×1 + GONE：WebView 必须 attach 到 window 才能跑（SiteFetchWebView
-                    // 已经验过这条路），但绝不能被看见、也不能参与布局。
-                    FrameLayout box = new FrameLayout(activity);
-                    box.setVisibility(View.GONE);
-                    box.addView(wv, new FrameLayout.LayoutParams(1, 1));
-                    ViewGroup decor = (ViewGroup) activity.getWindow().getDecorView();
-                    decor.addView(box, new ViewGroup.LayoutParams(1, 1));
-
                     webView = wv;
-                    holder = box;
 
                     // 看门狗在建页这一步就上，不能等 onPageFinished —— 卡在加载上的
                     // spider 一样是卡住，一样得杀。
@@ -607,7 +782,9 @@ final class SpiderRuntime {
      * JS 在渲染线程上是顺序执行的，所以「源码 → 读 hosts → 驱动」这样连着注入就够了。
      */
     private static void inject(final WebView wv, final Session s) {
-        if (session != s || s.finished || s.injected) return;
+        // s 可能是 null：上一轮收尾时会 loadUrl("about:blank")，那也会触发一次
+        // onPageFinished，而那时 call() 已经把静态 session 清掉了。
+        if (s == null || session != s || s.finished || s.injected) return;
         s.injected = true;
 
         // 直接执行，不包函数：spider 文件是 `__spiderSite = {...}` 这种顶层赋值，
@@ -620,9 +797,18 @@ final class SpiderRuntime {
             @Override
             public void onReceiveValue(String raw) {
                 s.hosts = parseHosts(raw);
-                if (session == s && !s.finished) {
-                    wv.evaluateJavascript(driverJs(s), null);
+                if (session != s || s.finished) return;
+                if (s.metaOnly) {
+                    // 探测：只读一遍对象，不驱动任何能力。
+                    wv.evaluateJavascript(META_JS, new ValueCallback<String>() {
+                        @Override
+                        public void onReceiveValue(String metaRaw) {
+                            finishMeta(s, metaRaw);
+                        }
+                    });
+                    return;
                 }
+                wv.evaluateJavascript(driverJs(s), null);
             }
         });
     }
@@ -634,6 +820,42 @@ final class SpiderRuntime {
     private static final String HOSTS_JS =
             "(function(){try{var e=window.__spiderSite;var h=e&&e.hosts;"
                     + "return Array.isArray(h)?h:[];}catch(x){return [];}})()";
+
+    /**
+     * 读 {@code __spiderSite} 的元信息：能力集、meta、id、version。
+     *
+     * <p><b>能力集按函数存在性枚举</b>，不读源里写的字面量声明 —— 源只要加一个函数，
+     * 壳立刻知道；忘了同步声明也不会出现「实现了但前端说没有」。
+     *
+     * <p>求值结果由 evaluateJavascript 自动 JSON 序列化，对象/数组都直接过来，
+     * 不用再 stringify 一层。没导出对象时返回 null，由 finishMeta 落成空对象。
+     */
+    private static final String META_JS =
+            "(function(){try{var e=window.__spiderSite;if(!e)return null;"
+                    + "var caps=[];for(var k in e){if(typeof e[k]==='function')caps.push(k);}"
+                    + "return {id:String(e.id||''),version:Number(e.version)||0,"
+                    + "caps:caps,meta:e.meta||null,hosts:Array.isArray(e.hosts)?e.hosts:[]};"
+                    + "}catch(x){return null;}})()";
+
+    /**
+     * 收下探测结果。和 {@code finish} 的区别：这里没有 done 协议，也不认 error ——
+     * 探测失败（没导出对象）就是一份空的能力集，前端据此回落到「让 spider 自己报错」。
+     */
+    private static void finishMeta(Session s, String raw) {
+        if (session != s || s.finished) return;
+        JSONObject out = null;
+        try {
+            // raw 可能是 JSON 文本、也可能是字面量 null。包一层再取，两种都能 parse。
+            Object parsed = new JSONObject("{\"v\":" + (raw == null ? "null" : raw) + "}").opt("v");
+            if (parsed instanceof JSONObject) out = (JSONObject) parsed;
+        } catch (Throwable ignored) {
+            // 解析不出来就当没探到。
+        }
+        s.result = out == null ? new JSONObject() : out;
+        Log.i(TAG, "cap=__meta ok ms=" + (System.currentTimeMillis() - s.beganAt)
+                + " caps=" + s.result.optJSONArray("caps"));
+        s.done.countDown();
+    }
 
     /**
      * 驱动脚本：跑一次能力，把结果送回 bridge 的 {@code done}。
@@ -676,14 +898,20 @@ final class SpiderRuntime {
     /**
      * 释放这一次调用的页面。
      *
-     * <p>为什么不复用页面而是每次重建：页面里留着 {@code __spiderSite}、留着 spider
-     * 自己挂的定时器。复用的话第二个源会继承第一个源的全局对象，而「继承」这种 bug
-     * 在真机上表现为「A 源没内容但 B 源正常」，查起来极贵。设计 §七 第 1 条要求
-     * 「一次调用一个页面生命周期」，销毁是这条要求最硬的实现。
+     * <p><b>2026-10-19 改：正常收尾的页面不再销毁，改成清文档复用。</b>
      *
-     * <p>代价是每次调用多一次 WebView 建页（实测 100~300ms）。阶段 0 的调用频次
-     * 是「进首页一次」，换实现简单值得；真要优化时把这里换成
-     * {@code loadUrl("about:blank")} 重载一条即可，上层不用动。
+     * <p>原来每次调用都 {@code new WebView}，理由是「页面里留着 {@code __spiderSite}
+     * 和 spider 自己挂的定时器，复用会让第二个源继承第一个源的全局对象」。那个担心
+     * 是对的，但解法可以更便宜：{@code loadUrl(HOST_PAGE)} 重载一次宿主页，整个
+     * 文档作用域就换掉了 —— {@code __spiderSite = null} 会重新执行，定时器随旧文档
+     * 一起没了。留着的是 WebView 对象和它的渲染线程，而省掉的正是那一两百毫秒的
+     * 初始化。
+     *
+     * <p>超时和出错的页面仍然销毁：那种页面的状态本来就不该信（可能停在一半的
+     * spider 里、可能卡在渲染线程上），重建是唯一确定的做法。
+     *
+     * <p>连续复用满 {@link #MAX_REUSE} 次也重建一次，防止渲染线程的堆和进程内的
+     * 缓存一路涨上去。
      */
     private static void releasePage(final Session s) {
         // 任何线程都能 removeCallbacks；闩锁和会话状态先落定，再让主线程收拾页面。
@@ -691,12 +919,31 @@ final class SpiderRuntime {
         synchronized (s) {
             s.finished = true;
         }
+        // 正常收尾的页面留着给下一次用；超时/出错的页面状态不可信，必须扔。
+        final boolean reusable = !s.timedOut && s.error == null;
         MAIN.post(new Runnable() {
             @Override
             public void run() {
-                // 只销毁「这一次」的页面：如果更新的一次调用已经建好了新页，
+                // 只收拾「这一次」的页面：如果更新的一次调用已经建好了新页，
                 // 那是它的东西，不能动。
-                if (session == null || session == s) destroyOnMain();
+                if (session != null && session != s) return;
+                if (!reusable) {
+                    destroyOnMain();
+                    reuseCount = 0;
+                    return;
+                }
+                final WebView wv = webView;
+                if (wv == null) return;
+                try {
+                    // 清文档但不销毁。下一次 startPage 复用它时 loadUrl 会重新
+                    // 走一遍 onPageFinished → inject，等于换了个干净的全局作用域。
+                    wv.stopLoading();
+                    wv.loadUrl("about:blank");
+                } catch (Throwable ignored) {
+                    // 清不干净就下次重建，不在收尾路径上抛。
+                    destroyOnMain();
+                    reuseCount = 0;
+                }
             }
         });
     }
@@ -705,6 +952,7 @@ final class SpiderRuntime {
     private static void destroyOnMain() {
         final WebView wv = webView;
         webView = null;
+        reuseCount = 0;
         try {
             if (wv != null) {
                 // stopLoading + about:blank 是 SiteFetchWebView 验过的收尾顺序：
@@ -713,22 +961,12 @@ final class SpiderRuntime {
                 wv.stopLoading();
                 wv.loadUrl("about:blank");
                 wv.removeJavascriptInterface("__hgSpider");
-                if (wv.getParent() instanceof ViewGroup) {
-                    ((ViewGroup) wv.getParent()).removeView(wv);
-                }
+                // headless：从未 attach，无需 removeView。
                 wv.destroy();
             }
         } catch (Throwable ignored) {
             // 销毁路径上什么都别抛：它要么在 Activity 退出流程里，要么在超时处置里，
             // 抛出去只会把这两条路一起打断。
-        }
-        try {
-            final View box = holder;
-            holder = null;
-            if (box != null && box.getParent() instanceof ViewGroup) {
-                ((ViewGroup) box.getParent()).removeView(box);
-            }
-        } catch (Throwable ignored) {
         }
     }
 
@@ -757,18 +995,6 @@ final class SpiderRuntime {
     private static String timeoutMessage(Session s) {
         long seconds = Math.max(1L, Math.round(s.timeoutMs / 1000.0));
         return "spider 超时（" + seconds + "s）";
-    }
-
-    /**
-     * 拿一个能挂 WebView 的 Activity。
-     *
-     * <p>契约的入参是 {@code Context}（调用方可能只有 Application），但 WebView
-     * 必须挂到 window 上才能跑，所以这里往上找 Activity：先看传进来的那个，
-     * 再退回 {@link MainActivity#host}。
-     */
-    private static Activity activityOf(Context ctx) {
-        if (ctx instanceof Activity) return (Activity) ctx;
-        return MainActivity.host;
     }
 
     /**

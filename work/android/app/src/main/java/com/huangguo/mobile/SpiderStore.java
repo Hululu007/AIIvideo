@@ -137,7 +137,10 @@ final class SpiderStore {
         }
         Log.i(TAG, "cap=" + cap + " id=" + spiderId + " src=" + e.source
                 + " bytes=" + source.length());
-        return SpiderRuntime.call(ctx, source, cap, args, timeoutMs);
+        // 2026-10-19：宿主在 :spider 独立进程里跑（见 SpiderService 类注释）——
+        // Android WebView 全 app 共享渲染主线程，spider 一次抓取解析会冻住主页面
+        // 的动画/滚动，进程隔离是唯一根治。这里只是换了个调用通道，契约不变。
+        return SpiderClient.call(ctx, source, cap, args, timeoutMs);
     }
 
     /**

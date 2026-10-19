@@ -239,9 +239,36 @@
   // 三种「页面级」能力（home / category / search）返回的是同一个 Paged 形状，
   // 所以共用 paged()。动作名收在这里而不是散在调用方：将来加 category 的
   // 筛选参数，只改这一张表。
-  var PAGED_CAPS = { home: 1, category: 1, search: 1, list: 1, 'tag-list': 1 };
+  var PAGED_CAPS = { home: 1, category: 1, search: 1, list: 1, tagList: 1 };
   var DETAIL_CAPS = { detail: 1, episode: 1 };
   var PLAY_CAPS = { play: 1 };
+  // 标签清单不是 Paged：它没有卡片、没有翻页，只有「名字 + slug + 组」。
+  // 混进 PAGED_CAPS 的后果是每个标签都被 card() 洗一遍，slug 丢了，
+  // 点下去变成按 id 搜，页面显示 0 条 —— 而标签页本身看起来是对的。
+  var TAG_CAPS = { tags: 1 };
+
+  // ── Tags ─────────────────────────────────────────────────────────
+  //
+  // 渲染层（app.js renderTags）要的是 `{name, slug, group}`：
+  //   name  → 按钮文字
+  //   slug  → 点下去传给 tag-list 的标识
+  //   group → 分组标题（91porn 是 'category'，hanime1 那一族有七八个组）
+  //
+  // 两条兜底都是被真机逼出来的：slug 缺失时用 name 顶上（有的源列表项上
+  // 只有中文名，slug 是同一个东西）；group 缺失时归 'other'，否则
+  // renderTags 那句 `tags.filter(tag => tag.group === id)` 一条都匹配不上，
+  // 页面是空的而标题写着「N 个标签」。
+  function tags(payload) {
+    var list = [];
+    arr((payload || {}).items).forEach(function (raw) {
+      var one = raw || {};
+      var slug = str(one.slug) || str(one.name) || str(one.id);
+      var name = str(one.name) || slug;
+      if (!slug || !name) return;
+      list.push({ name: name, slug: slug, group: str(one.group) || 'other' });
+    });
+    return { items: list };
+  }
 
   // ── Home ─────────────────────────────────────────────────────────
   //
@@ -270,6 +297,7 @@
     var name = str(cap);
     if (name === 'home') return home(payload);
     if (PAGED_CAPS[name]) return paged(payload);
+    if (TAG_CAPS[name]) return tags(payload);
     if (DETAIL_CAPS[name]) return detail(payload);
     if (PLAY_CAPS[name]) return play(payload);
     // 抛而不是返回空：未知能力名意味着前端和 spider 的 ABI 对不上，
@@ -281,6 +309,7 @@
     card: card,
     home: home,
     paged: paged,
+    tags: tags,
     detail: detail,
     play: play,
     fromBridge: fromBridge

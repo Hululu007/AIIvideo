@@ -1,5 +1,5 @@
 {
-  "_note": "AGE动漫。数据在 api.agedm.io/v2/（裸请求可拉、无鉴权）。播放地址站点自己是 age_ 密文 + Go/WASM 签名门，spider 版跑不了 wasm，所以 play 只能把密文交出去或明确报错。分类是 46 个中文类型词。",
+  "_note": "AGE动漫。数据在 api.agedm.io/v2/（裸请求可拉、无鉴权）。播放地址站点自己是 age_ 密文 + Go/WASM 签名门。【2026-10-19 更正】spider 宿主页 CSP 的 'unsafe-eval' 允许 WebAssembly，wasm 是可以跑的——现在的降级只是「还没把 hxm.wasm（base64 ~550KB）内嵌进源文件」，不是跑不了；内嵌后 play 可直出 m3u8，零发版，路径见 docs/2026-10-19-代理路由智能化.md §五。分类是 46 个中文类型词。",
   "web": {
     "spider": "https://149.104.21.177.sslip.io/spiders/agedm.js",
     "firstPageSize": 24,

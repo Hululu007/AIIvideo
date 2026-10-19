@@ -14,12 +14,17 @@ android {
     namespace = "com.huangguo.mobile"
     compileSdk = 36
 
+    // spider 宿主的跨进程通道（ISpiderChannel.aidl）。AGP 8 起 aidl 默认关。
+    buildFeatures {
+        aidl = true
+    }
+
     defaultConfig {
         applicationId = "com.huangguo.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10031
-        versionName = "1.0.31"
+        versionCode = 10032
+        versionName = "1.0.32"
         vectorDrawables { useSupportLibrary = true }
     }
 
