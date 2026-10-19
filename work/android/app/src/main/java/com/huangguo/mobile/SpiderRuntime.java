@@ -79,6 +79,15 @@ final class SpiderRuntime {
     private static final int NET_TIMEOUT_S = 15;
 
     /**
+     * headless WebView 尝试过盾的上限。
+     *
+     * <p>没有窗口的 WebView 过不了 Cloudflare 的挑战（实测两次 45 秒都超时），
+     * 而它的 {@code ensureWarm} 默认要跑满两轮。给它 15 秒就是「试一下，
+     * 不行赶紧说」——主进程有窗口，同样的挑战 1~2 秒就过。
+     */
+    private static final long SHIELD_HEADLESS_MS = 15_000L;
+
+    /**
      * 响应体上限 4MB。
      *
      * <p>超了<b>报错而不是截断</b>（设计 §四）：截断的 JSON 后面会在
@@ -525,7 +534,16 @@ final class SpiderRuntime {
                 if (raw == null && shieldedEarly) {
                     android.util.Log.i("HG.Spider", "op=net 命中盾后站点，改走真 WebView：" + host);
                     try {
-                        String html = SiteFetchWebView.fetchPage(url);
+                        // headless 过盾最多等这么久，等不到就把活交给主进程。
+                        //
+                        // 2026-10-19 真机（e9fa340 实装后第一轮）：:spider 的 WebView
+                        // 没有窗口，挑战跑不动，ensureWarm 会老老实实跑满两次
+                        // 45 秒（日志：21:23:57 第 1 次超时、21:24:42 第 2 次超时），
+                        // 而 call 的看门狗预算是 90 秒 —— 21:24:41 先判「spider 超时
+                        // （90s）」，信号根本来不及抛出去，方案 1 一次都没触发。
+                        // 所以这里必须自己掐一个短上限：headless 就是过不去，
+                        // 15 秒足够判定，剩下的时间留给真正能过的主进程。
+                        String html = fetchPageWithBudget(url, SHIELD_HEADLESS_MS);
                         if (html != null && html.length() > 0) {
                             raw = html.getBytes(java.nio.charset.StandardCharsets.UTF_8);
                         }
@@ -1284,6 +1302,31 @@ final class SpiderRuntime {
     }
 
     /** 大写十六进制表，避开 {@code String.format} 在每个字节上开一次 Formatter 的开销。 */
+    /**
+     * 带预算的 fetchPage：超时就中断等待（线程自己会跑完，不影响进程）。
+     *
+     * <p>为什么用独立线程而不是改 {@code SiteFetchWebView} 的超时常量：那个常量
+     * 同时管主进程那条路，改小会把主进程也拖下水（主进程过盾 1~2 秒，但冷启动
+     * 那次挑战要 30 秒以上）。
+     */
+    private static String fetchPageWithBudget(final String url, long budgetMs) throws Exception {
+        java.util.concurrent.FutureTask<String> task =
+                new java.util.concurrent.FutureTask<String>(new java.util.concurrent.Callable<String>() {
+                    @Override
+                    public String call() throws Exception {
+                        return SiteFetchWebView.fetchPage(url);
+                    }
+                });
+        Thread worker = new Thread(task, "shield-headless");
+        worker.setDaemon(true);
+        worker.start();
+        try {
+            return task.get(budgetMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.TimeoutException timeout) {
+            throw new IOException("headless WebView 过盾超时（" + (budgetMs / 1000) + " 秒），交给主进程");
+        }
+    }
+
     private static final char[] HEX = "0123456789ABCDEF".toCharArray();
 
     private static String hostOf(String url) {

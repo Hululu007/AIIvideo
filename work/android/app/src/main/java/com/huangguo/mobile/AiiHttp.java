@@ -1490,34 +1490,57 @@ public final class AiiHttp {
             // 这种时候任何「解析」都是碰运气，唯一能做的是把能用那个写死。
             // 配置顶层写：  "hosts": { "例子.com": ["1.2.3.4", "5.6.7.8"] }
             List<String> pinned = pinned(hostname, profile);
+            // 钉 IP 是「优先提示」不是「唯一答案」（2026-10-19 教训）：
+            // 之前 pinned 命中就直接 return —— 钉的 IP 哪天过期（站点换 CDN 是
+            // 常态），域名就安静地死掉，没有任何回落。现在解析出全部候选后把
+            // 钉住的地址排在**最前面**，OkHttp 按顺序试：钉 IP 活着就是最快路径，
+            // 死了自动落回 DoH/系统解析，慢一点但不会再死。
+            List<InetAddress> pinnedAddrs = new ArrayList<InetAddress>();
             if (!pinned.isEmpty()) {
-                List<InetAddress> list = new ArrayList<InetAddress>(pinned.size());
                 for (int i = 0; i < pinned.size(); i++) {
-                    try { list.add(InetAddress.getByName(pinned.get(i))); } catch (Exception ignored) {}
-                }
-                if (!list.isEmpty()) {
-                    log("按配置钉死 " + hostname + " → " + list.size() + " 个地址");
-                    return list;
+                    try { pinnedAddrs.add(InetAddress.getByName(pinned.get(i))); } catch (Exception ignored) {}
                 }
             }
-            if (!dohEnabled(profile)) return Dns.SYSTEM.lookup(hostname);
-            List<String> ips = resolve(hostname, profile);
-            if (ips.isEmpty()) {
-                log("DoH 没有结果，回落系统解析：" + hostname);
+            if (pinnedAddrs.isEmpty()) {
+                // 没有可用钉 IP：走原有路径（DoH/系统）并原样返回。
+                List<InetAddress> plain = resolveFallback(hostname, profile);
+                if (plain != null) return plain;
                 return Dns.SYSTEM.lookup(hostname);
             }
-            List<InetAddress> out = new ArrayList<InetAddress>(ips.size());
-            for (int i = 0; i < ips.size(); i++) {
-                try {
-                    out.add(InetAddress.getByName(ips.get(i)));
-                } catch (Exception e) {
-                    log("地址无法构造：" + ips.get(i));
-                }
+            List<InetAddress> resolved = resolveFallback(hostname, profile);
+            if (resolved == null || resolved.isEmpty()) {
+                log("钉住 " + hostname + " → " + pinnedAddrs.size() + " 个地址（解析无结果，直接用钉 IP）");
+                return pinnedAddrs;
             }
-            if (out.isEmpty()) return Dns.SYSTEM.lookup(hostname);
-            log("DoH " + hostname + " → " + out.size() + " 个地址");
+            // 钉 IP 在前，解析结果在后；去重后交给 OkHttp 按序试。
+            List<InetAddress> out = new ArrayList<InetAddress>(pinnedAddrs.size() + resolved.size());
+            out.addAll(pinnedAddrs);
+            for (InetAddress addr : resolved) {
+                if (!out.contains(addr)) out.add(addr);
+            }
+            log("钉住 " + hostname + " → " + pinnedAddrs.size() + " 个优先 + 解析 "
+                    + resolved.size() + " 个候选");
             return out;
         }
+    }
+
+    /**
+     * DoH/系统解析的老路径，从 lookup 里拆出来给「钉 IP 优先 + 回落」复用。
+     * 返回 null 表示 DoH 没开（调用方走系统解析）；空表 = DoH 无结果（同样回落）。
+     */
+    private static List<InetAddress> resolveFallback(String hostname, SiteProfile profile) throws UnknownHostException {
+        if (!dohEnabled(profile)) return null;
+        List<String> ips = resolve(hostname, profile);
+        if (ips.isEmpty()) return null;
+        List<InetAddress> out = new ArrayList<InetAddress>(ips.size());
+        for (int i = 0; i < ips.size(); i++) {
+            try {
+                out.add(InetAddress.getByName(ips.get(i)));
+            } catch (Exception e) {
+                log("地址无法构造：" + ips.get(i));
+            }
+        }
+        return out;
     }
 
     /**

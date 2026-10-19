@@ -166,9 +166,19 @@
   },
   "_note": "黄果短剧（spider 版）。内容走 huangguo.js 的 /api/* 调用，这份配置只保留「网络怎么走」和「封面怎么解」：\n  hosts   钉 IP —— 入口域名的 DNS 在手机上被污染，钉住之后直连可用\n  cover   封面是 AES-CBC 加密图，key/iv 照旧；allowedHosts 是防 SSRF 白名单\n  ui      四个分类 + 标签分组（与 huangguo.js 的 group id 一一对应）\norigin 换成 https://cab3f.nt17g20k.cc 也一样，两个域名回一样的接口。",
   "net": {
-    "proxy": [
-      "huangguoai.com",
-      "cab3f.nt17g20k.cc"
+    "_why": "huangguoai.com 是境内 CDN，走境外节点反而被掐（10-18 的老病）。declared:true + 空 proxy = 显式声明「本源全直连」，NetRoute 按声明裁决，不再参考全局代理开关与 DirectHosts。",
+    "declared": true,
+    "proxy": []
+  },
+  "hosts": {
+    "_why": "入口域名 DNS 被污染：运营商回证书过期的 IP、阿里 DoH 回 0.0.0.0、腾讯 DoH 五个地址只活一两个（2026-10-17 实测）。SmartDns 把钉住的 IP 排在解析结果最前面优先试，失败自动回落 DoH/系统解析 —— 这是优先级提示，不是唯一答案（2026-10-19 起行为）。\n【因果更正】2026-10-19 曾误判「钉 IP 对声明代理的源是负收益」并删掉本表——实际 SmartDns 只在直连 client 上生效，走代理的连接由节点解析，两者井水不犯河水；删掉的只是「代理关闭时兜底直连」的唯一活路。已恢复，并把声明改成 net.declared（全直连）。",
+    "huangguoai.com": [
+      "103.41.125.230",
+      "43.229.39.228"
+    ],
+    "cab3f.nt17g20k.cc": [
+      "103.41.125.230",
+      "43.229.39.228"
     ]
   }
 }

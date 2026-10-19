@@ -130,8 +130,19 @@ final class SiteFetchWebView {
      *
      * <p>仍然留着 {@code .thumbnail} 吗？不留。它就是被 blockNetworkImage 坑到的那一个，
      * 留着只会让人以为「没命中 .thumbnail 说明没过去」——而实际上它可能已经过去了。
+     *
+     * <p><b>2026-10-19 晚再修一次：判定不能只写 {@code html[lang]}。</b>
+     * Cloudflare 的中文挑战页自己就是
+     * {@code <html lang="zh-cn" dir="ltr"><head><title>请稍候…</title>}——
+     * 它也有 lang，于是「过盾成功」在第 16 秒就命中，实际拿到的还是挑战页
+     * （28956 字节，真页面是 199320 字节）。这就是连续几轮「过盾成功但没内容」
+     * 的真正原因：判据命中的是挑战页本身。
+     *
+     * <p>现在只认站点自己的语言标记 {@code lang="zh-Hans"}（挑战页是 zh-cn）
+     * 和列表栅格 {@code .grid}。两者的共同点是：只有真页面才有。
      */
-    private static final String PASSED_MARKER = "html[lang], .grid";
+    private static final String PASSED_MARKER =
+            "html[lang='zh-Hans'], html[lang='zh-Hans '], .grid";
 
     /**
      * 单次请求超时。
