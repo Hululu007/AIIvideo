@@ -1,7 +1,7 @@
 {
   "_note": "hanime1.me。数据全在 SSR 的 HTML 里，播放地址是页面内联的 ?secure= 签名直链，每次现取不缓存。封面和播放都在 vdownload.hembed.com（spider 自己不请求它，只把地址交给前端/播放器）。",
   "web": {
-    "spider": "hanime1",
+    "spider": "https://149.104.21.177.sslip.io/spiders/hanime1.js",
     "firstPageSize": 24,
     "pageSize": 40,
     "categories": {
@@ -18,25 +18,75 @@
     },
     "ui": {
       "tabs": [
-        { "key": "裏番", "label": "裏番", "icon": "film" },
-        { "key": "泡麵番", "label": "泡麵番", "icon": "sparkle" },
-        { "key": "3DCG", "label": "3DCG", "icon": "grid" },
-        { "key": "2D動畫", "label": "2D動畫", "icon": "tv" },
-        { "key": "more", "label": "更多", "icon": "grid" }
+        {
+          "key": "裏番",
+          "label": "裏番",
+          "icon": "film"
+        },
+        {
+          "key": "泡麵番",
+          "label": "泡麵番",
+          "icon": "sparkle"
+        },
+        {
+          "key": "3DCG",
+          "label": "3DCG",
+          "icon": "grid"
+        },
+        {
+          "key": "2D動畫",
+          "label": "2D動畫",
+          "icon": "tv"
+        },
+        {
+          "key": "more",
+          "label": "更多",
+          "icon": "grid"
+        }
       ],
       "categoryIds": {
-        "裏番": ["裏番"],
-        "泡麵番": ["泡麵番"],
-        "3DCG": ["3DCG"],
-        "2D動畫": ["2D動畫"],
-        "more": ["Motion Anime", "2.5D", "AI生成", "MMD", "Cosplay", "新番預告"]
+        "裏番": [
+          "裏番"
+        ],
+        "泡麵番": [
+          "泡麵番"
+        ],
+        "3DCG": [
+          "3DCG"
+        ],
+        "2D動畫": [
+          "2D動畫"
+        ],
+        "more": [
+          "Motion Anime",
+          "2.5D",
+          "AI生成",
+          "MMD",
+          "Cosplay",
+          "新番預告"
+        ]
       },
       "categoryLabels": {
-        "裏番": ["裏番"],
-        "泡麵番": ["泡麵番"],
-        "3DCG": ["3DCG"],
-        "2D動畫": ["2D動畫"],
-        "more": ["Motion Anime", "2.5D", "AI生成", "MMD", "Cosplay", "新番預告"]
+        "裏番": [
+          "裏番"
+        ],
+        "泡麵番": [
+          "泡麵番"
+        ],
+        "3DCG": [
+          "3DCG"
+        ],
+        "2D動畫": [
+          "2D動畫"
+        ],
+        "more": [
+          "Motion Anime",
+          "2.5D",
+          "AI生成",
+          "MMD",
+          "Cosplay",
+          "新番預告"
+        ]
       },
       "categoryTitles": {
         "裏番": "裏番",
@@ -46,31 +96,82 @@
         "more": "更多分类"
       },
       "popularTags": [
-        ["中文字幕", "中文字幕"],
-        ["巨乳", "巨乳"],
-        ["JK", "JK"],
-        ["純愛", "純愛"],
-        ["NTR", "NTR"],
-        ["校園", "校園"],
-        ["後宮", "後宮"],
-        ["3P", "3P"]
+        [
+          "中文字幕",
+          "中文字幕"
+        ],
+        [
+          "巨乳",
+          "巨乳"
+        ],
+        [
+          "JK",
+          "JK"
+        ],
+        [
+          "純愛",
+          "純愛"
+        ],
+        [
+          "NTR",
+          "NTR"
+        ],
+        [
+          "校園",
+          "校園"
+        ],
+        [
+          "後宮",
+          "後宮"
+        ],
+        [
+          "3P",
+          "3P"
+        ]
       ],
       "publicPopularTags": [],
       "tagGroups": [
-        ["hanime-attr", "影片属性"],
-        ["relationship", "人物关系"],
-        ["hanime-role", "角色设定"],
-        ["style", "外貌身材"],
-        ["setting", "情境场所"],
-        ["plot", "故事剧情"],
-        ["hanime-act", "性交体位"],
-        ["other", "其他"]
+        [
+          "hanime-attr",
+          "影片属性"
+        ],
+        [
+          "relationship",
+          "人物关系"
+        ],
+        [
+          "hanime-role",
+          "角色设定"
+        ],
+        [
+          "style",
+          "外貌身材"
+        ],
+        [
+          "setting",
+          "情境场所"
+        ],
+        [
+          "plot",
+          "故事剧情"
+        ],
+        [
+          "hanime-act",
+          "性交体位"
+        ],
+        [
+          "other",
+          "其他"
+        ]
       ]
     }
   },
   "cover": {
     "mode": "plain",
-    "allowedHosts": ["vdownload.hembed.com", "hanime1.me"],
+    "allowedHosts": [
+      "vdownload.hembed.com",
+      "hanime1.me"
+    ],
     "hostRewrites": {}
   },
   "headers": {

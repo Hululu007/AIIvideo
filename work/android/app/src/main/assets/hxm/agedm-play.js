@@ -142,6 +142,16 @@
       dead.lineDead = true;
       throw dead;
     }
+    // 把解出来的地址打出去。2026-10-19 真机排查卡了很久：界面只说「内置播放器
+    // 也解不了」，而那句话对 m3u8、mp4、分享页三种情况一模一样 —— 没有这一行，
+    // 「解析出来的是不是直链」只能靠猜。
+    //
+    // 走 console.log（MainActivity 的 onConsoleMessage 会转进 logcat 的 AIIvideo
+    // 标签），不打完整地址：签名可能有几十个字符，截中间就够判断类型了。
+    try {
+      const brief = url.length <= 90 ? url : url.slice(0, 60) + '…' + url.slice(-20);
+      console.log('[agedm] 线路 ' + (info.name || '') + ' 解出地址：' + brief);
+    } catch (e) { /* 日志不能影响主流程 */ }
     return url;
   }
 
@@ -160,8 +170,10 @@
     if (!lines || !lines.length) throw new Error('这部剧没有任何线路能给播放密文');
     let last = '';
     for (let i = 0; i < lines.length; i++) {
-      const name = String(lines[i][0] || '');
-      const token = String(lines[i][1] || '');
+      const one = pairOf(lines[i]);
+      const name = one[0];
+      const token = one[1];
+      if (!token) continue;                       // 这条线路没拿到密文，试下一条
       if (lines.length > 1) note('线路 ' + name + '（' + (i + 1) + '/' + lines.length + '）');
       try {
         return await resolve(token, note);
@@ -170,7 +182,43 @@
         if (i + 1 < lines.length) note('『' + name + '』不行，换下一条…');
       }
     }
+    if (!last) throw new Error('这些线路都没有拿到播放密文');
     throw new Error(last + '；' + lines.length + ' 条线路都试过了');
+  }
+
+  /**
+   * 一条线路 → `[线路名, 密文]`。
+   *
+   * ── 为什么需要这个函数 ────────────────────────────────────────────
+   * 这个解析器原来是给 Java 的 AgedmAdapter 用的，那边把线路交过来是
+   * **二元数组** `["xigua", "age_xxx"]`（见 play() 里那个 lines 数组）。
+   *
+   * 但 2026-10-19 八家迁成 spider 之后，`lines` 的来源换成了转换层
+   * （model.js 的 play()），它的形状是**对象数组** `[{line,name,url}]`。
+   * 两种都收，否则 `lines[i][0]` 在对象上取到 undefined、token 成了空串，
+   * 每条线路都「解析失败」—— 而报出来的错是「N 条线路都试过了」，
+   * 看起来像线路全挂了，其实是接口对不上。
+   *
+   * 传进来的是字符串（单条密文）也认，当无名线路处理。
+   */
+  function pairOf(raw) {
+    if (raw == null) return ['', ''];
+    if (typeof raw === 'string') {
+      const s = raw.trim();
+      return [stripMarker(s), stripMarker(s)];
+    }
+    if (Array.isArray(raw)) {
+      return [String(raw[0] == null ? '' : raw[0]), stripMarker(String(raw[1] == null ? '' : raw[1]))];
+    }
+    const name = String(raw.line || raw.name || '');
+    const url = String(raw.url || raw.token || '');
+    return [name, stripMarker(url)];
+  }
+
+  /** 去掉 `agedm-wasm:` 前缀 —— 转换层会把标记留在 url 里，解析器只吃后面的密文。 */
+  function stripMarker(text) {
+    const s = String(text || '').trim();
+    return s.indexOf('agedm-wasm:') === 0 ? s.slice('agedm-wasm:'.length) : s;
   }
 
   window.HG_AGEDM_PLAY = { resolve: resolve, resolveAny: resolveAny };

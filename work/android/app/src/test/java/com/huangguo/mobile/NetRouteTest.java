@@ -23,24 +23,44 @@ public class NetRouteTest {
         NetRoute.configure(null, "");
     }
 
-    /** 有 net.proxy：只有表里那个域走代理，别的（含新出现的 CDN）一律直连。 */
+    /**
+     * 有 net.proxy：只有表里那个域走代理，别的（含新出现的 CDN）一律直连。
+     *
+     * <p>⚠️ 这里断言的是 {@code mustProxy}（源声明）而不是 {@code directOnly}（实际怎么发）。
+     * 两者在 2026-10-19 之前被当成一回事，真机踩到才发现不是：
+     *
+     * <pre>
+     *   源的 net.proxy 说 yhdm.one 要走代理
+     *   全局设置是 mode=direct，effectiveProxy() 是空串
+     *   于是 directOnly 说「不是直连」，mustProxy 说「要代理」，
+     *   可谁也给不出代理 —— 请求空着直到 45 秒超时
+     * </pre>
+     *
+     * <p>单测环境永远没有代理（appContext 是 null），所以 {@code directOnly} 对
+     * 代理表里的域必然返回 true —— 那是「没有代理可用时按直连放行」的新语义，
+     * 不是 bug。真正的「有没有代理」由 {@link NetRoute#proxyUnavailable} 单独表达。
+     */
     @Test public void 声明了代理域就只代理那几个() throws Exception {
         JSONObject net = new JSONObject();
         net.put("proxy", new JSONArray().put("yhdm.one"));
         NetRoute.configure(net, "https://yhdm.one");
 
-        // 站点入口：必须走代理（被墙的是它）
-        assertFalse("入口域不该直连", NetRoute.directOnly("yhdm.one"));
-        assertFalse(NetRoute.directOnly("www.yhdm.one"));
-        assertTrue("入口域必须走代理", NetRoute.mustProxy("yhdm.one"));
+        // 站点入口：源声明了要走代理。这是「意图」，与实际发不发得出去无关。
+        assertTrue("入口域必须是代理表里的", NetRoute.mustProxy("yhdm.one"));
+        assertTrue(NetRoute.mustProxy("www.yhdm.one"));
+        // 单测里没有代理可走，所以路由层把它按直连放行（可以失败，不能干等）。
+        assertTrue("没有代理可用时应降级直连", NetRoute.proxyUnavailable("yhdm.one"));
+        assertTrue("降级之后就是直连", NetRoute.directOnly("yhdm.one"));
 
-        // 播放 CDN：必须直连 —— 这一条就是这次 bug 的全部内容
+        // 播放 CDN：必须直连 —— 这一条就是当初那个 bug 的全部内容
         assertTrue(NetRoute.directOnly("bfikuncdn.com"));
         assertTrue(NetRoute.directOnly("play.modujx17.com"));
         assertTrue(NetRoute.directOnly("vod12.wgslsw.com"));
         // 连没见过的 CDN 也直连：这正是「不维护白名单」的意义
         assertTrue(NetRoute.directOnly("some-cdn-nobody-has-seen.example"));
         assertFalse(NetRoute.mustProxy("bfikuncdn.com"));
+        // CDN 不在代理表里，所以不存在「无代理可用」这回事
+        assertFalse(NetRoute.proxyUnavailable("bfikuncdn.com"));
     }
 
     /** origin 就算源配置忘了写进 net.proxy，也必须进代理表 —— 否则整站直连，加源直接超时。 */
@@ -48,7 +68,7 @@ public class NetRouteTest {
         JSONObject net = new JSONObject();
         net.put("proxy", new JSONArray());        // 空表，等于「什么都不代理」
         NetRoute.configure(net, "https://yhdm.one");
-        assertFalse("origin 必须被兜底塞进代理表", NetRoute.directOnly("yhdm.one"));
+        assertTrue("origin 必须被兜底塞进代理表", NetRoute.mustProxy("yhdm.one"));
         assertTrue(NetRoute.directOnly("bfikuncdn.com"));
     }
 

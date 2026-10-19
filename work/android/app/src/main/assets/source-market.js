@@ -328,10 +328,27 @@ document.addEventListener('submit', async event => {
   const url = String(input?.value || '').trim();
   if (!/^https:\/\//i.test(url)) { toast('地址必须以 https:// 开头'); return; }
   input.disabled = true;
-  toast('正在下载源…', true);
+  toast('正在装源…', true);
   try {
-    const meta = await installSpiderSource(url);
-    toast('已装源码 ' + (meta?.name || meta?.id || '源') + '；还要贴它的 json 配置才会生效');
+    // 走 setup.js 的 addOneSource，不是这里的 installSpiderSource。
+    //
+    // 差别只有一件事，但它是决定性的：spider 源**要装两样**（js 源码 + json 配置），
+    // 而这份表单原来只装源码、然后弹一句「还要贴它的 json 配置才会生效」。
+    // 用户照做的话得再去找那个 json 的地址 —— 而他手里通常只有一个。
+    // addOneSource 会自己推同目录的另一半，两个入口必须行为一致。
+    const one = window.HGSetup && window.HGSetup.addOneSource
+      ? await window.HGSetup.addOneSource(url)
+      : null;
+    if (!one) {
+      // setup.js 没加载时退回老路（只装源码）。不该发生，但别让按钮永远转圈。
+      const meta = await installSpiderSource(url);
+      toast('已装源码 ' + (meta?.name || meta?.id || '源'));
+    } else if (one.ok) {
+      toast('已装好：' + (one.spider || '源')
+        + (one.installedJs ? '（源码 + 配置）' : '（配置）'));
+    } else {
+      toast(one.error || '添加失败');
+    }
     input.value = '';
     await loadSpiderSources(true);
   } catch (error) {

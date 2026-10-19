@@ -210,9 +210,31 @@ const SPIDER_CAP = { home: 'home', category: 'category', search: 'search', detai
 const SPIDER_MISSING = new Set(['tags', 'tag-list', 'recommend', 'newest']);
 const SPIDER_SUPPORTS = '首页 / 分类 / 搜索 / 详情 / 播放';
 
+/**
+ * 这个源用哪个 spider。
+ *
+ * ── web.spider 现在两种写法都认（2026-10-19 改）─────────────────────
+ *
+ *   ① "https://…/yhdm.js"  → 源码地址。取最后一段去掉 .js 当 id。
+ *   ② "yhdm"               → 纯 id（旧写法，已发布的配置还在用）
+ *
+ * 为什么改成地址优先：TVBox 的 sites[] 里每一条都带自己的 spider 字段指向源码，
+ * 配置**自己声明**源码在哪。之前我们靠「配置和源码放同一个目录」去猜，猜得到
+ * 是运气 —— 而且一个配置想引用别处的源码就没办法了。
+ *
+ * 注意取出来的是 **id 不是 url**：SpiderStore.call 要的是已安装源的 id
+ * （源码装进 files/spiders/<id>.js），源码的下载发生在装源那一步，不在这里。
+ * 这里只做「地址 → id」这一小步，和 java.spiderMetaId 里的正则保持同一套规则。
+ */
 function spiderIdOf() {
   const site = window.HG_SITE || {};
-  return String(site.spider || '').trim();
+  const raw = String(site.spider || '').trim();
+  if (!raw) return '';
+  if (!/^https?:\/\//i.test(raw)) return raw;
+  // 去掉查询串和结尾斜杠，取最后一段去掉 .js
+  const path = raw.replace(/[?#].*$/, '').replace(/\/+$/, '');
+  const last = path.substring(path.lastIndexOf('/') + 1);
+  return last.replace(/\.js$/i, '');
 }
 
 /** 内部动作名 → spider 能力名。episode 是「要第 n 集的地址」，对应 play。 */

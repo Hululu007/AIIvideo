@@ -121,12 +121,49 @@ final class NetRoute {
         String h = host.toLowerCase(Locale.ROOT).trim();
         boolean direct;
         if (declared) {
-            direct = !matches(PROXY_HOSTS, h);
+            // 「声明了要代理，但根本没代理可用」按直连处理 —— 理由见 proxyUnavailable。
+            direct = !matches(PROXY_HOSTS, h) || proxyUnavailable(h);
         } else {
             direct = DirectHosts.isDirect(h);
         }
         trace(h, direct);
         return direct;
+    }
+
+    /**
+     * 这个 host 是不是「源说要走代理，但眼下根本没有代理可走」。
+     *
+     * ── 为什么需要这一条 ──────────────────────────────────────────────
+     * 2026-10-19 真机：装好 yhdm 源，首页转 45 秒超时，日志只有
+     *
+     * <pre>
+     *   [source] net yhdm.one → 代理 profile=有 mode=direct proxy=空
+     * </pre>
+     *
+     * {@code mode=direct} 是全局设置（默认值），而源的 net.proxy 说 yhdm.one
+     * 必须走代理。于是两边互相甩锅：
+     *
+     * <ul>
+     *   <li>{@link #directOnly} 说「不在直连表 → 不该直连」（false）</li>
+     *   <li>{@link #mustProxy} 说「在代理表 → 该走代理」（true）</li>
+     *   <li>但 {@code effectiveProxy()} 是空串，谁也给不出一个代理</li>
+     * </ul>
+     *
+     * 结果 {@code rawWith} 走到 {@code mustProxy && proxy == null} 那条兜底，
+     * 去问 {@code proxiedClient(null, …)}；而 direct 模式下 {@code routeForProxyHost()}
+     * 同样返回 null。请求就这么空着，直到调用方超时。
+     *
+     * <p><b>裁决规则</b>：没有代理可用时，直连是唯一能发出去的方式 —— 可以失败，
+     * 但不能什么都不做。所以这种情况按直连处理，并在日志里说清楚
+     * 「这里本该走代理，但没有代理」——否则用户看到的是「这个源坏了」，
+     * 而真相是「你没开代理」。
+     */
+    static boolean proxyUnavailable(String host) {
+        if (host == null || host.length() == 0) return false;
+        if (!declared) return false;                  // 没声明 → 老规则自己会处理
+        String h = host.toLowerCase(Locale.ROOT).trim();
+        if (!matches(PROXY_HOSTS, h)) return false;    // 不在代理表，本来就该直连
+        return AiiHttp.effectiveProxy().length() == 0;
     }
 
     /**

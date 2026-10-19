@@ -1,7 +1,7 @@
 {
   "_note": "樱花动漫。内容全部由 spider 提供：没有 origin、没有 web.paths。spider 源码 yhdm.js 要另装。",
   "web": {
-    "spider": "yhdm",
+    "spider": "https://149.104.21.177.sslip.io/spiders/yhdm.js",
     "firstPageSize": 18,
     "pageSize": 18,
     "categories": {
@@ -16,25 +16,71 @@
     },
     "ui": {
       "tabs": [
-        { "key": "jp", "label": "日本", "icon": "sparkle" },
-        { "key": "cn", "label": "国产", "icon": "tv" },
-        { "key": "us", "label": "欧美", "icon": "film" },
-        { "key": "movie", "label": "电影", "icon": "star" },
-        { "key": "more", "label": "更多", "icon": "grid" }
+        {
+          "key": "jp",
+          "label": "日本",
+          "icon": "sparkle"
+        },
+        {
+          "key": "cn",
+          "label": "国产",
+          "icon": "tv"
+        },
+        {
+          "key": "us",
+          "label": "欧美",
+          "icon": "film"
+        },
+        {
+          "key": "movie",
+          "label": "电影",
+          "icon": "star"
+        },
+        {
+          "key": "more",
+          "label": "更多",
+          "icon": "grid"
+        }
       ],
       "categoryIds": {
-        "jp": ["jp"],
-        "cn": ["cn"],
-        "us": ["us"],
-        "movie": ["movie"],
-        "more": ["剧场版", "OVA", "TV", "latest"]
+        "jp": [
+          "jp"
+        ],
+        "cn": [
+          "cn"
+        ],
+        "us": [
+          "us"
+        ],
+        "movie": [
+          "movie"
+        ],
+        "more": [
+          "剧场版",
+          "OVA",
+          "TV",
+          "latest"
+        ]
       },
       "categoryLabels": {
-        "jp": ["日本动漫"],
-        "cn": ["国产动漫"],
-        "us": ["欧美动漫"],
-        "movie": ["动漫电影"],
-        "more": ["剧场版", "OVA", "TV", "最近更新"]
+        "jp": [
+          "日本动漫"
+        ],
+        "cn": [
+          "国产动漫"
+        ],
+        "us": [
+          "欧美动漫"
+        ],
+        "movie": [
+          "动漫电影"
+        ],
+        "more": [
+          "剧场版",
+          "OVA",
+          "TV",
+          "最近更新"
+        ]
       },
       "categoryTitles": {
         "jp": "日本动漫",
@@ -44,21 +90,42 @@
         "more": "更多分类"
       },
       "popularTags": [
-        ["jp", "日本动漫"],
-        ["cn", "国产动漫"],
-        ["剧场版", "剧场版"],
-        ["latest", "最近更新"]
+        [
+          "jp",
+          "日本动漫"
+        ],
+        [
+          "cn",
+          "国产动漫"
+        ],
+        [
+          "剧场版",
+          "剧场版"
+        ],
+        [
+          "latest",
+          "最近更新"
+        ]
       ],
       "publicPopularTags": [],
-      "tagGroups": [["category", "分类"]]
+      "tagGroups": [
+        [
+          "category",
+          "分类"
+        ]
+      ]
     }
   },
   "cover": {
     "mode": "plain",
-    "allowedHosts": ["yhdm.one"]
+    "allowedHosts": [
+      "yhdm.one"
+    ]
   },
   "net": {
-    "proxy": ["yhdm.one"],
+    "proxy": [
+      "yhdm.one"
+    ],
     "_why": "只有站点入口走代理。播放 CDN 九成在境内，全走代理反而 403/TLS 被掐（2026-10-18 真机）。"
   }
 }

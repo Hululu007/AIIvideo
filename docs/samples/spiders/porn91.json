@@ -1,7 +1,7 @@
 {
   "_note": "91porn（KVS 模板）。单集站，一个 viewkey 一部片。镜像换域时改这里和 porn91.js 里的 BASE 两处。",
   "web": {
-    "spider": "porn91",
+    "spider": "https://149.104.21.177.sslip.io/spiders/porn91.js",
     "firstPageSize": 24,
     "pageSize": 24,
     "categories": {
@@ -18,28 +18,84 @@
     },
     "ui": {
       "tabs": [
-        { "key": "ori", "label": "91原创", "icon": "film" },
-        { "key": "hot", "label": "热门", "icon": "star" },
-        { "key": "top", "label": "本周榜", "icon": "sparkle" },
-        { "key": "hd", "label": "高清", "icon": "tv" },
-        { "key": "rf", "label": "精选", "icon": "grid" },
-        { "key": "more", "label": "更多", "icon": "grid" }
+        {
+          "key": "ori",
+          "label": "91原创",
+          "icon": "film"
+        },
+        {
+          "key": "hot",
+          "label": "热门",
+          "icon": "star"
+        },
+        {
+          "key": "top",
+          "label": "本周榜",
+          "icon": "sparkle"
+        },
+        {
+          "key": "hd",
+          "label": "高清",
+          "icon": "tv"
+        },
+        {
+          "key": "rf",
+          "label": "精选",
+          "icon": "grid"
+        },
+        {
+          "key": "more",
+          "label": "更多",
+          "icon": "grid"
+        }
       ],
       "categoryIds": {
-        "ori": ["ori"],
-        "hot": ["hot"],
-        "top": ["top"],
-        "hd": ["hd"],
-        "rf": ["rf"],
-        "more": ["tf", "long", "longer", "md", "mf"]
+        "ori": [
+          "ori"
+        ],
+        "hot": [
+          "hot"
+        ],
+        "top": [
+          "top"
+        ],
+        "hd": [
+          "hd"
+        ],
+        "rf": [
+          "rf"
+        ],
+        "more": [
+          "tf",
+          "long",
+          "longer",
+          "md",
+          "mf"
+        ]
       },
       "categoryLabels": {
-        "ori": ["91原创"],
-        "hot": ["热门"],
-        "top": ["本周榜"],
-        "hd": ["高清"],
-        "rf": ["精选"],
-        "more": ["收藏", "10分钟+", "20分钟+", "讨论多", "最多收藏"]
+        "ori": [
+          "91原创"
+        ],
+        "hot": [
+          "热门"
+        ],
+        "top": [
+          "本周榜"
+        ],
+        "hd": [
+          "高清"
+        ],
+        "rf": [
+          "精选"
+        ],
+        "more": [
+          "收藏",
+          "10分钟+",
+          "20分钟+",
+          "讨论多",
+          "最多收藏"
+        ]
       },
       "categoryTitles": {
         "ori": "91原创",
@@ -50,17 +106,38 @@
         "more": "更多分类"
       },
       "popularTags": [
-        ["ori", "91原创"],
-        ["hot", "热门"],
-        ["top", "本周榜"],
-        ["hd", "高清"]
+        [
+          "ori",
+          "91原创"
+        ],
+        [
+          "hot",
+          "热门"
+        ],
+        [
+          "top",
+          "本周榜"
+        ],
+        [
+          "hd",
+          "高清"
+        ]
       ],
       "publicPopularTags": [],
-      "tagGroups": [["category", "分类"]]
+      "tagGroups": [
+        [
+          "category",
+          "分类"
+        ]
+      ]
     }
   },
   "cover": {
     "mode": "plain",
-    "allowedHosts": ["901.26702.app", "91porn.com", "1729130453.rsc.cdn77.org"]
+    "allowedHosts": [
+      "901.26702.app",
+      "91porn.com",
+      "1729130453.rsc.cdn77.org"
+    ]
   }
 }

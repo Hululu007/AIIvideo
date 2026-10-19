@@ -301,7 +301,16 @@ final class SpiderRuntime {
 
         // 打一行路由。spider 这条路最容易出的诊断困境是「App 能取、spider 取不到」，
         // 而两者差的就是路由决策 —— 不把结论打出来，只能靠猜。
-        UserSource.log("net " + host + " → " + (NetRoute.mustProxy(host) ? "代理" : "直连")
+        //
+        // 2026-10-19 补：还要把「声明了代理但没有代理」这一种说出来。那天真机日志是
+        // `net yhdm.one → 代理 profile=有 mode=direct proxy=空`，后半句写着「按直连发」，
+        // 但用户看到的仍是 45 秒超时 —— 因为当时路由层没人裁决这个冲突。现在
+        // NetRoute.proxyUnavailable 会把这种情形按直连放行，日志也要跟着改口，
+        // 否则「→ 代理」那半句会让人以为代理生效了。
+        boolean unavailable = NetRoute.proxyUnavailable(host);
+        UserSource.log("net " + host + " → "
+                + (unavailable ? "无代理可用（源声明要走代理，按直连发）"
+                               : (NetRoute.mustProxy(host) ? "代理" : "直连"))
                 + (NetRoute.directOnly(host) ? "（直连表命中）" : "")
                 + " profile=" + (s.profile != null ? "有" : "空")
                 + " mode=" + ProxyConsole.proxyMode(s.ctx)
@@ -373,6 +382,38 @@ final class SpiderRuntime {
                         if (attempt == 0) {
                             android.util.Log.w("HG.Spider", "op=net 重试一次：" + e.getMessage());
                         }
+                    }
+                }
+                // ── 盾后站点的兜底：交给真 WebView ────────────────────────
+                //
+                // missav.live 整站（页面和 /api/* 一起）挂在 Cloudflare 的 JS 挑战
+                // 后面。2026-10-19 又实测了一次：带完整安卓 Chrome 头 curl 两个地址
+                // （/dm539/cn/new 和 /cn/fct-210）全是 **403 + 5.6KB 挑战页**。
+                //
+                // 这条不是"可能"，是必然 —— okhttp 永远过不去，而且**不是 cookie 的问题**：
+                // cf_clearance 绑的是发出请求那台的 TLS 指纹（JA3/JA4）。所以
+                // "先拿 cookie 再走 okhttp" 在协议上是死的，别再往那个方向试。
+                //
+                // 唯一能过盾的是真 WebView，而 App 里早就有这套东西
+                // （SiteFetchWebView，播放层的 VlcRelay 一直在用）。spider 的 net
+                // 走的是 okhttp，今天第一次需要它。
+                //
+                // 判据用域名表（isShielded）而不是"看响应像不像挑战页"：
+                // net 对非 2xx 直接抛异常、拿不到正文（见契约 §三），所以这里
+                // 根本看不见那个挑战页。域名是此刻唯一能拿到的信号。
+                if (raw == null && SiteFetchWebView.isShielded(url)) {
+                    android.util.Log.i("HG.Spider", "op=net 命中盾后站点，改走真 WebView：" + host);
+                    try {
+                        String html = SiteFetchWebView.fetchPage(url);
+                        if (html != null && html.length() > 0) {
+                            raw = html.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                        }
+                    } catch (Exception e) {
+                        // WebView 也过不去时，把两边的失败一起报出来 —— 只报
+                        // okhttp 那句「HTTP 403」会让人以为是站点挂了。
+                        throw new IOException("net 失败：" + host + " 在 Cloudflare 后面，okhttp 被挡（"
+                                + (last == null ? "无响应" : last.getMessage())
+                                + "），改用真浏览器内核也没过：" + e.getMessage());
                     }
                 }
                 if (raw == null) throw last == null ? new IOException("net 失败") : last;

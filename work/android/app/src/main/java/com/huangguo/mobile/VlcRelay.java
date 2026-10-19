@@ -20,6 +20,7 @@ import okhttp3.OkHttpClient;
 import okhttp3.Protocol;
 import okhttp3.Request;
 import okhttp3.Response;
+import okio.BufferedSource;
 import okhttp3.ResponseBody;
 
 /**
@@ -123,6 +124,38 @@ final class VlcRelay {
     }
 
     /**
+     * 这个地址是不是「伪装后缀」—— 视频流被挂成 .jpg / .png / .woff2 之类。
+     *
+     * <p>AGE动漫 的解析站 2026-10-19 实测返回的是：
+     *
+     * <pre>
+     *   https://jx.wuzhoupai.com:8443/playurl/&lt;hash&gt;…&amp;media_type=jpg
+     * </pre>
+     *
+     * 那个地址里装的是 **MPEG-TS 视频流**，但后缀和 {@code media_type} 参数都在说
+     * 「我是图片」。VLC 按 URL 后缀选 demuxer，于是
+     * {@code libvlc demux: Failed to create demuxer 0x0 Unknown} —— 黑屏，
+     * 而且它不会报「格式不对」，只会一遍遍重试。
+     *
+     * <p>这类地址**必须绕中继**：中继是自己判内容类型的（见 serveFromWebView
+     * 里那句 `isPlaylist(original, data)`），不会照抄服务端的 Content-Type。
+     * 直连给 VLC 就一定被后缀骗。
+     */
+    static boolean disguised(String url) {
+        if (url == null) return false;
+        String s = url.toLowerCase(java.util.Locale.ROOT);
+        int q = s.indexOf('?');
+        String path = q < 0 ? s : s.substring(0, q);
+        // 后缀名单取 OpenListAdapter 那套伪装扩展名的同类（视频被改名成静态资源）
+        String[] ext = { ".jpg", ".jpeg", ".png", ".gif", ".webp", ".woff2", ".woff", ".css", ".js" };
+        for (int i = 0; i < ext.length; i++) {
+            if (path.endsWith(ext[i])) return true;
+        }
+        // 查询串里自带 media_type= 的，也是同一个套路
+        return q >= 0 && s.indexOf("media_type=") > 0;
+    }
+
+    /**
      * 把原始播放地址包成中继地址。中继没起来时返回 null，调用方退回原始地址
      * （直连，和没有内置核心时的行为一致）。
      *
@@ -132,21 +165,35 @@ final class VlcRelay {
      */
     static String wrap(String originalUrl) {
         if (originalUrl == null || originalUrl.length() == 0) return null;
-        if (AiiHttp.effectiveProxy().length() == 0) return null;
         // 本地回环地址不包一层：一是没意义，二是会绕出环来。
         if (originalUrl.startsWith("http://127.0.0.1:") || originalUrl.startsWith("http://localhost")) {
             return null;
         }
+
+        // ── 伪装后缀：不管有没有代理都要绕中继 ────────────────────────────
+        //
+        // 这一条比「走不走代理」更刚性：它是**正确性**问题，不是路径优化。
+        // VLC 见到 .jpg 就按图片解，直连过去必然 demux 失败 —— 而绕中继就修好了，
+        // 因为中继自己判类型（#EXTM3U 开头当播放列表，其余按 MPEG-TS）。
+        //
+        // 2026-10-19 真机就是这么卡住的：AGE动漫 播到一半永远黑屏，日志里
+        // Failed to create demuxer，而解析出来的地址尾巴是 &media_type=jpg。
+        boolean disguise = disguised(originalUrl);
+        if (!disguise && AiiHttp.effectiveProxy().length() == 0) return null;
+
         // 分流：直连表里的域名连中继都不用绕 —— VLC 自己拉原始地址就是直连，
         // 绕一跳本地 OkHttp 纯属白费（而且 relayClient 如果不摘代理，反而把
         // 直连域名又塞回那条节点，表就白挂了）。
         // 路由决策只问 NetRoute 一处。以前这里问的是 DirectHosts（白名单），
         // 而源的 net.proxy 声明改由 NetRoute 接管 —— 两处各问一个表就会漂。
         // 语义只有一条：**这条地址明确该走代理才绕中继**，其余直连。
-        try {
-            String host = new java.net.URI(originalUrl).getHost();
-            if (!NetRoute.mustProxy(host)) return null;
-        } catch (Exception ignored) {}
+        // 伪装后缀是例外：它绕中继是为了改类型判定，不是为了代理。
+        if (!disguise) {
+            try {
+                String host = new java.net.URI(originalUrl).getHost();
+                if (!NetRoute.mustProxy(host)) return null;
+            } catch (Exception ignored) {}
+        }
         try {
             VlcRelay relay = ensure();
             if (relay.port() <= 0) return null;
@@ -307,6 +354,57 @@ final class VlcRelay {
             if (qmark > 0) pathOnly = pathOnly.substring(0, qmark);
             boolean playlistByUrl = pathOnly.endsWith(".m3u8")
                     || ctype.contains("mpegurl");
+
+            // ── 伪装后缀：读内容自己判，不听服务端也不听扩展名 ─────────────
+            //
+            // AGE动漫 的解析站给回来的地址是 …&media_type=jpg，里面装的是
+            // MPEG-TS 视频流。上游的 Content-Type 多半也是 image/jpeg ——
+            // 服务端和扩展名**两个都在骗人**，唯一靠谱的证据是前几个字节。
+            //
+            // 判据只用前 1KB：#EXTM3U 开头 = 播放列表（小，读全量改写）；
+            // 以 0x47 开头（TS 同步字节）= MPEG-TS；都不是就按二进制透传。
+            // 不能整块读进内存 —— 这是视频流，可能是几百 MB。
+            boolean disguise = disguised(original);
+            if (disguise && response.code() == 200 && response.body() != null) {
+                BufferedSource peek = response.body().source();
+                peek.request(1024);
+                byte[] head = peek.peek().readByteArray();
+                boolean looksLikePlaylist = startsWith(head, "#EXTM3U");
+                if (looksLikePlaylist) {
+                    byte[] data = response.body().bytes();
+                    String text = new String(data, StandardCharsets.UTF_8);
+                    String rewritten = rewritePlaylist(text, original);
+                    StringBuilder h2 = new StringBuilder(160);
+                    h2.append("HTTP/1.1 200 OK\r\n");
+                    h2.append("Content-Type: application/vnd.apple.mpegurl\r\n");
+                    h2.append("Content-Length: ").append(rewritten.getBytes(StandardCharsets.UTF_8).length).append("\r\n");
+                    h2.append("Accept-Ranges: none\r\n");
+                    h2.append("Connection: close\r\n\r\n");
+                    out.write(h2.toString().getBytes(StandardCharsets.ISO_8859_1));
+                    out.write(rewritten.getBytes(StandardCharsets.UTF_8));
+                    out.flush();
+                    log("伪装播放列表已改写 " + shortUrl(original));
+                    return;
+                }
+                boolean isTs = head.length > 0 && (head[0] & 0xFF) == 0x47;
+                writeHeadAs(out, response, isTs ? "video/mp2t" : "application/octet-stream");
+                // **边读边写**，不能 readByteArray() 整块拿。
+                // peek 不改读指针，所以已经 peek 过的 1KB 还在 source 里，
+                // 从头顺序搬运就是完整内容。整块读的话，一部 1080p 的片子
+                // 几百 MB 全进堆 —— 而这条路是流式播放，本来一秒只要几十 KB。
+                byte[] buf = new byte[16 * 1024];
+                int n;
+                long moved = 0;
+                while ((n = peek.read(buf)) > 0) {
+                    out.write(buf, 0, n);
+                    moved += n;
+                }
+                out.flush();
+                log("伪装流按 " + (isTs ? "video/mp2t" : "octet-stream") + " 透传 "
+                        + shortUrl(original) + " " + (moved / 1024) + "KB（上游声称 " + ctype + "）");
+                return;
+            }
+
             if (playlistByUrl && response.code() == 200) {
                 // 播放列表都是小文本（master 几百字节、媒体列表几十 KB），
                 // 整块读进来改写再写回，不走流式。
@@ -493,6 +591,19 @@ final class VlcRelay {
      * seek 范围。206 还要 Content-Range，少了它拖动进度会跳到错误位置。
      */
     private static void writeHead(OutputStream out, Response response) throws IOException {
+        writeHeadAs(out, response, null);
+    }
+
+    /**
+     * 同 {@link #writeHead}，但可以把 Content-Type 换掉。
+     *
+     * <p>给伪装后缀那条路用：上游把 MPEG-TS 标成 image/jpeg，照抄的话 VLC 会当
+     * 图片处理（{@code Failed to create demuxer}）。{@code override} 非空就顶掉
+     * 上游那个值，其余头（长度、Range、ETag）原样透传。
+     *
+     * @param override 新的 Content-Type；null = 照抄上游
+     */
+    private static void writeHeadAs(OutputStream out, Response response, String override) throws IOException {
         int code = response.code();
         StringBuilder head = new StringBuilder(256);
         head.append("HTTP/1.1 ").append(code).append(' ')
@@ -500,7 +611,7 @@ final class VlcRelay {
                         ? reason(code) : response.message())
                 .append("\r\n");
 
-        append(head, "Content-Type", response.header("Content-Type"));
+        append(head, "Content-Type", override != null ? override : response.header("Content-Type"));
         append(head, "Content-Length", response.header("Content-Length"));
         append(head, "Content-Range", response.header("Content-Range"));
         append(head, "Accept-Ranges", response.header("Accept-Ranges"));
@@ -515,6 +626,17 @@ final class VlcRelay {
 
         out.write(head.toString().getBytes(StandardCharsets.ISO_8859_1));
         out.flush();
+    }
+
+    /** 前几个字节是不是某个 ASCII 串。给「自己判内容类型」用。 */
+    private static boolean startsWith(byte[] data, String prefix) {
+        if (data == null || prefix == null) return false;
+        byte[] want = prefix.getBytes(StandardCharsets.US_ASCII);
+        if (data.length < want.length) return false;
+        for (int i = 0; i < want.length; i++) {
+            if (data[i] != want[i]) return false;
+        }
+        return true;
     }
 
     private static void append(StringBuilder sb, String name, String value) {

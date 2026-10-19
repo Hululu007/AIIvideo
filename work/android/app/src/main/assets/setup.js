@@ -124,7 +124,143 @@
     return true;
   }
 
-  // 逐个 __source:set — 每一条都会加进源列表并切换为当前，最后一条留下生效。
+  /**
+   * 装一个源。**spider 源要装两样东西**，这一条是 2026-10-19 真机踩出来的。
+   *
+   * <p>市场里每一条指向的是一份**源配置** json。REST 源到这就算装完了；
+   * 但 spider 源的配置里只有一句 {@code web.spider: "agedm"} —— 内容是那份
+   * js 跑出来的，配置本身不含任何解析逻辑。于是只装配置会出现：
+   *
+   * <pre>
+   *   加载失败 / 找不到 spider: agedm
+   * </pre>
+   *
+   * 用户视角完全无法理解：他明明"装上了"，源列表里也有这一条，界面上却什么都没有。
+   * 而且这个错要等到首页请求才暴露，装的时候一声不吭。
+   *
+   * <p>所以这里在装完配置之后补一步：拿地址去探一次配置，读 {@code web.spider}，
+   * 有就去同目录拉 {@code <id>.js} 装进 SpiderStore。两样齐了才算装好。
+   *
+   * <p>为什么用"同目录"推 js 地址而不是让市场条目多写一个字段：市场清单是
+   * 已经发布出去的东西，加字段等于要求所有人重发一遍。而"配置和源码放一起"
+   * 本来就是这套设计的约定（{@code /spiders/yhdm.json} 旁边就是 {@code yhdm.js}）。
+   *
+   * @return {ok, spider, installedJs, error} —— installedJs 是 js 的 id 或空串
+   */
+  /**
+   * 装一个源。**spider 源要装两样东西**，这一条是 2026-10-19 真机踩出来的。
+   *
+   * <p>市场里每一条指向的是一份**源配置** json。REST 源到这就算装完了；
+   * 但 spider 源的配置里只有一句 {@code web.spider: "agedm"} —— 内容是那份
+   * js 跑出来的，配置本身不含任何解析逻辑。于是只装配置会出现：
+   *
+   * <pre>
+   *   加载失败 / 找不到 spider: agedm
+   * </pre>
+   *
+   * 用户视角完全无法理解：他明明"装上了"，源列表里也有这一条，界面上却什么都没有。
+   * 而且这个错要等到首页请求才暴露，装的时候一声不吭。
+   *
+   * <p>── 反向也认：直接贴 .js ─────────────────────────────────────────
+   *
+   * 「用户手里只有一个地址时该贴哪个」这件事不该由他来决定。所以两条路都通：
+   *
+   * <ul>
+   *   <li>贴 <b>json 配置</b> → 读 {@code web.spider}，去同目录拉 {@code <id>.js}</li>
+   *   <li>贴 <b>js 源码</b>   → 先装源码，再去同目录找 {@code <id>.json} 当配置</li>
+   * </ul>
+   *
+   * 同目录这个约定本来就是这套设计的形状（{@code /spiders/yhdm.json} 旁边就是
+   * {@code yhdm.js}）。两边都找不到另一半时，至少把能装的那半装上，并明确说
+   * 还差什么 —— 而不是留一句「设置失败」。
+   *
+   * @return {ok, spider, installedJs, error}
+   */
+  async function addOneSource(url) {
+    const target = String(url || '').trim();
+    const isJs = /\.js$/i.test(target.replace(/[?#].*$/, ''));
+    // 同目录的兄弟地址：yhdm.json ↔ yhdm.js。
+    // **只用于兼容老配置** —— 2026-10-19 之前发布的配置里 web.spider 写的是纯 id
+    // （"yhdm" 而不是完整地址），只能靠「配置和源码放同一个目录」这个约定去猜。
+    // 新写法请把源码地址直接写进 web.spider，理由见下面路 2 那段。
+    const sibling = (name) => target.replace(/[^/]*$/, '') + name;
+
+    // ── 路 1：贴的是 js 源码 ──────────────────────────────────────────
+    //
+    // 只装源码，不猜配置。理由：TVBox 的模型里「源码」和「站配置」本来就是
+    // 两件事 —— 源码是可复用的解析器（苹果CMS 一个 js 覆盖几千个站），配置是
+    // 某个具体站的参数（接口地址、分类、封面域）。贴一个 .js 就想变出一个能用的站，
+    // 等于要求那个 js 自带站点参数，而按设计它恰恰不带。
+    //
+    // 所以这里装完就返回，明说下一步要用一份配置（配置里的 web.spider 会指回
+    // 这份源码）。这比之前「去同目录猜 <id>.json」诚实 —— 猜得到是运气，
+    // 猜不到是一句让人摸不着头脑的报错。
+    if (isJs) {
+      let meta = null;
+      try {
+        meta = await bridgeCall('spider', { op: 'install', url: target });
+      } catch (error) {
+        return { ok: false, error: '源码没装上：' + (error.message || error) };
+      }
+      const id = String((meta && meta.id) || '').trim();
+      if (!id) return { ok: false, error: '源码装上了但读不出 id，这个源用不了' };
+      return {
+        ok: true,
+        spider: id,
+        installedJs: id,
+        needsConfig: true,
+        error: '',
+      };
+    }
+
+    // ── 路 2：贴的是 json 配置（原来的路径）──────────────────────────
+    const reply = await bridgeCall('source', { id: 'set?url=' + encodeURIComponent(target) });
+    const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
+    if (!result || !result.ok) return { ok: false, error: (result && result.error) || '设置失败' };
+
+    // 装完配置再问一次它是不是 spider 源。取配置本身（不是合并后的），
+    // 因为 web.spider 就写在源文件里，不需要经过 SiteProfile。
+    // 装完配置再问一次它是不是 spider 源。取配置本身（不是合并后的），
+    // 因为 web.spider 就写在源文件里，不需要经过 SiteProfile。
+    let spiderField = '';
+    try {
+      const fetched = await bridgeCall('source', { id: 'fetch?url=' + encodeURIComponent(target) });
+      const body = typeof fetched === 'string' ? JSON.parse(fetched) : fetched;
+      const cfg = body && body.ok ? JSON.parse(body.body || '{}') : null;
+      spiderField = String((cfg && cfg.web && cfg.web.spider) || '').trim();
+    } catch (error) {
+      // 探不到就算了 —— 配置已经装好，REST 源本来就没有 web.spider。
+    }
+    if (!spiderField) return { ok: true, spider: '', installedJs: '' };
+
+    // ── web.spider 的两种写法 ────────────────────────────────────────
+    //
+    //   ① "https://…/yhdm.js"  → 源码地址**自己写在配置里**（TVBox 就是这么做的：
+    //      它的 sites[] 每一条都带自己的 spider 字段指向源码，不靠猜）
+    //   ② "yhdm"               → 纯 id，退回去同目录找 <id>.js（兼容已发出去的配置）
+    //
+    // ① 更好：一个配置能指向任何地方的另一份源码，不必和配置放在一个目录里。
+    // ② 留着只为一件事 —— 已经发出去的市场条目里写的是纯 id，用户手里那些还能用。
+    // 新写的配置请用 ①。
+    const jsUrl = /^https?:\/\//i.test(spiderField)
+      ? spiderField
+      : sibling(spiderField + '.js');
+    let id = spiderField;
+    try {
+      const meta = await bridgeCall('spider', { op: 'install', url: jsUrl });
+      id = String((meta && meta.id) || spiderField).trim();
+      return { ok: true, spider: id, installedJs: id };
+    } catch (error) {
+      return {
+        ok: false,
+        spider: id,
+        installedJs: '',
+        error: '配置已装好，但源码 ' + jsUrl + ' 没拉下来：' + (error.message || error),
+      };
+    }
+  }
+
+  // 逐个装 — 每一条都会加进源列表并切换为当前，最后一条留下生效。
   // 只在全部处理完后重启一次，避免每个源各重启一轮。
   async function addSelected(urls) {
     if (!urls.length) return;
@@ -135,9 +271,8 @@
     for (let index = 0; index < urls.length; index += 1) {
       apply.textContent = `正在添加 ${index + 1}/${urls.length}…`;
       try {
-        const reply = await bridgeCall('source', { id: 'set?url=' + encodeURIComponent(urls[index]) });
-        const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
-        if (!result || !result.ok) failed.push((result && result.error) || '设置失败');
+        const one = await addOneSource(urls[index]);
+        if (!one.ok) failed.push(one.error || '设置失败');
       } catch (error) {
         failed.push(error.message || '设置失败');
       }
@@ -147,6 +282,11 @@
       apply.disabled = false;
       apply.textContent = original;
       return;
+    }
+    if (failed.length) {
+      // 部分成功也要把原因说出来 —— 尤其是「配置装了但源码没拉下来」，
+      // 那种源点进去会是一片空白，用户不知道是网络还是源本身有问题。
+      showError('有 ' + failed.length + ' 个没装上：' + failed[0]);
     }
     apply.textContent = failed.length ? `已添加 ${urls.length - failed.length} 个，正在重启…` : '已添加，正在重启…';
     if (typeof window.restartAfterSource === 'function') {
@@ -166,21 +306,32 @@
     showError('');
 
     try {
-      const reply = await bridgeCall('source', { id: 'set?url=' + encodeURIComponent(url) });
-      const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
-      if (!result || !result.ok) {
+      // 直接贴一个源地址也要走 addOneSource —— 它比单纯的 source set 多做一步：
+      // 如果这份配置声明了 web.spider，把同目录的 <id>.js 也装进 SpiderStore。
+      // 少了这一步，spider 源装完必报「找不到 spider: xxx」，而用户毫无办法。
+      const one = await addOneSource(url);
+      if (!one.ok) {
         // 粘进来的可能不是「一个源」，而是「一份源清单」（市场）。这种情况别直接
         // 报错 —— 拉回来看看是不是 {sources:[…]}，是就把里面的源列出来让用户挑。
         //
         // Java 那边认出来时 throw 的是固定串 MARKET_SOURCES（UserSource.MARKET_LIST）。
         // 那是「清单，不是源」的确定结论，不是失败；其余错误也照旧试一次市场，
         // 因为老版本的服务端没有这个标记，靠形状认是唯一的退路。
-        const marketMark = /MARKET_SOURCES/.test((result && result.error) || '');
+        const message = one.error || '';
+        const marketMark = /MARKET_SOURCES/.test(message);
+        // 「配置装了但源码没拉下来」不该被当成市场清单再试一遍 —— 那份配置已经
+        // 落盘了，re-probe 只会拿到同一个错误。直接把它显示出来。
+        if (/配置已装好，但源码/.test(message)) {
+          showError(message);
+          button.disabled = false;
+          button.textContent = original;
+          return;
+        }
         const picked = await offerMarket(url, marketMark);
         if (picked) return;
         showError(marketMark
           ? '你贴的是一份源清单，但里面没有可用的源'
-          : ((result && result.error) || '设置失败'));
+          : (message || '设置失败'));
         return;
       }
       // 成功。这里**必须重建 Activity**，光 reload 页面是不够的 —— SiteProfile 是在
@@ -279,6 +430,14 @@
     ensure,
     submit,
     applySiteConfig,
+    /**
+     * 装一个源（含「spider 要装两样」那套推另一半的逻辑）。
+     *
+     * 挂出来是给 source-market.js 那个安装表单用的 —— 两个入口必须走同一条路，
+     * 否则「贴 js」在一个地方能自动补配置、在另一个地方只装源码然后让用户自己
+     * 再贴一次，两种行为对用户来说是随机出现的。
+     */
+    addOneSource,
     /** 手动重开设置页（「我的」里的换源入口用）。 */
     open() {
       showError('');

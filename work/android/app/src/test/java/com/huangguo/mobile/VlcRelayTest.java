@@ -2,6 +2,7 @@ package com.huangguo.mobile;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
 
 import org.junit.Test;
 
@@ -150,5 +151,38 @@ public class VlcRelayTest {
         assertTrue("不能带 = padding：" + encoded, encoded.indexOf('=') < 0);
         assertTrue("不能出现 + 或 /：" + encoded, encoded.indexOf('+') < 0 && encoded.indexOf('/') < 0);
         assertEquals(url, VlcRelay.decode(encoded));
+    }
+
+    /**
+     * 伪装后缀的判定。
+     *
+     * 2026-10-19 真机：AGE动漫 的解析站回的是
+     * {@code https://jx.wuzhoupai.com:8443/playurl/<hash>…&media_type=jpg}，
+     * 里面装的是 MPEG-TS 视频流。VLC 见 .jpg 就当图片，报
+     * {@code libvlc demux: Failed to create demuxer 0x0 Unknown}，黑屏且无限重试。
+     *
+     * 这条用例钉住「哪些地址必须绕中继」—— 它错了的表现是「AGE 永远播不了」，
+     * 而那看起来像源的问题，不像路由的问题。
+     */
+    @Test
+    public void 伪装后缀的地址必须绕中继() {
+        // 真实形状
+        assertTrue(VlcRelay.disguised(
+                "https://jx.wuzhoupai.com:8443/playurl/62362434d34a0ccaf59e1d?t=82.30&media_type=jpg"));
+        // 单纯换扩展名
+        assertTrue(VlcRelay.disguised("https://a.example/x/000.jpg"));
+        assertTrue(VlcRelay.disguised("https://a.example/x/000.png"));
+        assertTrue(VlcRelay.disguised("https://a.example/x/000.woff2"));
+        assertTrue(VlcRelay.disguised("https://a.example/x/000.JPG"));
+        // 只是带了 media_type 参数，后缀本身正常
+        assertTrue(VlcRelay.disguised("https://a.example/x/play?media_type=jpg"));
+
+        // 正常地址不能被误判 —— 误判的代价是每条流都白绕一跳本地中继
+        assertFalse(VlcRelay.disguised("https://a.example/x/index.m3u8"));
+        assertFalse(VlcRelay.disguised("https://a.example/x/720p/video.m3u8?sig=abc"));
+        assertFalse(VlcRelay.disguised("https://a.example/x/000.ts"));
+        assertFalse(VlcRelay.disguised("https://a.example/api/videos/123"));
+        assertFalse(VlcRelay.disguised("https://a.example/x/segment.MP4"));
+        assertFalse(VlcRelay.disguised(null));
     }
 }

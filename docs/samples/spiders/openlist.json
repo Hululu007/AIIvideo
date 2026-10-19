@@ -1,7 +1,7 @@
 {
   "_note": "OpenList / AList 文件站。卡片是作品目录，详情里的分集是目录里的音视频文件，播放走 /api/fs/get 换直链。文件站没有海报，封面一律空串，前端退回标题首字占位图 —— 这是源本来的样子，不是坏了。",
   "web": {
-    "spider": "openlist",
+    "spider": "https://149.104.21.177.sslip.io/spiders/openlist.js",
     "firstPageSize": 24,
     "pageSize": 30,
     "categories": {
@@ -13,25 +13,65 @@
     },
     "ui": {
       "tabs": [
-        { "key": "asmr2", "label": "asmr2", "icon": "sparkle" },
-        { "key": "asmr", "label": "asmr", "icon": "film" },
-        { "key": "asmr4", "label": "asmr4", "icon": "tv" },
-        { "key": "asmr6", "label": "asmr6", "icon": "star" },
-        { "key": "more", "label": "更多", "icon": "grid" }
+        {
+          "key": "asmr2",
+          "label": "asmr2",
+          "icon": "sparkle"
+        },
+        {
+          "key": "asmr",
+          "label": "asmr",
+          "icon": "film"
+        },
+        {
+          "key": "asmr4",
+          "label": "asmr4",
+          "icon": "tv"
+        },
+        {
+          "key": "asmr6",
+          "label": "asmr6",
+          "icon": "star"
+        },
+        {
+          "key": "more",
+          "label": "更多",
+          "icon": "grid"
+        }
       ],
       "categoryIds": {
-        "asmr2": ["asmr2"],
-        "asmr": ["asmr"],
-        "asmr4": ["asmr4"],
-        "asmr6": ["asmr6"],
-        "more": ["asmr3"]
+        "asmr2": [
+          "asmr2"
+        ],
+        "asmr": [
+          "asmr"
+        ],
+        "asmr4": [
+          "asmr4"
+        ],
+        "asmr6": [
+          "asmr6"
+        ],
+        "more": [
+          "asmr3"
+        ]
       },
       "categoryLabels": {
-        "asmr2": ["asmr2"],
-        "asmr": ["asmr"],
-        "asmr4": ["asmr4"],
-        "asmr6": ["asmr6"],
-        "more": ["asmr3"]
+        "asmr2": [
+          "asmr2"
+        ],
+        "asmr": [
+          "asmr"
+        ],
+        "asmr4": [
+          "asmr4"
+        ],
+        "asmr6": [
+          "asmr6"
+        ],
+        "more": [
+          "asmr3"
+        ]
       },
       "categoryTitles": {
         "asmr2": "asmr2",
@@ -41,17 +81,37 @@
         "more": "更多目录"
       },
       "popularTags": [
-        ["asmr2", "asmr2"],
-        ["asmr", "asmr"],
-        ["asmr4", "asmr4"],
-        ["asmr6", "asmr6"]
+        [
+          "asmr2",
+          "asmr2"
+        ],
+        [
+          "asmr",
+          "asmr"
+        ],
+        [
+          "asmr4",
+          "asmr4"
+        ],
+        [
+          "asmr6",
+          "asmr6"
+        ]
       ],
       "publicPopularTags": [],
-      "tagGroups": [["openlist", "目录"]]
+      "tagGroups": [
+        [
+          "openlist",
+          "目录"
+        ]
+      ]
     }
   },
   "cover": {
     "mode": "plain",
-    "allowedHosts": ["www.asmrgay.com", "asmrgay.com"]
+    "allowedHosts": [
+      "www.asmrgay.com",
+      "asmrgay.com"
+    ]
   }
 }
