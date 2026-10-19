@@ -141,9 +141,6 @@ final class SiteFetchWebView {
      * <p>现在只认站点自己的语言标记 {@code lang="zh-Hans"}（挑战页是 zh-cn）
      * 和列表栅格 {@code .grid}。两者的共同点是：只有真页面才有。
      */
-    private static final String PASSED_MARKER =
-            "html[lang='zh-Hans'], html[lang='zh-Hans '], .grid";
-
     /**
      * 单次请求超时。
      *
@@ -927,10 +924,17 @@ final class SiteFetchWebView {
                         latch.countDown();
                         return;
                     }
-                    // PASSED_MARKER 现在是一串逗号分隔的选择器，直接丢给 querySelector
-                    // 即可（它认选择器列表，命中任意一个就返回元素）。
+                    // 判据与 doFetchByNav 的 looksLikeChallenge 同源（2026-10-19 教训）：
+                    // 旧的 PASSED_MARKER（html[lang='zh-Hans']/​.grid）依赖站点写法，
+                    // 站点一改版就「页面已过盾、判定却轮询到超时」——真机抓到过正文
+                    // 1056 字与「过盾第 2 次超时」同时出现的现场。现在改成否定式：
+                    // 不是挑战页（两个挑战特征都没有）且有实质正文，即通过。
                     wv.evaluateJavascript(
-                            "(document.querySelector('" + PASSED_MARKER + "') ? '1' : '0')",
+                            "(function(){var h=document.documentElement;"
+                            + "if(!h||!document.body) return '0';"
+                            + "var t=document.body.innerText||'';"
+                            + "return (t.length>200 && h.outerHTML.indexOf('Just a moment')<0"
+                            + " && h.outerHTML.indexOf('_cf_chl_opt')<0) ? '1':'0';})()",
                             new ValueCallback<String>() {
                                 @Override
                                 public void onReceiveValue(String v) {
@@ -1697,7 +1701,18 @@ final class SiteFetchWebView {
     }
 
     private static void acquire(Semaphore lock, long ms, String message) throws Exception {
-        if (!lock.tryAcquire(ms, TimeUnit.MILLISECONDS)) throw new IOException(message);
+        while (true) {
+            try {
+                if (lock.tryAcquire(ms, TimeUnit.MILLISECONDS)) return;
+                throw new IOException(message);
+            } catch (InterruptedException e) {
+                // FutureTask.cancel(true) 会中断排队中的 worker（SpiderRuntime 的
+                // 15 秒预算掐断，2026-10-19）。信号不能吞：吞了的话排队的这次
+                // 过盾会继续跑完 2×45 秒，占住 passLock，主进程的外包窗口被拖后。
+                Thread.currentThread().interrupt();
+                throw new IOException("过盾排队被取消（预算已交给主进程）。", e);
+            }
+        }
     }
 
     private static String specJson(String url) throws Exception {

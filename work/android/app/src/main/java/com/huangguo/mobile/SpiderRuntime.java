@@ -1323,6 +1323,12 @@ final class SpiderRuntime {
         try {
             return task.get(budgetMs, java.util.concurrent.TimeUnit.MILLISECONDS);
         } catch (java.util.concurrent.TimeoutException timeout) {
+            // 掐断等待还不够——必须**取消任务本身**（2026-10-19 真机第二轮）。
+            // FutureTask.cancel(true) 会中断 worker 线程，让它从 SiteFetchWebView
+            // 的 passLock 排队里退出；否则它继续占着队列跑完 2×45 秒（日志里
+            // 「信号已发出」之后还冒出「过盾第 2 次超时」就是它），下一个请求
+            // 又要跟着排队，主进程的外包窗口被白白拖后。
+            task.cancel(true);
             throw new IOException("headless WebView 过盾超时（" + (budgetMs / 1000) + " 秒），交给主进程");
         }
     }
