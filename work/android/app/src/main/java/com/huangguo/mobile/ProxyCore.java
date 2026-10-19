@@ -223,6 +223,16 @@ public final class ProxyCore {
     }
 
     /**
+     * 本地 HTTP 入站端口（= SOCKS 端口 + 1），0 表示没跑。
+     *
+     * <p>存在的唯一理由是 WebView：它的 {@code ProxyController} 对 socks5 不可靠。
+     * 两个入站是同一份配置里一起起的（见 XrayConfig.build），所以端口必然相邻。
+     */
+    public int httpPort() {
+        return isRunning() ? port + 1 : 0;
+    }
+
+    /**
      * 喂给 AiiHttp.setProxy 的形态。没跑返回空串 —— 空串在 AiiHttp 里就是直连，
      * 正好是「代理关掉」该有的语义，调用方不用写 if。
      */

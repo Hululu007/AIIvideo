@@ -350,8 +350,11 @@ public class ProxyCoreTest {
         String text = XrayConfig.buildString(node(), 23456);
         JSONObject back = new JSONObject(text);
         JSONArray inbounds = back.getJSONArray("inbounds");
-        assertEquals(1, inbounds.length());
+        // 两个入站：SOCKS5（给 okhttp / VLC 中继）和 HTTP（给 WebView 的
+        // ProxyController —— 它对 socks5 支持不稳，2026-10-19 真机定案）。
+        assertEquals(2, inbounds.length());
         assertEquals(23456, inbounds.getJSONObject(0).getInt("port"));
+        assertEquals(23457, inbounds.getJSONObject(1).getInt("port"));
     }
 
     /** 凭据不该出现在 describe() 里 —— 那行会进 logcat。 */

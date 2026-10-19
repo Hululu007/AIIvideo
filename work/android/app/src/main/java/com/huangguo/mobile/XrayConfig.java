@@ -30,6 +30,8 @@ final class XrayConfig {
 
     /** 入站 tag。ProxyCore 用它查流量统计，所以是常量而不是散落的字面量。 */
     static final String TAG_IN = "socks-in";
+    /** HTTP 入站的 tag。WebView 走这条（见 httpInbound）。 */
+    static final String TAG_IN_HTTP = "http-in";
     static final String TAG_OUT = "proxy";
     static final String TAG_DIRECT = "direct";
 
@@ -125,7 +127,13 @@ final class XrayConfig {
         root.put("log", new JSONObject().put("loglevel", "warning"));
         root.put("stats", new JSONObject());
         root.put("policy", policy());
-        root.put("inbounds", new JSONArray().put(inbound(port)));
+        // 两个入站：socks 给 OkHttp/VLC，http 给 WebView。
+        //
+        // 2026-10-19：WebView 的 ProxyController 对 socks5 不可靠（设置回调说成功，
+        // 页面却一个字节都不加载），而自写的 HTTP→SOCKS 桥在隧道建立后又卡住 TLS。
+        // Xray 自己就能开 HTTP 入站，让它来更稳 —— 同一个路由、同一个出站，
+        // 只是多一个端口。
+        root.put("inbounds", new JSONArray().put(inbound(port)).put(httpInbound(port + 1)));
         root.put("outbounds", new JSONArray().put(outbound(node)).put(direct()).put(block()));
         // api 只对「进程内自己查」有用，不监听端口 —— 见 api()。
         root.put("api", api());
@@ -174,6 +182,25 @@ final class XrayConfig {
                 .put("settings", settings)
                 // sniffing 让 Xray 从流量里嗅出真实域名再回填/路由，
                 // 对「客户端直接连 IP」的场景是必需的辅助。
+                .put("sniffing", new JSONObject()
+                        .put("enabled", true)
+                        .put("destOverride", new JSONArray().put("http").put("tls"))
+                        .put("routeOnly", false));
+    }
+
+    /**
+     * HTTP 入站，给 WebView 用。
+     *
+     * <p>同一个节点、同一套 routing，只是协议换成 http —— WebView 的
+     * {@code ProxyController} 认这个，认不准 socks。
+     */
+    static JSONObject httpInbound(int port) throws JSONException {
+        return new JSONObject()
+                .put("tag", TAG_IN_HTTP)
+                .put("port", port)
+                .put("listen", LISTEN)
+                .put("protocol", "http")
+                .put("settings", new JSONObject())
                 .put("sniffing", new JSONObject()
                         .put("enabled", true)
                         .put("destOverride", new JSONArray().put("http").put("tls"))
