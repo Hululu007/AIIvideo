@@ -88,6 +88,16 @@ final class SpiderRuntime {
     private static final long SHIELD_HEADLESS_MS = 15_000L;
 
     /**
+     * 盾后站点要不要先自己 headless 试一次过盾。
+     *
+     * <p>false = 直接抛 {@link ShieldSignal} 交主进程（现状，见 net 里的那段账）。
+     * :spider 的 WebView 没有窗口，挑战从来过不去，先试只是白等 15 秒；主进程
+     * 有窗口，同样的挑战 0.5~3 秒就过。留着开关是为了「哪天 headless 能过了」时
+     * 一行改回来，而不是再翻一遍当天的日志去还原这段判断。
+     */
+    private static final boolean SELF_SHIELD_FIRST = false;
+
+    /**
      * 响应体上限 4MB。
      *
      * <p>超了<b>报错而不是截断</b>（设计 §四）：截断的 JSON 后面会在
@@ -222,17 +232,35 @@ final class SpiderRuntime {
          */
         volatile String shieldUrl;
 
+        /**
+         * 主进程过盾取回的各页正文：{@code url → html}（方案 1 的回填）。
+         *
+         * <p>2026-10-19 修：原来只有单条，且被塞进「重试调用的 args」，然后在 net 里
+         * 从 {@code args.optString("__shieldBody")} 读 —— 读不到，因为 net 的 args
+         * 是 spider JS 自己拼的（url/method/headers），宿主塞进去的键根本不经那条路。
+         * 真机日志的形态就是：主进程「抓到页面 199139 字节」，紧接着重试调用又是
+         * 15 秒 headless 超时，`op=net 命中过盾回填` 一次都没打出来。
+         *
+         * <p>现在改名 {@code __shieldPages}（url→html 表），call() 在入口摘走挂到会话上
+         * （args 照样 sanitize，不给 spider JS 看见），net 直接查会话。做成表而不是
+         * 单条，是因为一次重试里 home 和详情页可能先后撞盾 —— 只带最新一张的话，
+         * 第二张一撞就把第一张挤掉，重试永远追不上。
+         */
+        volatile JSONObject cannedPages;
+
         /** 成功时的 payload；失败时留在 {@link #error}。 */
         JSONObject result;
         String error;
 
-        Session(String cap, String spiderSource, String argsJson, long timeoutMs, long gen) {
+        Session(String cap, String spiderSource, String argsJson, long timeoutMs, long gen,
+                JSONObject cannedPages) {
             this.cap = cap;
             this.metaOnly = META_CAP.equals(cap);
             this.spiderSource = spiderSource;
             this.argsJson = argsJson;
             this.timeoutMs = timeoutMs;
             this.gen = gen;
+            this.cannedPages = cannedPages;
             this.watchdog = watchdog(this);
         }
     }
@@ -259,9 +287,66 @@ final class SpiderRuntime {
         return out.toString();
     }
 
-    /** 过盾回填的 url 比对：和本会话记录的被挡地址一致才吃这份正文。 */
-    private static boolean cannedUrl(Session s, String url) {
-        return s != null && s.shieldUrl != null && s.shieldUrl.equals(url);
+    /**
+     * 撞盾时给日志/界面看的那一句。
+     *
+     * <p>把「okhttp 为什么过不去」写清楚（TLS 指纹绑 cookie，不是 cookie 的锅），
+     * 免得下次又有人往「先取 cookie 再走 okhttp」那个方向改。
+     */
+    private static String shieldMessage(String host, Exception httpFailure, String headlessError) {
+        return "net 失败：" + host + " 在 Cloudflare 后面，okhttp 被挡（"
+                + (httpFailure == null ? "无响应" : httpFailure.getMessage())
+                + "）" + (headlessError == null
+                ? "，交给主进程过盾"
+                : "，改用真浏览器内核也没过：" + headlessError);
+    }
+
+    /**
+     * 把 {@code url → html} 表塞进调用 args 用的键名。
+     *
+     * <p>宿主和运行时之间的握手键统一以 {@code __} 开头，{@link #sanitizeArgs}
+     * 会把它们全部剥掉，不落到 spider JS 手里。
+     */
+    static final String ARG_SHIELD_PAGES = "__shieldPages";
+
+    /**
+     * 在会话的回填表里找这份地址对应的正文，找到就返回，找不到给 null。
+     *
+     * <p>严格相等最安全，但源不一定逐字复用同一个地址：主进程过盾用的是被挡的那次
+     * 请求地址，spider 回填后再请求时可能带上/去掉尾斜杠、换成别的路径参数。所以
+     * 同一主机下再放宽一档「路径前缀一致」，其余一律不吃 —— 把别的页面的正文
+     * 当成本页喂给解析器，比超时更难查。
+     */
+    private static String cannedBodyFor(Session s, String url) {
+        final JSONObject pages = s == null ? null : s.cannedPages;
+        if (pages == null || pages.length() == 0) return null;
+        final String exact = pages.optString(url, "");
+        if (exact.length() > 0) return exact;
+        final String host = hostOf(url);
+        final String path = pathOf(url);
+        final Iterator<String> it = pages.keys();
+        while (it.hasNext()) {
+            final String canned = it.next();
+            if (!host.equals(hostOf(canned))) continue;
+            final String a = pathOf(canned);
+            if (a.length() > 1 && path.length() > 1 && (a.startsWith(path) || path.startsWith(a))) {
+                final String body = pages.optString(canned, "");
+                if (body.length() > 0) return body;
+            }
+        }
+        return null;
+    }
+
+    /** 日志用：把回填表压成「地址(字节数), …」。 */
+    private static String describeCanned(JSONObject pages) {
+        final StringBuilder sb = new StringBuilder();
+        final Iterator<String> it = pages.keys();
+        while (it.hasNext()) {
+            final String url = it.next();
+            if (sb.length() > 0) sb.append(", ");
+            sb.append(url).append('(').append(pages.optString(url, "").length()).append(')');
+        }
+        return sb.toString();
     }
 
 
@@ -299,8 +384,15 @@ final class SpiderRuntime {
 
         // 领号要尽早：越早领，前面那次越早知道自己已经过期。
         final long gen = GENERATION.incrementAndGet();
+        // 方案 1 的回填：主进程过盾成功后，把 url→html 表挂在「重试调用」的 args 上
+        // 塞回来。必须在这里摘走 —— net 的 args 是 spider JS 自己拼的，看不见调用 args。
+        final JSONObject cannedPages = args == null ? null : args.optJSONObject(ARG_SHIELD_PAGES);
+        if (cannedPages != null && cannedPages.length() > 0) {
+            Log.i(TAG, "本次调用带过盾回填：" + cannedPages.length() + " 页，共 "
+                    + describeCanned(cannedPages));
+        }
         final Session s = new Session(cap, spiderSource,
-                sanitizeArgs(args), budget, gen);
+                sanitizeArgs(args), budget, gen, cannedPages);
         // 当前生效的源配置。取不到就留 null，net 退回全局路由（见 Session.profile）。
         s.ctx = app.getApplicationContext();
         // profile 是 net 走哪条路由的唯一依据。取不到就别硬撑 —— 那就退回老的
@@ -411,16 +503,16 @@ final class SpiderRuntime {
         }
 
         // 过盾外包的回填（方案 1）：:spider 撞盾后主进程用有窗口的 WebView 取回
-        // HTML，经重试请求的 __shieldBody/__shieldUrl 塞回来。这里不发任何网络，
-        // 直接当 200 响应交给 spider JS —— 解析照常，全程不触碰渲染线程。
-        // url 必须和被挡的那次一致，防同一会话里别的请求误吃这份正文。
-        final String cannedBody = args.optString("__shieldBody", "");
-        if (cannedBody.length() > 0 && cannedUrl(s, url)) {
-            Log.i(TAG, "op=net 命中过盾回填（" + host + "，" + cannedBody.length() + " 字节），跳过网络");
+        // HTML，call() 在入口把「url→html 表」挂到会话上（Session.cannedPages）。
+        // 这里不发任何网络，直接当 200 响应交给 spider JS —— 解析照常，全程不触碰
+        // 渲染线程。url 要能对上（见 cannedBodyFor），防同一会话里别的请求误吃。
+        final String canned = cannedBodyFor(s, url);
+        if (canned != null) {
+            Log.i(TAG, "op=net 命中过盾回填（" + host + "，" + canned.length() + " 字节），跳过网络");
             return new JSONObject()
                     .put("ok", true)
                     .put("status", 200)
-                    .put("body", cannedBody);
+                    .put("body", canned);
         }
 
         // 打一行路由。spider 这条路最容易出的诊断困境是「App 能取、spider 取不到」，
@@ -532,31 +624,31 @@ final class SpiderRuntime {
                 // net 对非 2xx 直接抛异常、拿不到正文（见契约 §三），所以这里
                 // 根本看不见那个挑战页。域名是此刻唯一能拿到的信号。
                 if (raw == null && shieldedEarly) {
-                    android.util.Log.i("HG.Spider", "op=net 命中盾后站点，改走真 WebView：" + host);
-                    try {
-                        // headless 过盾最多等这么久，等不到就把活交给主进程。
-                        //
-                        // 2026-10-19 真机（e9fa340 实装后第一轮）：:spider 的 WebView
-                        // 没有窗口，挑战跑不动，ensureWarm 会老老实实跑满两次
-                        // 45 秒（日志：21:23:57 第 1 次超时、21:24:42 第 2 次超时），
-                        // 而 call 的看门狗预算是 90 秒 —— 21:24:41 先判「spider 超时
-                        // （90s）」，信号根本来不及抛出去，方案 1 一次都没触发。
-                        // 所以这里必须自己掐一个短上限：headless 就是过不去，
-                        // 15 秒足够判定，剩下的时间留给真正能过的主进程。
-                        String html = fetchPageWithBudget(url, SHIELD_HEADLESS_MS);
-                        if (html != null && html.length() > 0) {
-                            raw = html.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    android.util.Log.i("HG.Spider", "op=net 命中盾后站点，直接交主进程过盾：" + host);
+                    // 2026-10-19 深夜第二轮：这里原来先自己 headless 试 15 秒再交出去。
+                    // 实测那一轮（22:48:31 → 22:49:05）每次调用都准点烧掉 15 秒：
+                    // :spider 的 WebView 没有窗口，挑战从来过不去，那 15 秒是纯等。
+                    // 主进程过盾现在是 0.5~3 秒（22:48:44 一次 523ms、22:48:55 一次
+                    // 2514ms），所以 headless 先试这件事本身就该删掉 —— 用户看到的
+                    // 「点一下要十几秒才出图」有一大半是这段空等。
+                    //
+                    // 保留一个开关而不是写死：万一哪天 WebView 的 headless 能过挑战
+                    // （或者换了能用的内核），把它翻回 true 就能回到「先自己试」的路径。
+                    if (SELF_SHIELD_FIRST) {
+                        try {
+                            String html = fetchPageWithBudget(url, SHIELD_HEADLESS_MS);
+                            if (html != null && html.length() > 0) {
+                                raw = html.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                            }
+                        } catch (Exception e) {
+                            s.shieldUrl = url;
+                            throw new ShieldSignal(url, shieldMessage(host, httpFailure, e.getMessage()));
                         }
-                    } catch (Exception e) {
-                        // WebView（headless）也没过去 —— 大概率是挑战要真窗口。
-                        // 方案 1（2026-10-19）：不再当普通错误上抛，改成带 url 的
-                        // 结构化信号。类型信息会被 SpiderBridge 压平，url 挂在
-                        // Session.shieldUrl 上随会话走，call() 收尾重建后交给
-                        // 主进程外包过盾（主进程 WebView 有窗口，挑战能过）。
+                    } else {
+                        // 结构化信号交给主进程：类型信息会被 SpiderBridge 压平，
+                        // url 挂在 Session.shieldUrl 上随会话走，call() 收尾时重建。
                         s.shieldUrl = url;
-                        throw new ShieldSignal(url, "net 失败：" + host + " 在 Cloudflare 后面，okhttp 被挡（"
-                                + (httpFailure == null ? "无响应" : httpFailure.getMessage())
-                                + "），改用真浏览器内核也没过：" + e.getMessage());
+                        throw new ShieldSignal(url, shieldMessage(host, httpFailure, null));
                     }
                 }
                 if (raw == null) {
@@ -1341,6 +1433,16 @@ final class SpiderRuntime {
             return h == null ? "" : h.toLowerCase(Locale.ROOT);
         } catch (Throwable e) {
             return "";
+        }
+    }
+
+    /** 只取 path，取不到给 "/"（回填比对用，见 {@link #cannedUrl}）。 */
+    private static String pathOf(String url) {
+        try {
+            String p = new java.net.URI(url).getRawPath();
+            return p == null || p.length() == 0 ? "/" : p;
+        } catch (Throwable e) {
+            return "/";
         }
     }
 }

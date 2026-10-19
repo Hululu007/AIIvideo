@@ -165,6 +165,17 @@ final class SiteFetchWebView {
     /** 导航抓页面的上限。挑战 + 400KB 页面，走远程节点要给够。 */
     private static final long NAV_TIMEOUT_MS = 35_000L;
 
+    /**
+     * 页面「稳定」的下限：complete 之后至少还要静这么一小段时间才收工。
+     *
+     * <p>站点在 complete 之后才灌内容（Alpine x-init、懒加载换图），一到 complete
+     * 就抄 outerHTML 拿到的是壳 —— 见 doFetchByNav 里那段账。
+     */
+    private static final long SETTLE_MS = 1_200L;
+
+    /** 等「稳定」的上限：一直在变的页面也得交出去，不能拖满整个导航预算。 */
+    private static final long SETTLE_MAX_MS = 10_000L;
+
     /** 图片通道等解码的上限。封面几十 KB，慢网也就几秒。 */
     private static final long IMAGE_TIMEOUT_MS = 12_000L;
 
@@ -485,6 +496,21 @@ final class SiteFetchWebView {
 
             long deadline = System.currentTimeMillis() + NAV_TIMEOUT_MS;
             String html = "";
+            // 读到内容 ≠ 页面已经长完。
+            //
+            // 2026-10-19 真机账：同一条链路抓回来的字节数在 167580 / 183982 /
+            // 193753 / 382494 之间跳，而参考页（fixtures）是 423841 字节、12 张
+            // class="thumbnail group" 卡片。小的那几次 spider 全报「没解析到卡片」——
+            // 不是源写坏了，是我们在 readyState=complete 那一瞬间就把 outerHTML
+            // 抄下来了：complete 只保证文档加载完，后面站点自己还要往里灌内容
+            // （Alpine 那套 x-init 拉列表、懒加载换图）。抄早了拿到的是壳。
+            //
+            // 所以判据从「读全了」改成「不再变了」：连续 STABLE_HITS 次采样长度一致
+            // 才收工；期间页面还在长就继续等。SETTLE_MS 是下限 —— 刚 complete 的
+            // 那一下页面必然「稳定」（还没开始变），不等这一小段就会抓早。
+            long settleBegan = 0;
+            int lastLen = -1;
+            int stable = 0;
             while (System.currentTimeMillis() < deadline) {
                 Thread.sleep(400);
                 String len = evalOnPage("(function(){"
@@ -499,8 +525,33 @@ final class SiteFetchWebView {
                     continue;
                 }
                 if (n < 512) continue;          // 还没渲染出东西
+                if (settleBegan == 0) settleBegan = System.currentTimeMillis();
+                String current = evalOnPage("document.documentElement.outerHTML");
+                if (current.length() < n * 9 / 10) continue;   // 读取过程被改写，重来
+                // 长度一致才算一次「稳定」；差多少算变？小改（一个数字、一个时间戳）
+                // 不该拖住我们，所以给 2% 或 80 字节的容差。
+                final int tol = Math.max(80, lastLen / 50);
+                if (lastLen > 0 && Math.abs(current.length() - lastLen) <= tol) {
+                    stable++;
+                } else {
+                    stable = 0;
+                }
+                lastLen = current.length();
+                final long settledFor = settleBegan == 0 ? 0 : System.currentTimeMillis() - settleBegan;
+                if (stable >= 4 || settledFor > SETTLE_MAX_MS) {
+                    // 4 次 × 400ms ≈ 1.6 秒没再变；或者等了 10 秒还在长（广告轮播、
+                    // 计数动画这类永远在变的页面）—— 那样也得交，不能一直等到 NAV 上限。
+                    html = current;
+                    break;
+                }
+                if (html.length() == 0) html = current;   // 兜底：至少有得交
+                // 下限没到之前不许走「兜底」那条退出，继续等它长。
+                if (settleBegan != 0 && System.currentTimeMillis() - settleBegan < SETTLE_MS) {
+                    html = "";
+                }
+            }
+            if (html.length() == 0) {
                 html = evalOnPage("document.documentElement.outerHTML");
-                if (html.length() >= n * 9 / 10) break;   // 读全了
             }
             if (html.length() == 0) {
                 throw new IOException("导航到站点页面后没读到内容（"
@@ -513,7 +564,8 @@ final class SiteFetchWebView {
                         + html.substring(0, Math.min(160, html.length())).replace('\n', ' '));
                 throw new IOException("站点那边重新要了一次访问验证。再进一次通常就过了。");
             }
-            log("抓到页面 " + html.length() + " 字节 " + absoluteUrl);
+            log("抓到页面 " + html.length() + " 字节 " + absoluteUrl + "（" + describePage(html) + "）");
+            dumpPage(absoluteUrl, html);
             return html;
         } finally {
             fetchLock.release();
@@ -1722,13 +1774,33 @@ final class SiteFetchWebView {
     // ── 小工具 ────────────────────────────────────────────────────────
 
     /** 剥掉 evaluateJavascript 回包的 JSON 引号。"1" → 1；null/空原样返回。 */
+    /**
+     * 把 {@code evaluateJavascript} 的返回值还原成 JS 里那个字符串。
+     *
+     * <p>2026-10-19 深夜真机查到的真凶：这个回调给的**不是裸字符串，是 JSON 序列化
+     * 过的字符串**。原来只把最外层的一对引号剥掉（`"1"` → `1` 那种小返回够用），
+     * 但 `outerHTML` 走同一条路就全毁了 —— HTML 里的 `<` 被写成 `\u003C`、引号写成
+     * `\"`，于是「抓到的页面」里一个 `<div class="thumbnail"` 都不存在，
+     * 症状是：日志写「抓到页面 184959 字节」，spider 报「没解析到卡片」，
+     * 而卡片计数是 0、链接计数也是 0（真实页面有几十个 <a href>）。
+     * 用 JSONTokener 整体解一遍，转义、\\u 序列、换行都跟着还原。
+     */
     private static String unquote(String v) {
         if (v == null) return "";
-        String t = v.trim();
-        if (t.length() >= 2 && t.charAt(0) == '"' && t.charAt(t.length() - 1) == '"') {
-            return t.substring(1, t.length() - 1);
+        final String t = v.trim();
+        if (t.length() == 0) return "";
+        try {
+            final Object o = new org.json.JSONTokener(t).nextValue();
+            if (o instanceof String) return (String) o;
+            if (o == null || o == org.json.JSONObject.NULL) return "";
+            return String.valueOf(o);          // 数字/布尔（rare，但别丢）
+        } catch (Throwable ignored) {
+            // 解不出来就原样返回：至少不比原来更差。
+            if (t.length() >= 2 && t.charAt(0) == '"' && t.charAt(t.length() - 1) == '"') {
+                return t.substring(1, t.length() - 1);
+            }
+            return t;
         }
-        return t;
     }
 
     private static void onMain(Runnable r) {
@@ -1787,6 +1859,72 @@ final class SiteFetchWebView {
         try {
             Log.d(TAG, LOG + message);
         } catch (Throwable ignored) {
+        }
+    }
+
+    /**
+     * 这一页到底是什么形状 —— 只有字节数判断不了。
+     *
+     * <p>2026-10-19 现场：过盾成功、抓到 183982 字节、回填也命中了，spider 却报
+     * 「没解析到卡片」。字节数一样能是「挑战已过但列表还没渲染」的那种半成品页，
+     * 所以把卡片数、链接数、正文长度一并打出来，和源的切分正则对齐着看。
+     */
+    private static String describePage(String html) {
+        if (html == null || html.length() == 0) return "空";
+        final java.util.regex.Matcher m = CARD_DIV.matcher(html);
+        int cards = 0;
+        while (m.find()) cards++;
+        final java.util.regex.Matcher a = LINK_A.matcher(html);
+        int links = 0;
+        while (a.find()) links++;
+        return "卡片=" + cards + " 链接=" + links
+                + " 含thumbnail=" + (html.indexOf("thumbnail") >= 0)
+                + " 挑战特征=" + looksLikeChallenge(html)
+                + " head=" + html.substring(0, Math.min(120, html.length())).replace('\n', ' ');
+    }
+
+    private static final java.util.regex.Pattern CARD_DIV =
+            java.util.regex.Pattern.compile("<div\\b[^>]*\\bclass\\s*=\\s*\"[^\"]*\\bthumbnail\\b");
+
+    private static final java.util.regex.Pattern LINK_A =
+            java.util.regex.Pattern.compile("<a\\b[^>]*\\bhref\\s*=");
+
+    /**
+     * 把过盾拿到的页面落一份盘（files/site-dump/，最多留 8 份）。
+     *
+     * <p>为什么要留：解析失败时唯一能回答「是站点改版还是拿到半成品页」的就是原文，
+     * 而这份原文只有过盾那条路拿得到（okhttp 拿不到、curl 也拿不到）。留在手机上
+     * 才能 adb pull 出来对照源的正则。
+     */
+    private static void dumpPage(String url, String html) {
+        try {
+            final android.content.Context ctx = appContext;
+            if (ctx == null || html == null || html.length() == 0) return;
+            final java.io.File dir = new java.io.File(ctx.getFilesDir(), "site-dump");
+            if (!dir.exists() && !dir.mkdirs()) return;
+            final java.io.File[] old = dir.listFiles();
+            if (old != null && old.length >= 8) {
+                java.util.Arrays.sort(old, new java.util.Comparator<java.io.File>() {
+                    @Override
+                    public int compare(java.io.File x, java.io.File y) {
+                        return Long.compare(x.lastModified(), y.lastModified());
+                    }
+                });
+                for (int i = 0; i <= old.length - 8; i++) old[i].delete();
+            }
+            final String name = System.currentTimeMillis() + "-"
+                    + hostOf(url).replaceAll("[^A-Za-z0-9.-]", "_") + ".html";
+            final java.io.File out = new java.io.File(dir, name);
+            java.io.FileOutputStream fos = new java.io.FileOutputStream(out);
+            try {
+                fos.write(html.getBytes("UTF-8"));
+                fos.flush();
+            } finally {
+                fos.close();
+            }
+            log("页面已落盘 " + out.getAbsolutePath() + "（" + html.length() + " 字节）");
+        } catch (Throwable e) {
+            log("页面落盘失败：" + e);
         }
     }
 

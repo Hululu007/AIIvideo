@@ -81,6 +81,9 @@ import org.videolan.libvlc.MediaDiscoverer;
 public final class MainActivity extends Activity {
     private static final int AVATAR_PICKER = 7101;
     private static final String TAG = "AIIvideo";
+
+    /** 撞盾后最多外包过盾几次（见 spider/call 的 __shieldPages 循环）。 */
+    private static final int SHIELD_RETRY_MAX = 3;
     public static volatile MainActivity host;
     private AccountService account;
     private OnBackInvokedCallback backCallback;
@@ -906,23 +909,39 @@ public final class MainActivity extends Activity {
                 final JSONObject callArgs = jSONObject.optJSONObject("args") == null
                         ? new JSONObject() : jSONObject.optJSONObject("args");
                 final int timeoutMs = jSONObject.optInt("timeoutMs", 15000);
-                try {
-                    return SpiderStore.call(this, id, cap, callArgs, timeoutMs);
-                } catch (ShieldSignal e) {
-                    // 盾后站点 :spider 进程的 headless WebView 过不去（挑战要真窗口）。
-                    // 主进程的 SiteFetchWebView 有窗口有 decor，挑战 1~2 秒就过 ——
-                    // 在这里过盾取 HTML，塞进重试请求回填给 spider JS（方案 1 兜底）。
-                    // 只重试一次：再撞盾说明 clearance 也救不了，原样上抛防循环。
-                    Log.w("HG.Spider", "cap=" + cap + " 撞盾（" + e.url + "），主进程过盾后重试");
-                    final String html;
+                // 盾后站点 :spider 进程的 headless WebView 过不去（挑战要真窗口）。
+                // 主进程的 SiteFetchWebView 有窗口有 decor，挑战 1~2 秒就过 ——
+                // 在这里过盾取 HTML，回填给 spider JS（方案 1 兜底）。
+                //
+                // 回填是「url → html」一张表（__shieldPages），不是单条：一次调用里
+                // home 和详情页可能先后撞盾，只带最新一张就会把前一张挤掉，下一轮
+                // 又撞回去，重试永远追不上。表跨轮累积，命中的请求直接吃正文不发网络。
+                //
+                // 最多 3 轮：每轮都是一次完整的 spider 调用（含 15 秒 headless 预算），
+                // 再多了前端早就把这次调用丢了。同一个地址被回填过仍然再次被挡，
+                // 说明回填没被采纳，继续轮下去只会空转 —— 当场停。
+                final JSONObject shieldPages = new JSONObject();
+                for (int round = 0; ; round++) {
                     try {
-                        html = SiteFetchWebView.fetchPage(e.url);
-                    } catch (Throwable fetchError) {
-                        throw new IOException("盾后过盾失败（主进程）：" + fetchError.getMessage()
-                                + "；原始失败：" + e.getMessage());
+                        return SpiderStore.call(this, id, cap, callArgs, timeoutMs);
+                    } catch (ShieldSignal e) {
+                        if (round >= SHIELD_RETRY_MAX) throw e;
+                        if (shieldPages.has(e.url)) {
+                            throw new IOException("盾后回填无效（同一地址再次被挡）：" + e.url
+                                    + "；原始失败：" + e.getMessage());
+                        }
+                        Log.w("HG.Spider", "cap=" + cap + " 撞盾（" + e.url + "），主进程过盾后重试，第 "
+                                + (round + 1) + " 轮");
+                        final String html;
+                        try {
+                            html = SiteFetchWebView.fetchPage(e.url);
+                        } catch (Throwable fetchError) {
+                            throw new IOException("盾后过盾失败（主进程）：" + fetchError.getMessage()
+                                    + "；原始失败：" + e.getMessage());
+                        }
+                        shieldPages.put(e.url, html);
+                        callArgs.put(SpiderRuntime.ARG_SHIELD_PAGES, shieldPages);
                     }
-                    callArgs.put("__shieldUrl", e.url).put("__shieldBody", html);
-                    return SpiderStore.call(this, id, cap, callArgs, timeoutMs);
                 }
             }
             throw new IllegalArgumentException("spider 运行时的 op 还不支持：" + op);
