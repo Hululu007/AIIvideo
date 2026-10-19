@@ -179,6 +179,24 @@ final class SiteFetchWebView {
      */
     private WeakReference<Activity> hostRef = new WeakReference<Activity>(null);
 
+    /**
+     * 没有 Activity 时的宿主上下文。
+     *
+     * <p>2026-10-19：spider 宿主搬进 {@code :spider} 独立进程之后，这个类在那边
+     * 拿不到 {@code MainActivity.host}（跨进程的静态字段各是一份，子进程里恒 null），
+     * 于是每次过盾都抛「界面还没起来」—— MissAV 首页直接挂。
+     *
+     * <p>headless WebView 不需要 decorView（{@code SpiderRuntime} 一直是这么跑的：
+     * 不 attach 也能 loadUrl / evaluateJavascript，只是不渲染像素）。所以这里允许
+     * 用 Application 上下文建一个不挂窗口的页面，过盾流程原样复用。
+     */
+    private static volatile android.content.Context appContext;
+
+    /** 由 :spider 进程的 Service 在 onCreate 里调一次。主进程不需要（有 Activity）。 */
+    static void init(android.content.Context context) {
+        appContext = context == null ? null : context.getApplicationContext();
+    }
+
     private WebView webView;
     private View holder;
     private volatile boolean alive;
@@ -241,12 +259,11 @@ final class SiteFetchWebView {
      * @param absoluteUrl 站点内的绝对地址，例如 {@code https://missav.live/cn/fct-210}
      */
     static String fetchPage(String absoluteUrl) throws Exception {
-        MainActivity host = MainActivity.host;
-        if (host == null) {
-            throw new IOException("界面还没起来，站点侧请求发不出去（稍等一下再试）。");
-        }
         SiteFetchWebView wv = get();
-        wv.bindHost(host);
+        // 有 Activity 就绑它（主进程那条路，页面挂进 decor）；没有就走无窗口模式。
+        // 两条路的分叉在 ensureWebView 里，这里只决定绑不绑。
+        MainActivity host = MainActivity.host;
+        if (host != null) wv.bindHost(host);
         return wv.doFetch(absoluteUrl);
     }
 
@@ -274,12 +291,9 @@ final class SiteFetchWebView {
      * <p><b>只从后台线程调用。</b>超时和 {@link #fetchPage} 共用一套常量。
      */
     static byte[] fetchBytes(String absoluteUrl) throws Exception {
-        MainActivity host = MainActivity.host;
-        if (host == null) {
-            throw new IOException("界面还没起来，站点侧请求发不出去（稍等一下再试）。");
-        }
         SiteFetchWebView wv = get();
-        wv.bindHost(host);
+        MainActivity host = MainActivity.host;
+        if (host != null) wv.bindHost(host);
         return wv.doFetchBytes(absoluteUrl);
     }
 
@@ -709,12 +723,17 @@ final class SiteFetchWebView {
     private void ensureWebView() throws Exception {
         if (webView != null && alive) return;
         Activity host = hostRef.get();
-        if (host == null) throw new IOException("界面已经不在了，站点侧请求发不出去。");
-        if (host.isFinishing() || host.isDestroyed()) {
+        if (host == null && appContext == null) {
+            // 两条路都没有：主进程里 Activity 已销毁，或者子进程没 init。
+            throw new IOException("没有可用的宿主页面，站点侧请求发不出去（稍等一下再试）。");
+        }
+        if (host != null && (host.isFinishing() || host.isDestroyed())) {
             throw new IOException("界面正在退出，站点侧请求发不出去。");
         }
 
-        final Activity activity = host;
+        // 无窗口模式（:spider 进程）用 Application 上下文；有 Activity 时仍用它，
+        // 少一个跨上下文的坑。
+        final android.content.Context activity = host != null ? host : appContext;
         final CountDownLatch latch = new CountDownLatch(1);
         final IOException[] failed = new IOException[1];
 
@@ -722,7 +741,8 @@ final class SiteFetchWebView {
             @Override
             public void run() {
                 try {
-                    ViewGroup decor = (ViewGroup) activity.getWindow().getDecorView();
+                    ViewGroup decor = host == null
+                            ? null : (ViewGroup) host.getWindow().getDecorView();
 
                     WebView wv = new WebView(activity);
                     WebSettings s = wv.getSettings();
@@ -766,15 +786,20 @@ final class SiteFetchWebView {
                     wv.addJavascriptInterface(new SiteBridge(), "__hgSiteRecv");
                     applyProxy(wv);
 
-                    // 1×1 + GONE：必须 attach 到 window 才能跑，但绝不能被看见、
-                    // 也不能参与布局（不然会顶出一个 1 像素的洞）。
-                    FrameLayout box = new FrameLayout(activity);
-                    box.setVisibility(View.GONE);
-                    box.addView(wv, new FrameLayout.LayoutParams(1, 1));
-                    decor.addView(box, new ViewGroup.LayoutParams(1, 1));
+                    // 1×1 + GONE：attach 到 window 之后页面才「有窗口」，这是主进程那条路。
+                    //
+                    // 子进程没有 decor 可挂 —— headless WebView 本来就不需要它
+                    // （SpiderRuntime 从头到尾都没 attach 过，挑战页照样渲染、JS 照样跑）。
+                    FrameLayout box = null;
+                    if (decor != null) {
+                        box = new FrameLayout(activity);
+                        box.setVisibility(View.GONE);
+                        box.addView(wv, new FrameLayout.LayoutParams(1, 1));
+                        decor.addView(box, new ViewGroup.LayoutParams(1, 1));
+                    }
 
                     webView = wv;
-                    holder = box;
+                    holder = box;      // 无窗口模式是 null，销毁路径已经判过空
                     alive = true;
                 } catch (Throwable e) {
                     failed[0] = new IOException("站点侧 WebView 建不起来：" + e);

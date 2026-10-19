@@ -55,6 +55,10 @@ public class SpiderService extends Service {
             // —— :spider 进程建 WebView 会失败，调用报错但不崩。
             Log.w(TAG, "setDataDirectorySuffix 不可用：" + e);
         }
+        // 过盾那个隐藏 WebView 要能在子进程里建（没有 Activity 可挂）。
+        // 见 SiteFetchWebView.appContext 的注释：2026-10-19 宿主搬进程之后，
+        // MissAV 的过盾就是卡在「拿不到 MainActivity.host」上。
+        SiteFetchWebView.init(getApplicationContext());
     }
 
     @Override
