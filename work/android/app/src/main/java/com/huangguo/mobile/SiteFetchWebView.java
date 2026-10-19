@@ -924,17 +924,21 @@ final class SiteFetchWebView {
                         latch.countDown();
                         return;
                     }
-                    // 判据与 doFetchByNav 的 looksLikeChallenge 同源（2026-10-19 教训）：
-                    // 旧的 PASSED_MARKER（html[lang='zh-Hans']/​.grid）依赖站点写法，
-                    // 站点一改版就「页面已过盾、判定却轮询到超时」——真机抓到过正文
-                    // 1056 字与「过盾第 2 次超时」同时出现的现场。现在改成否定式：
-                    // 不是挑战页（两个挑战特征都没有）且有实质正文，即通过。
+                    // 判据第三版（2026-10-19 深夜，前两版都被真机打脸）：
+                    //   v1 正向（zh-Hans/.grid）—— 站点改版就瞎；
+                    //   v2 否定式（非挑战特征 + 正文>200）—— 挑战页自己的说明文字
+                    //      就有几百字，「过盾成功 602ms」后 fetchPage 拿到的还是
+                    //      28KB 新鲜挑战页（22:09 现场）。
+                    //   v3 **出站链接计数**：挑战页是孤岛，没有任何 <a href> 指向
+                    //      站点内容；真页面（列表/详情）有几十个。这个信号挑战页
+                    //      伪造不出来，也不依赖站点写法。
                     wv.evaluateJavascript(
                             "(function(){var h=document.documentElement;"
                             + "if(!h||!document.body) return '0';"
-                            + "var t=document.body.innerText||'';"
-                            + "return (t.length>200 && h.outerHTML.indexOf('Just a moment')<0"
-                            + " && h.outerHTML.indexOf('_cf_chl_opt')<0) ? '1':'0';})()",
+                            + "var o=h.outerHTML;"
+                            + "if(o.indexOf('Just a moment')>=0||o.indexOf('_cf_chl_opt')>=0) return '0';"
+                            + "var links=document.querySelectorAll('a[href]');"
+                            + "return links.length>=8 ? '1':'0';})()",
                             new ValueCallback<String>() {
                                 @Override
                                 public void onReceiveValue(String v) {
@@ -1617,14 +1621,45 @@ final class SiteFetchWebView {
             String origin = declared.length() > 0
                     ? declared
                     : ("https://" + hostOf(ShieldProfile.warmup()));
+            // CookieManager.setCookie 的第一个参数是 **URL**，不是 bare origin：
+            // 域名归属靠它解析，路径取它的 path。配置里存的是 "https://missav.live/"
+            // 这种带路径的形式没问题，但 bare host 或漏 scheme 就会写错地方 ——
+            // 统一补全成 scheme://host/ 再写。
+            if (!origin.startsWith("http")) origin = "https://" + origin;
+            if (!origin.endsWith("/")) origin = origin + "/";
+            int wrote = 0;
             for (String part : raw.split(";")) {
                 String item = part.trim();
                 if (item.length() == 0 || item.indexOf('=') <= 0) continue;
-                cm.setCookie(origin, item + "; path=/");
+                String name = item.substring(0, item.indexOf('=')).trim();
+                // clearance 之类带 Secure/HttpOnly 属性的，setCookie 只收 name=value，
+                // 属性段剥掉（CookieManager 自己会按 origin 规则补 Secure）。
+                String value = item;
+                int semi = item.indexOf(';');
+                if (semi > 0) value = item.substring(0, semi).trim();
+                // setCookie(url, value) 返回 boolean，但部分 ROM 的重载是 void ——
+                // 用 tryRegion 式的保守写法：boolean 可用时记成功数，否则只记调用。
+                try {
+                    Object r = android.webkit.CookieManager.class
+                            .getMethod("setCookie", String.class, String.class)
+                            .invoke(cm, origin, value);
+                    if (r instanceof Boolean && !((Boolean) r)) {
+                        log("cookie 写入被拒：" + name + " → " + origin);
+                    } else {
+                        wrote++;
+                    }
+                } catch (Throwable reflectFail) {
+                    cm.setCookie(origin, value);
+                    wrote++;
+                }
             }
             cm.flush();
             cookieApplied = true;
-            log("已注入主进程 cookie：" + origin);
+            // 回读验证：写完立刻 getCookie，读不回来 = 写失败（数据目录/域规则问题），
+            // 这行日志能把「注入了但没用」和「根本没注入」一次分清。
+            String readBack = cm.getCookie(origin);
+            log("已注入主进程 cookie：" + origin + " 写入 " + wrote + " 条，回读 "
+                    + (readBack == null ? "空" : String.valueOf(readBack.length()) + " 字节"));
         } catch (Throwable e) {
             log("cookie 注入失败：" + e);
         }
