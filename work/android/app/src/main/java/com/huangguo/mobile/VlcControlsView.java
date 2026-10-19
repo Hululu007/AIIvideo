@@ -240,7 +240,12 @@ final class VlcControlsView {
                         + " / " + fmt(host.durationMs()));
             }
             @Override public void onStartTrackingTouch(SeekBar bar) { host.onScrubStart(); }
-            @Override public void onStopTrackingTouch(SeekBar bar) { host.onSeekTo(bar.getProgress()); }
+            @Override public void onStopTrackingTouch(SeekBar bar) {
+                host.onSeekTo(bar.getProgress());
+                // 松手要把自动隐藏的计时重新开起来：onStartTrackingTouch 里停掉了它，
+                // 少了这一句，拖过一次进度条之后控制栏就一直挂在那儿不收了。
+                host.onScrubEnd();
+            }
         });
     }
 
@@ -401,29 +406,83 @@ final class VlcControlsView {
     }
 
     private void styleSeekBar(SeekBar bar) {
-        int inset = dp(3);
-        android.graphics.drawable.GradientDrawable trackBg = new android.graphics.drawable.GradientDrawable();
-        trackBg.setColor(0x33FFFFFF);
-        trackBg.setCornerRadius(dp(2));
-        android.graphics.drawable.GradientDrawable trackPro = new android.graphics.drawable.GradientDrawable();
-        trackPro.setColor(0xFFFFFFFF);
-        trackPro.setCornerRadius(dp(2));
+        // 轨道和圆点共用一个半径：两端才不是「差不多圆」，而是和圆点同心的弧。
+        // 半径 = 圆点半径（7dp）要求轨道本身也有 14dp 高 —— 细轨道的圆角最大只能
+        // 到「高度的一半」，那样两端是 2dp 的小圆角，跟圆点并排看着就是方头。
+        final int knobSize = dp(14);
+        final int radius = knobSize / 2;
 
+        final RoundedTrack trackBg = new RoundedTrack(0x40FFFFFF, radius);
+        final RoundedTrack trackPro = new RoundedTrack(0xFFFFFFFF, radius);
+
+        // 进度层必须是「按 level 自己改宽度」的 drawable，系统那套 <clip> 不行。
+        //
+        // 上一次用 ClipDrawable 包一层是对的（裸 GradientDrawable 不认 level，
+        // 永远画满整条，真机就是「整条白 + 圆点看不见」），但 clip 只裁边界：
+        // 左端能保留圆角，右端会被切成一条竖直的直角边，进度走到中间时右端就是方的。
+        // RoundedTrack 每次按 level 重算宽度再画圆角矩形，两端永远是完整半圆。
         android.graphics.drawable.LayerDrawable layers = new android.graphics.drawable.LayerDrawable(
                 new android.graphics.drawable.Drawable[]{trackBg, trackPro});
         layers.setId(0, android.R.id.background);
         layers.setId(1, android.R.id.progress);
-        layers.setLayerInset(0, 0, inset, 0, inset);
-        layers.setLayerInset(1, 0, inset, 0, inset);
         bar.setProgressDrawable(layers);
 
-        android.graphics.drawable.GradientDrawable thumb = new android.graphics.drawable.GradientDrawable();
-        thumb.setShape(android.graphics.drawable.GradientDrawable.OVAL);
-        thumb.setColor(0xFFFFFFFF);
-        thumb.setSize(dp(14), dp(14));
-        bar.setThumb(thumb);
+        // 圆点：白底 + 半透明黑描边，压在白色进度上也能看出边界。
+        android.graphics.drawable.GradientDrawable knob = new android.graphics.drawable.GradientDrawable();
+        knob.setShape(android.graphics.drawable.GradientDrawable.OVAL);
+        knob.setColor(0xFFFFFFFF);
+        knob.setStroke(dp(1), 0x55000000);
+        knob.setSize(knobSize, knobSize);
+        bar.setThumb(knob);
         bar.setThumbOffset(0);
-        bar.setPadding(0, dp(6), 0, dp(6));
+        // 不分段：默认会在圆点位置把轨道划开一道缝，两端圆弧就断了。
+        bar.setSplitTrack(false);
+        // 左右各留一个半径，0% / 100% 时圆点正好落在两端半圆的圆心上，不被切。
+        bar.setPadding(radius, dp(6), radius, dp(6));
+
+        // 满值必须是 1000 —— 全链路用的都是千分比：
+        // VlcPlayerActivity 里两处 setProgress 都是 {@code time*1000/durationMs}，
+        // onSeekTo 收到的也是千分比。SeekBar 默认 max=100，不设就会被截到 100，
+        // 播放头永远钉在最右端 —— 和「整条白、没圆点」是同一个现场。
+        bar.setMax(1000);
+    }
+
+    /**
+     * 两端半圆、中间矩形的进度块，宽度随 {@code level} 走。
+     *
+     * <p>SeekBar 只对 id=progress 那一层 {@code setLevel(0..10000)}，所以这里
+     * 在 {@link #draw} 里按 level 算出宽度，再画一条圆角矩形 —— 圆角半径固定，
+     * 宽度小于两倍半径时自然退化成两段半圆相接，不会画出一坨。
+     */
+    private static final class RoundedTrack extends android.graphics.drawable.Drawable {
+        private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.RectF rect = new android.graphics.RectF();
+
+        RoundedTrack(int color, int radius) {
+            paint.setColor(color);
+            this.radius = radius;
+        }
+
+        private final int radius;
+
+        @Override public void draw(android.graphics.Canvas canvas) {
+            final android.graphics.Rect b = getBounds();
+            if (b.width() <= 0 || b.height() <= 0) return;
+            final int w = Math.max(0, Math.round(b.width() * (getLevel() / 10000f)));
+            if (w <= 0) return;
+            rect.set(b.left, b.top, b.left + w, b.bottom);
+            canvas.drawRoundRect(rect, radius, radius, paint);
+        }
+
+        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); }
+        @Override public void setColorFilter(android.graphics.ColorFilter cf) { paint.setColorFilter(cf); }
+        @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
+
+        /** level 变了要重画（默认实现只标记 dirty，不会通知重绘）。 */
+        @Override protected boolean onLevelChange(int level) {
+            invalidateSelf();
+            return true;
+        }
     }
 
     private TextView makeButton(String text, View.OnClickListener click) {
