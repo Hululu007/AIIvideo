@@ -1419,19 +1419,34 @@ public final class AiiHttp {
 
 
 
-    /** 请求头模板来自 site-default.json 的 headers，{origin} 换成实际域名。 */
+    /**
+     * 请求头模板来自 site-default.json 的 headers，{@code {origin}} 换成<b>源自己</b>的域名。
+     *
+     * <p>2026-10-19 真机踩到：这里原来换的是<b>目标 URL</b> 的 origin。取封面时目标
+     * 变成图床 {@code fourhoi.com}，于是 {@code Referer} 发的是 {@code https://fourhoi.com/}，
+     * 而图床的防盗链只认站点域 —— 实测 {@code Referer: https://missav.live/…} → 200，
+     * {@code https://fourhoi.com/} → 403，{@code Referer: /} → 403。okhttp 报的就是这个 403，
+     * 看着像「被墙」，其实是自己把源发错了。
+     *
+     * <p>源没声明 origin（spider 源就是这样，站点域写在 js 里）时退回目标 URL 的 origin。
+     */
     private static void applyHeaders(Request.Builder builder, SiteProfile profile, String url) {
         if (profile == null) return;
         try {
             JSONObject headers = profile.object("headers");
             if (headers == null) return;
-            String origin = originOf(url);
+            String siteOrigin = profile.origin == null ? "" : profile.origin.trim();
+            String origin = siteOrigin.length() > 0 ? siteOrigin : originOf(url);
             Iterator<String> keys = headers.keys();
             while (keys.hasNext()) {
                 String key = keys.next();
                 String value = headers.optString(key, "");
                 if (value == null || value.length() == 0) continue;
-                builder.header(key, value.replace("{origin}", origin));
+                String filled = value.replace("{origin}", origin);
+                // 模板写了 "{origin}/" 而 origin 是空串时会得到 "/"，防盗链一律 403。
+                // 这种头没有意义，不如不发 —— 缺 Referer 是 200。
+                if (filled.length() == 0 || filled.equals("/")) continue;
+                builder.header(key, filled);
             }
         } catch (Exception e) {
             log("请求头模板读取失败，按空头发送：" + e);

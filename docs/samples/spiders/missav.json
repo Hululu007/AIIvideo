@@ -1,7 +1,18 @@
 {
   "_note": "MissAV。整站在 Cloudflare 盾后：spider 版先按浏览器头直连，拿到挑战页会明确报错而不是返回空列表。番号即 id（/cn/fct-210）。封面在 fourhoi.com，不在站点域。",
+  "origin": "https://missav.live",
   "web": {
     "spider": "https://149.104.21.177.sslip.io/spiders/missav.js",
+    "shield": {
+      "_why": "整站挂在 Cloudflare 的 JS 挑战后面：okhttp 一律拿不到内容，只能借真 WebView 过盾。warmup 是拿去挑战的那一页（选最轻的列表页），hosts 是这些要过盾的域（站点 + 封面图床 fourhoi.com + 视频 CDN surrit.com），cookie 是 clearance 归属的 origin（跨进程搬运时用）。",
+      "warmup": "https://missav.live/dm539/cn/new",
+      "hosts": [
+        "missav.live",
+        "surrit.com",
+        "fourhoi.com"
+      ],
+      "cookie": "https://missav.live/"
+    },
     "firstPageSize": 12,
     "pageSize": 36,
     "categories": {
@@ -134,7 +145,7 @@
   },
   "headers": {
     "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36",
-    "Referer": "{origin}/",
+    "Referer": "https://missav.live/",
     "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
   }
 }

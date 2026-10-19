@@ -38,8 +38,57 @@ final class SiteRepository {
     private final File coverDir;
     private final SiteProfile profile;
 
+    /**
+     * 内容通路：JSON / HTML。盾后站点走 {@code fetchPage}（同源 XHR）。
+     */
     private byte[] fetch(String str) throws Exception {
-        return AiiHttp.get(str, this.profile);
+        try {
+            return AiiHttp.get(str, this.profile);
+        } catch (Exception e) {
+            if (SiteFetchWebView.handles(str)) {
+                UserSource.log("内容改走真 WebView：" + hostOnly(str)
+                        + "（okhttp 失败：" + e.getMessage() + "）");
+                return SiteFetchWebView.fetchBytes(str);
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * 封面通路。
+     *
+     * <p><b>单独一条的原因</b>（2026-10-19 真机）：封面原来复用 {@link #fetch}，
+     * 那条路第一步是 {@code fetchBytes}（站点页里的同源 XHR），而它抢的是
+     * {@code SiteFetchWebView} 的 {@code fetchLock} —— 那个锁同时被「抓详情页」
+     * 用着。首屏十二张封面一起冲进来，每张都先失败一次（跨源没有 ACAO 头，
+     * 必失败）再退到导航，锁就被堵满了：详情页的请求排在后面，15 秒后超时，
+     * 界面停在「正在加载…」。
+     *
+     * <p>封面根本不需要 XHR：{@code <img>} 那条路被 CSP / ORB 挡，唯一能通的是
+     * 「navigate 过去读 canvas 像素」，它用的是另一把锁（imageLock）+ 另一个
+     * WebView。所以这里直接跳到 {@code fetchImage}，一张封面都不占 fetchLock。
+     */
+    private byte[] fetchCover(String str) throws Exception {
+        try {
+            return AiiHttp.get(str, this.profile);
+        } catch (Exception e) {
+            if (SiteFetchWebView.handles(str)) {
+                UserSource.log("封面改走真 WebView：" + hostOnly(str)
+                        + "（okhttp 失败：" + e.getMessage() + "）");
+                return SiteFetchWebView.fetchImage(str);
+            }
+            throw e;
+        }
+    }
+
+    /** 只为日志取个主机名，失败返回原串。 */
+    private static String hostOnly(String url) {
+        try {
+            java.net.URI uri = java.net.URI.create(url);
+            return uri.getHost() == null ? url : uri.getHost();
+        } catch (Throwable e) {
+            return url;
+        }
     }
 
     /**
@@ -124,7 +173,7 @@ final class SiteRepository {
             }
         }
         if (bArr == null) {
-            byte[] bArrFetch = fetch(strCoverUrl);
+            byte[] bArrFetch = fetchCover(strCoverUrl);
             String strOptString = this.profile.object("cover").optString("mode");
             if ("aes-cbc".equals(strOptString) || (Text.TEXT_EMPHASIS_AUTO.equals(strOptString) && !validImage(bArrFetch))) {
                 Cipher cipher = Cipher.getInstance(this.profile.object("cover").getString("transformation"));

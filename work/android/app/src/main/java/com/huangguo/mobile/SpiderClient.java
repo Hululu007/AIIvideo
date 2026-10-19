@@ -90,7 +90,12 @@ final class SpiderClient {
                     // 代理快照。内置核心的地址只在主进程内存里，必须显式带过去；
                     // mode 也带上，服务侧用它对齐「用户按了直连」这类全局开关。
                     .put("proxyMode", AiiHttp.proxyModeOrEmpty())
-                    .put("effectiveProxy", AiiHttp.effectiveProxy());
+                    .put("effectiveProxy", AiiHttp.effectiveProxy())
+                    // 盾后站点的 clearance：主进程有窗口、过盾只要 1~2 秒，
+                    // :spider 进程的 WebView 没有窗口，同一个挑战 45 秒都过不去。
+                    // 每次调用把主进程的 cookie 带过去，子进程就不用再挑战。
+                    // 非盾后站点这里拿到空串，代价只是多一次 ensureWarm 的空判断。
+                    .put("cookieHint", cookieHintFor(ctx));
             final String reply = ch.call(req.toString());
             final JSONObject out = new JSONObject(reply);
             if (!out.optBoolean("ok", false)) {
@@ -99,6 +104,18 @@ final class SpiderClient {
             return out.has("payload") ? out.getJSONObject("payload") : new JSONObject();
         } finally {
             CALL_LOCK.release();
+        }
+    }
+
+    /** 当前源是不是盾后站点；是就顺手把主进程的 clearance 取出来。 */
+    private static String cookieHintFor(Context ctx) {
+        try {
+            SiteProfile profile = SiteProfile.current(ctx);
+            String origin = profile == null || profile.origin == null ? "" : profile.origin;
+            if (origin.length() == 0 || !SiteFetchWebView.isShielded(origin)) return "";
+            return SiteFetchWebView.cookieSnapshot();
+        } catch (Throwable e) {
+            return "";
         }
     }
 

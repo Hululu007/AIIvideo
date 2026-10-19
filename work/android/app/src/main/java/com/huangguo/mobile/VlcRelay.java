@@ -327,8 +327,11 @@ final class VlcRelay {
             //
             // 所以这一族域名不再自己发请求，交给已经过了盾的那个 WebView。
             if (SiteFetchWebView.isShielded(original)) {
-                serveFromWebView(out, original);
-                return;
+                // WebView 取不到时不要直接 502 —— 回落 okhttp 再试一次。
+                // 2026-10-19 真机：surrit.com 的 m3u8 在 WebView 里跨源 fetch 一律
+                // TypeError（没有 ACAO 头），而同一地址 okhttp 带上源声明的
+                // UA + Referer 是 200（Referer 那个 bug 修好之后才成立）。
+                if (serveFromWebView(out, original)) return;
             }
 
             Request.Builder builder = new Request.Builder().url(original).get();
@@ -472,15 +475,15 @@ final class VlcRelay {
      * 照抄 {@code image/jpeg} 它会去当图片处理。所以自己判：文本里以
      * {@code #EXTM3U} 开头就是播放列表，其余按 MPEG-TS 给。
      */
-    private void serveFromWebView(OutputStream out, String original) throws IOException {
+    private boolean serveFromWebView(OutputStream out, String original) throws IOException {
         byte[] data;
         try {
             data = SiteFetchWebView.fetchBytes(original);
         } catch (Throwable e) {
-            log("取流失败 @" + shortUrl(original) + " " + e.getClass().getSimpleName()
-                    + " " + e.getMessage());
-            writeSimple(out, 502, "Upstream fetch failed");
-            return;
+            // 不写 502：调用方还有 okhttp 那条路。真正两条都挂了才回错。
+            log("WebView 取流失败，回退 okhttp @" + shortUrl(original) + " "
+                    + e.getClass().getSimpleName() + " " + e.getMessage());
+            return false;
         }
 
         boolean playlist = isPlaylist(original, data);
@@ -503,6 +506,7 @@ final class VlcRelay {
         out.write(head.toString().getBytes(StandardCharsets.ISO_8859_1));
         out.write(body);
         out.flush();
+        return true;
     }
 
     private static boolean isPlaylist(String url, byte[] data) {

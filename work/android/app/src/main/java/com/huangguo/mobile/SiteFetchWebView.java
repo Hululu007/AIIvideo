@@ -88,7 +88,20 @@ final class SiteFetchWebView {
      * 全站里最轻的一页（12 张卡片，约 400KB），而详情页要塞 recommbee 追踪
      * 和一堆广告组件 —— 拿详情页去过盾明显更慢。
      */
-    private static final String WARMUP_URL = "https://missav.live/dm539/cn/new";
+    /**
+     * 过盾用的页面现在是**源自己声明**的（{@code web.shield.warmup}）。
+     *
+     * <p>这里原来写死的是 {@code missav.live/dm539/cn/new} —— 壳知道某个源
+     * 拿哪一页去过盾，接第二个盾后站点就得改 Java 发版。收回 {@link ShieldProfile}。
+     */
+    private static String warmupUrl() throws IOException {
+        String url = ShieldProfile.warmup();
+        if (url.length() == 0) {
+            throw new IOException("这个源没有声明 web.shield.warmup，过盾没有入口页。"
+                    + "源配置里补一条再试。");
+        }
+        return url;
+    }
 
     /**
      * 「已经过了盾」的判定。
@@ -127,19 +140,35 @@ final class SiteFetchWebView {
      * 「网络本来就慢」误判成「被墙了」；给太多会让用户在「设置源」那个按钮上
      * 干等 —— 那一步是「先探通再存」，慢到 40 秒以上用户会以为死机了。
      */
-    private static final long TIMEOUT_MS = 20_000L;
+    private static final long TIMEOUT_MS = 45_000L;
 
     /**
      * in-page fetch 等待的上限，比 TIMEOUT_MS 短 —— 盾已经过了，剩下是普通
      * 同源 XHR，不该继续占着过盾那份额外预算。
      */
-    private static final long FETCH_TIMEOUT_MS = 15_000L;
+    private static final long FETCH_TIMEOUT_MS = 30_000L;
 
     /** 过盾尝试次数。第二次几乎总能过 —— 挑战过一次 Cloudflare 就发了 clearance。 */
     private static final int PASS_ATTEMPTS = 2;
 
     /** 回包体积上限。超过就当失败 —— 挑战页/错误页可以很大，真页面用不着。 */
     private static final int MAX_BODY = 4 * 1024 * 1024;
+
+    /** 导航抓页面的上限。挑战 + 400KB 页面，走远程节点要给够。 */
+    private static final long NAV_TIMEOUT_MS = 35_000L;
+
+    /** 图片通道等解码的上限。封面几十 KB，慢网也就几秒。 */
+    private static final long IMAGE_TIMEOUT_MS = 12_000L;
+
+    /**
+     * 剥掉 {@code ; wv} 标记的 Chrome 移动版 UA。
+     *
+     * <p>两个 WebView 共用同一份：Cloudflare 看到 WebView 默认 UA 里的
+     * {@code ; wv)} 会把挑战判成「不支持的环境」，转圈永远不放行。
+     */
+    private static final String UA_CHROME =
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36"
+                    + " (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36";
 
     // ── 单例 ──────────────────────────────────────────────────────────
 
@@ -192,6 +221,42 @@ final class SiteFetchWebView {
      */
     private static volatile android.content.Context appContext;
 
+    /**
+     * 代理提示：{@code socks5://127.0.0.1:PORT} 或空串。
+     *
+     * <p>内置代理核心跑在<b>主进程</b>，而 spider 宿主在 {@code :spider} 进程 ——
+     * 那边 {@code ProxyCore.get()} 是一个没启动过的空实例，{@code httpPort()} 恒 0。
+     * 所以子进程必须由主进程把端口告诉它（SpiderClient 本来就把 effectiveProxy
+     * 随每次调用带过来了，这里只是接住）。
+     */
+    private static volatile String proxyHint = "";
+
+    /**
+     * 主进程过盾后拿到的 cookie 快照，用来喂给 :spider 进程那个 WebView。
+     *
+     * <p>为什么必须这么做（2026-10-19 真机，根因）：两个进程的 WebView
+     * <b>数据目录是分开的</b>（{@code setDataDirectorySuffix("spider")}，
+     * Chromium 不允许同目录），所以 cookie 不共享；而子进程的 WebView 没有 window，
+     * Cloudflare 挑战在那种环境里要跑 45 秒以上还是过不去。
+     * 主进程有 Activity，同一个挑战 1.3 秒就过 —— 把那边的 {@code cf_clearance}
+     * 搬过来，子进程就根本不用再挑战一次：clearance 绑的是 IP + TLS 指纹，
+     * 两边都是同一台设备、同一个 WebView 内核，搬过来是有效的。
+     */
+    private static volatile String cookieHint = "";
+
+    /** 子进程侧：主进程递过来的 cookie。 */
+    static void setCookieHint(String raw) {
+        cookieHint = raw == null ? "" : raw.trim();
+        cookieApplied = false;
+    }
+
+    /** 已经往 CookieManager 写过就不要再写第二遍（会互相覆盖）。 */
+    private static volatile boolean cookieApplied;
+
+    static void setProxyHint(String effectiveProxy) {
+        proxyHint = effectiveProxy == null ? "" : effectiveProxy.trim();
+    }
+
     /** 由 :spider 进程的 Service 在 onCreate 里调一次。主进程不需要（有 Activity）。 */
     static void init(android.content.Context context) {
         appContext = context == null ? null : context.getApplicationContext();
@@ -201,6 +266,18 @@ final class SiteFetchWebView {
     private View holder;
     private volatile boolean alive;
     private volatile boolean passed;
+
+    /**
+     * 页面代号：每次 {@code onPageStarted} 自增。
+     *
+     * <p>2026-10-19 真机踩到的大坑：{@code loadUrl} 之后立刻轮询判据，读到的是
+     * <b>上一份文档</b> —— 它还带着 {@code html[lang]}，于是「第 2 次过盾成功」
+     * 在第 2 秒就命中，实际新页面刚起步、还在挑战。后面拿到的永远是一份挑战页，
+     * 日志里就是「站点那边重新要了一次访问验证」，而 onPageFinished 在 30 秒后才来。
+     *
+     * <p>所以判据必须等到「新文档真的开始了」才开始轮询，靠这个代号对齐。
+     */
+    private volatile int pageGen;
 
     /** 串行化 fetch：页面状态只有一份，并发请求会互相污染。 */
     private final Semaphore fetchLock = new Semaphore(1, true);
@@ -212,6 +289,23 @@ final class SiteFetchWebView {
      * fetch 打进来把页面搅了；而且首次调用要跑完整套挑战流程，比普通 fetch 慢得多。
      */
     private final Semaphore passLock = new Semaphore(1, true);
+
+    /**
+     * 图片通道用的第二个 WebView。
+     *
+     * <p>为什么封面不能再借站点那个 WebView：站点页面的 CSP 把 img-src 收得很死，
+     * 在页面里 {@code new Image().src='https://fourhoi.com/…'} 直接被 CSP 拦
+     * （真机 CDP 实测 blockedReason=csp）；跨源 fetch 又没有 ACAO 头。
+     * <b>导航不受 CSP 约束</b> —— 整个文档换成那张图，图片本身就是同源文档，
+     * canvas 画上去不 taint，能直接读像素。
+     *
+     * <p>为什么单独一个实例而不是复用 siteWebView 导航过去再回来：那会把已经过盾的
+     * 列表页顶掉，每张封面都要重新过一遍盾，12 张封面就是 12 次 1.3 秒。
+     */
+    private WebView imageView;
+
+    /** 图片通道一次只跑一张：一个 WebView 只有一个文档。 */
+    private final Semaphore imageLock = new Semaphore(1, true);
 
     /** 在飞的 fetch，按 id 匹配回包。 */
     private final Map<String, Pending> waiting = new ConcurrentHashMap<String, Pending>();
@@ -264,14 +358,13 @@ final class SiteFetchWebView {
         // 两条路的分叉在 ensureWebView 里，这里只决定绑不绑。
         MainActivity host = MainActivity.host;
         if (host != null) wv.bindHost(host);
-        return wv.doFetch(absoluteUrl);
+        return wv.doFetchByNav(absoluteUrl);
     }
 
     /** 站点 URL 是否属于「需要真 WebView 兜着」的站点。 */
     static boolean handles(String url) {
-        if (url == null) return false;
-        String host = hostOf(url);
-        return host.length() > 0 && (host.equals("missav.live") || host.endsWith(".missav.live"));
+        // 域名表在源配置的 web.shield.hosts 里（2026-10-19 从这行硬编码里收走）。
+        return ShieldProfile.handles(url);
     }
 
     /**
@@ -295,6 +388,22 @@ final class SiteFetchWebView {
         MainActivity host = MainActivity.host;
         if (host != null) wv.bindHost(host);
         return wv.doFetchBytes(absoluteUrl);
+    }
+
+    /**
+     * 图片取字节：navigate 过去再读 canvas 像素。
+     *
+     * <p>给静态资源用（封面）。站点页里 fetch 会被 CORS 挡、{@code <img>} 会被
+     * 站点 CSP 挡，而 navigate 两者都不受管 —— 这是 Cloudflare 后面那些图片域
+     * 唯一还能走通的路。
+     *
+     * <p><b>只从后台线程调用。</b>
+     */
+    static byte[] fetchImage(String absoluteUrl) throws Exception {
+        SiteFetchWebView wv = get();
+        MainActivity host = MainActivity.host;
+        if (host != null) wv.bindHost(host);
+        return wv.doFetchImage(absoluteUrl);
     }
 
     /**
@@ -328,6 +437,101 @@ final class SiteFetchWebView {
             // 而 clearance 是绑 IP + TLS 指纹的）。重新过一次。
             passed = false;
         }
+    }
+
+    /**
+     * 盾后站点抓页面的主路：<b>导航过去，把 document 的 HTML 读回来</b>。
+     *
+     * <p>为什么不再用页面内 XHR（2026-10-19 真机，连续三轮实测）：过盾之后
+     * 页面自己还在拉 12 张封面和一堆广告脚本，主线程和下行都被占着；紧接着
+     * 发的那次同源 XHR 抢不到执行机会，{@code onload}/{@code onerror}/
+     * {@code ontimeout} 一个都不回，30 秒硬超时 —— 日志里就是「页面内那一次
+     * 请求超时了」。而 {@code onPageFinished} 恰好在超时之后才来，说明页面
+     * 根本没闲着。
+     *
+     * <p>导航这条路把问题反过来了：浏览器会<b>取消</b>当前页的其它加载去导航，
+     * 目标文档加载完 {@code readyState} 就是 {@code complete}，直接读
+     * {@code document.documentElement.outerHTML} 即可。clearance 是 cookie，
+     * 导航过去照样带着，所以目标页不会再要一次挑战。
+     */
+    private String doFetchByNav(String absoluteUrl) throws Exception {
+        ensureWarm();
+        acquire(fetchLock, TIMEOUT_MS, "站点侧请求排队超时。");
+        try {
+            if (!passed) ensureWarm();
+
+            final String target = absoluteUrl;
+            onMain(new Runnable() {
+                @Override
+                public void run() {
+                    if (webView != null) webView.loadUrl("about:blank");
+                }
+            });
+            Thread.sleep(200);
+            onMain(new Runnable() {
+                @Override
+                public void run() {
+                    if (webView != null) webView.loadUrl(target);
+                }
+            });
+
+            long deadline = System.currentTimeMillis() + NAV_TIMEOUT_MS;
+            String html = "";
+            while (System.currentTimeMillis() < deadline) {
+                Thread.sleep(400);
+                String len = evalOnPage("(function(){"
+                        + "if(document.readyState!=='complete')return '';"
+                        + "var h=document.documentElement;"
+                        + "return h?String(h.outerHTML.length):'';})()");
+                if (len.length() == 0) continue;
+                int n;
+                try {
+                    n = Integer.parseInt(len.trim());
+                } catch (Throwable bad) {
+                    continue;
+                }
+                if (n < 512) continue;          // 还没渲染出东西
+                html = evalOnPage("document.documentElement.outerHTML");
+                if (html.length() >= n * 9 / 10) break;   // 读全了
+            }
+            if (html.length() == 0) {
+                throw new IOException("导航到站点页面后没读到内容（"
+                        + (NAV_TIMEOUT_MS / 1000) + " 秒）：" + absoluteUrl);
+            }
+            if (looksLikeChallenge(html)) {
+                passed = false;
+                // 把证据打出来：是挑战页还是误判，一眼可分。
+                log("判成挑战页 " + html.length() + " 字节 head="
+                        + html.substring(0, Math.min(160, html.length())).replace('\n', ' '));
+                throw new IOException("站点那边重新要了一次访问验证。再进一次通常就过了。");
+            }
+            log("抓到页面 " + html.length() + " 字节 " + absoluteUrl);
+            return html;
+        } finally {
+            fetchLock.release();
+        }
+    }
+
+    /** 在站点 WebView 上同步跑一段 JS，返回 unquote 后的字符串。 */
+    private String evalOnPage(final String js) throws Exception {
+        final CountDownLatch latch = new CountDownLatch(1);
+        final String[] out = new String[]{""};
+        onMain(new Runnable() {
+            @Override
+            public void run() {
+                WebView wv = webView;
+                if (wv == null) { latch.countDown(); return; }
+                wv.evaluateJavascript(js, new ValueCallback<String>() {
+                    @Override
+                    public void onReceiveValue(String value) {
+                        out[0] = unquote(value);
+                        latch.countDown();
+                    }
+                });
+            }
+        });
+        if (!latch.await(10, TimeUnit.SECONDS)) return "";
+        return out[0];
     }
 
     private String doFetch(String absoluteUrl) throws Exception {
@@ -633,8 +837,11 @@ final class SiteFetchWebView {
      * 列表容器 —— 出现即过盾成功（Cloudflare 通过后会自己导航到目标 URL，
      * 不需要我们再动作一次）。
      */
-    private void ensureWarm() throws Exception {
-        if (passed && webView != null) return;
+    void ensureWarm() throws Exception {
+        if (passed && webView != null) {
+            reapplyProxyIfChanged();
+            return;
+        }
         acquire(passLock, TIMEOUT_MS, "过盾排队超时。");
         try {
             // 双重检查：等锁期间可能已经有人过好了。
@@ -643,6 +850,7 @@ final class SiteFetchWebView {
                 long began = System.currentTimeMillis();
                 try {
                     ensureWebView();
+                    reapplyProxyIfChanged();
                     boolean ok = loadAndAwait();
                     passed = ok;
                     log("过盾第 " + attempt + " 次" + (ok ? "成功" : "超时")
@@ -663,11 +871,27 @@ final class SiteFetchWebView {
 
     /** 载入过盾页，等到列表容器出现。 */
     private boolean loadAndAwait() throws Exception {
+        final String warmup = warmupUrl();
+        // 先把文档清成 about:blank，再导航目标。
+        //
+        // 不是为了「干净」，是为了判据：`loadUrl` 之后立刻轮询
+        // `querySelector('html[lang]')`，读到的是**上一份** DOM —— 它当然还带着
+        // html[lang]，于是「过盾成功」在第 1 秒就命中，而新页面其实还在挑战。
+        // （2026-10-19 真机：onPageStarted 在无窗口 WebView 上不回调，靠代号也等不到，
+        // 只能从文档本身下手。about:blank 里没有 html[lang]，判据不可能骗人。）
         onMain(new Runnable() {
             @Override
             public void run() {
                 WebView wv = webView;
-                if (wv != null) wv.loadUrl(WARMUP_URL);
+                if (wv != null) wv.loadUrl("about:blank");
+            }
+        });
+        Thread.sleep(250);
+        onMain(new Runnable() {
+            @Override
+            public void run() {
+                WebView wv = webView;
+                if (wv != null) wv.loadUrl(warmup);
             }
         });
         return awaitPass();
@@ -757,9 +981,7 @@ final class SiteFetchWebView {
                     //
                     // 换成不带 wv 的 Chrome 移动版 UA，挑战把它当普通 Chrome 处理，
                     // 正常放行。
-                    s.setUserAgentString(
-                            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36"
-                                    + " (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36");
+                    s.setUserAgentString(UA_CHROME);
                     // 关掉用不到的能力：减少攻击面，也让加载快一点。
                     s.setAllowFileAccess(false);
                     s.setAllowContentAccess(false);
@@ -775,6 +997,38 @@ final class SiteFetchWebView {
 
                     wv.setWebViewClient(new WebViewClient() {
                         @Override
+                        public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
+                            pageGen++;
+                            // 无窗口模式（:spider 进程）下，页面是「不可见」的：
+                            // document.visibilityState 恒 hidden、window.innerWidth 是 0。
+                            // Cloudflare 的挑战脚本第一件事就是看这几个值，判定成无头
+                            // 浏览器之后挑战页会一直转、永远不跳 —— 表现就是过盾 20 秒
+                            // 超时（日志里只有「过盾第 N 次超时」，看不出是这个原因）。
+                            //
+                            // 所以进页面之前先把这几项掰成普通手机浏览器的值。
+                            // 只覆盖读属性，不改行为：挑战该跑的 JS 一行不少。
+                            view.evaluateJavascript(STEALTH_JS, null);
+                        }
+
+                        @Override
+                        public void onReceivedError(WebView view, android.webkit.WebResourceRequest request,
+                                                    android.webkit.WebResourceError error) {
+                            // 无窗口模式下最怕的就是「什么都不发生」：没有 onPageFinished、
+                            // 没有异常，只有 20 秒后的超时。把加载失败的原因直接打出来。
+                            log("加载失败 " + request.getUrl() + " code=" + error.getErrorCode()
+                                    + " " + error.getDescription());
+                        }
+
+                        @Override
+                        public void onPageFinished(WebView view, String url) {
+                            // 一行就够判断「到底是没加载出来，还是加载了没过盾」：
+                            // 前者看不到这句，后者能看到 url 和长度。
+                            view.evaluateJavascript(
+                                    "(document.title||'').length + '|' + (document.body?document.body.innerText.length:0)",
+                                    value -> log("页面加载完 " + url + " title/innerText=" + value));
+                        }
+
+                        @Override
                         public boolean shouldOverrideUrlLoading(WebView view,
                                                               android.webkit.WebResourceRequest r) {
                             // 站点内部的跳转（挑战通过后的重定向、年龄确认页）都不拦。
@@ -784,6 +1038,8 @@ final class SiteFetchWebView {
                         }
                     });
                     wv.addJavascriptInterface(new SiteBridge(), "__hgSiteRecv");
+                    applyCookieHint();
+                    installStealthEarly(wv);
                     applyProxy(wv);
 
                     // 1×1 + GONE：attach 到 window 之后页面才「有窗口」，这是主进程那条路。
@@ -831,6 +1087,240 @@ final class SiteFetchWebView {
      * <p>抛异常一律吞掉并退回直连 —— 代理配错不该让整个加源流程崩掉，
      * 表现退回成「过不去」而不是「崩」。
      */
+    /**
+     * 无窗口模式的可见性伪装。
+     *
+     * <p>只覆盖「读」：visibilityState / hidden / innerWidth / innerHeight。
+     * 不动 userAgent、不动 canvas、不碰 webdriver 那些 —— 这个 WebView 本来就是
+     * 真内核，唯一不真实的地方是「没有窗口」，那就只补这一处。
+     */
+    /**
+     * 把无窗口 WebView 掰成「一台普通的可见手机浏览器」。
+     *
+     * <p>2026-10-19 真机：{@code :spider} 进程里的 WebView 没有 window，
+     * {@code document.visibilityState} 恒 {@code hidden}、{@code innerWidth} 是 0。
+     * Cloudflare 的挑战脚本第一件事就是看这几个值，判定成无头浏览器之后挑战页
+     * 会一直转，表现为「过盾 20 秒超时」（日志里看不到任何报错）。
+     *
+     * <p><b>注入时机决定成败</b>：原来只在 {@code onPageStarted} 里
+     * {@code evaluateJavascript}，那时挑战脚本已经开始跑了，改得太晚。
+     * 现在用 {@code addDocumentStartJavaScript} 在文档开始执行前就装好补丁
+     * （见 {@link #installStealthEarly}），{@code onPageStarted} 里那份留作兜底。
+     */
+    private static final String STEALTH_JS =
+            "(function(){try{"
+                    + "var d=document;"
+                    + "Object.defineProperty(d,'visibilityState',{get:function(){return 'visible';}});"
+                    + "Object.defineProperty(d,'hidden',{get:function(){return false;}});"
+                    + "Object.defineProperty(d,'webkitHidden',{get:function(){return false;}});"
+                    + "if(!d.hasFocus){d.hasFocus=function(){return true;};}"
+                    + "var w=window;"
+                    + "Object.defineProperty(w,'innerWidth',{get:function(){return 412;}});"
+                    + "Object.defineProperty(w,'innerHeight',{get:function(){return 915;}});"
+                    + "Object.defineProperty(w,'outerWidth',{get:function(){return 412;}});"
+                    + "Object.defineProperty(w,'outerHeight',{get:function(){return 915;}});"
+                    + "Object.defineProperty(w,'devicePixelRatio',{get:function(){return 2.75;}});"
+                    + "try{Object.defineProperty(screen,'width',{get:function(){return 412;}});"
+                    + "Object.defineProperty(screen,'height',{get:function(){return 915;}});"
+                    + "Object.defineProperty(screen,'availWidth',{get:function(){return 412;}});"
+                    + "Object.defineProperty(screen,'availHeight',{get:function(){return 915;}});}catch(e){}"
+                    + "if(navigator.webdriver){try{Object.defineProperty(navigator,'webdriver',{get:function(){return false;}});}catch(e){}}"
+                    + "}catch(e){}})()";
+
+    /**
+     * 在文档开始执行前注入 stealth 补丁。
+     *
+     * <p>{@code addDocumentStartJavaScript} 只在支持该特性的 WebView 上有；
+     * 老内核退回「onPageStarted 里注入」那条，效果差但不会崩。
+     */
+    private static void installStealthEarly(WebView wv) {
+        try {
+            if (!androidx.webkit.WebViewFeature.isFeatureSupported(
+                    androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                log("内核不支持文档前置注入，退回 onPageStarted");
+                return;
+            }
+            androidx.webkit.WebViewCompat.addDocumentStartJavaScript(
+                    wv, STEALTH_JS, java.util.Collections.singleton("*"));
+        } catch (Throwable e) {
+            log("文档前置注入失败，退回 onPageStarted：" + e);
+        }
+    }
+
+    /**
+     * 只支持 CONNECT 的本地 HTTP → SOCKS5 桥。
+     *
+     * <p>存在的唯一原因是 WebView 的 {@code ProxyController} 用 socks5 时不可靠
+     * （见 applyProxy 里的注释）。WebView 走 HTTPS 只会发 {@code CONNECT host:port}，
+     * 所以这里只管这一种请求：握手、回 200、然后双向管道。
+     *
+     * <p>不做认证、不监听外网（绑 127.0.0.1）、不缓存 —— 它的生命周期跟进程一样，
+     * 端口随机。SOCKS 那头是 Xray 的本地入站，同样只绑回环。
+     */
+    static final class SocksBridge {
+        private static volatile int port = 0;
+        private static volatile String socksHost = "127.0.0.1";
+        private static volatile int socksPort = 0;
+        private static java.net.ServerSocket server;
+
+        static synchronized int ensure(String host, int targetPort) throws IOException {
+            socksHost = host;
+            socksPort = targetPort;
+            if (port > 0) return port;
+            server = new java.net.ServerSocket(0, 16, java.net.InetAddress.getByName("127.0.0.1"));
+            port = server.getLocalPort();
+            Thread thread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    while (true) {
+                        try {
+                            final java.net.Socket client = server.accept();
+                            Thread worker = new Thread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    try { serve(client); } catch (Throwable ignored) { closeQuietly(client); }
+                                }
+                            }, "socks-bridge-conn");
+                            worker.setDaemon(true);
+                            worker.start();
+                        } catch (Throwable e) {
+                            return;   // server 被关掉了，线程退出
+                        }
+                    }
+                }
+            }, "socks-bridge");
+            thread.setDaemon(true);
+            thread.start();
+            log("WebView 走本地 HTTP→SOCKS 桥 127.0.0.1:" + port + " → " + host + ":" + targetPort);
+            return port;
+        }
+
+        private static void serve(java.net.Socket client) throws IOException {
+            log("桥收到连接 " + client.getRemoteSocketAddress());
+            java.io.InputStream in = client.getInputStream();
+            java.io.OutputStream out = client.getOutputStream();
+            String head = readHead(in);
+            if (head == null) { closeQuietly(client); return; }
+            String[] lines = head.split("\r\n");
+            String[] parts = lines.length > 0 ? lines[0].split(" ") : new String[0];
+            if (parts.length < 2 || !"CONNECT".equalsIgnoreCase(parts[0])) {
+                out.write("HTTP/1.1 405 Only CONNECT\r\n\r\n".getBytes("UTF-8"));
+                out.flush();
+                closeQuietly(client);
+                return;
+            }
+            String target = parts[1];
+            int colon = target.lastIndexOf(':');
+            if (colon <= 0) { closeQuietly(client); return; }
+            String host = target.substring(0, colon);
+            int destPort = Integer.parseInt(target.substring(colon + 1));
+            log("桥 CONNECT " + host + ":" + destPort + " → socks " + socksHost + ":" + socksPort);
+
+            java.net.Socket upstream = new java.net.Socket();
+            try {
+                upstream.connect(new java.net.InetSocketAddress(socksHost, socksPort), 8000);
+                upstream.setSoTimeout(15000);
+                java.io.InputStream upIn = upstream.getInputStream();
+                java.io.OutputStream upOut = upstream.getOutputStream();
+                // SOCKS5：无认证 + CONNECT + 域名交给落地解析
+                upOut.write(new byte[]{5, 1, 0});
+                upOut.flush();
+                byte[] authReply = new byte[2];
+                readFully(upIn, authReply);
+                log("桥 socks 认证回复 " + authReply[0] + "/" + authReply[1]);
+                byte[] hostBytes = host.getBytes("UTF-8");
+                byte[] req = new byte[7 + hostBytes.length];
+                req[0] = 5; req[1] = 1; req[2] = 0; req[3] = 3;
+                req[4] = (byte) hostBytes.length;
+                System.arraycopy(hostBytes, 0, req, 5, hostBytes.length);
+                req[5 + hostBytes.length] = (byte) ((destPort >> 8) & 0xff);
+                req[6 + hostBytes.length] = (byte) (destPort & 0xff);
+                upOut.write(req);
+                upOut.flush();
+                // SOCKS5 的回复长度**取决于 ATYP**：IPv4 是 4+4+2，域名是
+                // 4+1+len+2，IPv6 是 4+16+2。原来这里死读 10 字节 —— Xray 回 IPv4
+                // 时刚好对上，回域名类型时就会把后面数据流的开头吞掉，表现是
+                // 页面永远加载不出来（net::ERR_TIMED_OUT，innerText=0）。
+                byte[] conHead = new byte[4];
+                readFully(upIn, conHead);
+                if (conHead[1] != 0) { closeQuietly(client); closeQuietly(upstream); return; }
+                int atyp = conHead[3];
+                log("桥 socks 连接回复 " + conHead[0] + "/" + conHead[1] + " atyp=" + atyp);
+                if (atyp == 1) {
+                    readFully(upIn, new byte[6]);                    // IPv4 + 端口
+                } else if (atyp == 3) {
+                    byte[] len = new byte[1];
+                    readFully(upIn, len);
+                    readFully(upIn, new byte[(len[0] & 0xff) + 2]);  // 域名 + 端口
+                } else if (atyp == 4) {
+                    readFully(upIn, new byte[18]);                   // IPv6 + 端口
+                } else {
+                    closeQuietly(client); closeQuietly(upstream); return;
+                }
+
+                out.write("HTTP/1.1 200 Connection Established\r\n\r\n".getBytes("UTF-8"));
+                out.flush();
+                upstream.setSoTimeout(0);
+                pump(in, upOut);
+                pump(upIn, out);
+            } catch (Throwable e) {
+                log("桥转发失败：" + e.getClass().getSimpleName() + " " + e.getMessage());
+                closeQuietly(upstream);
+                closeQuietly(client);
+            }
+        }
+
+        private static String readHead(java.io.InputStream in) throws IOException {
+            java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+            int state = 0;
+            int b;
+            while ((b = in.read()) != -1) {
+                buf.write(b);
+                if (b == '\r') state = 1;
+                else if (b == '\n' && state == 1) state = 2;
+                else if (b == '\r' && state == 2) state = 3;
+                else if (b == '\n' && state == 3) break;
+                else state = 0;
+                if (buf.size() > 8192) break;
+            }
+            return buf.size() == 0 ? null : buf.toString("UTF-8");
+        }
+
+        private static void readFully(java.io.InputStream in, byte[] buf) throws IOException {
+            int read = 0;
+            while (read < buf.length) {
+                int n = in.read(buf, read, buf.length - read);
+                if (n < 0) throw new IOException("socks 握手被断开");
+                read += n;
+            }
+        }
+
+        private static void pump(final java.io.InputStream in, final java.io.OutputStream out) {
+            Thread thread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    byte[] buf = new byte[8192];
+                    try {
+                        int n;
+                        while ((n = in.read(buf)) >= 0) {
+                            out.write(buf, 0, n);
+                            out.flush();
+                        }
+                    } catch (Throwable ignored) {
+                    } finally {
+                        try { out.close(); } catch (Throwable ignored) {}
+                    }
+                }
+            }, "socks-bridge-pump");
+            thread.setDaemon(true);
+            thread.start();
+        }
+
+        private static void closeQuietly(java.io.Closeable c) {
+            try { if (c != null) c.close(); } catch (Throwable ignored) {}
+        }
+    }
+
     private void applyProxy(final WebView wv) {
         try {
             final java.net.Proxy proxy = AiiHttp.effectiveJavaProxy();
@@ -849,17 +1339,51 @@ final class SiteFetchWebView {
                 return;
             }
             java.net.InetSocketAddress isa = (java.net.InetSocketAddress) address;
-            // 方案要跟代理类型对上：socks5 的地址写成 http:// 会让 WebView
-            // 按 HTTP CONNECT 去连一个 SOCKS 端口，连上也没有响应。
-            String scheme = proxy.type() == java.net.Proxy.Type.SOCKS ? "socks5" : "http";
-            String url = scheme + "://" + isa.getHostString() + ":" + isa.getPort();
+            String url;
+            // 内置核心现在同时开 socks 和 http 两个入站（XrayConfig.httpInbound），
+            // WebView 优先走 http 那条 —— 它比 socks5 稳，也比自写桥稳。
+            int localHttp = 0;
+            try {
+                localHttp = ProxyCore.get(wv.getContext()).httpPort();
+            } catch (Throwable ignored) {
+            }
+            if (localHttp == 0) {
+                // 子进程：核心在主进程，只能靠主进程传来的端口。
+                // effectiveProxy 是 socks5://127.0.0.1:PORT，HTTP 入站在 PORT+1。
+                java.util.regex.Matcher m = java.util.regex.Pattern
+                        .compile("127\\.0\\.0\\.1:(\\d+)").matcher(proxyHint);
+                if (m.find()) {
+                    try {
+                        localHttp = Integer.parseInt(m.group(1)) + 1;
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+            if (localHttp > 0) {
+                url = "http://127.0.0.1:" + localHttp;
+                controller.setProxyOverride(configFor(url), MAIN, new Runnable() {
+                    @Override
+                    public void run() {
+                        log("WebView 代理已挂上（HTTP 入站）");
+                    }
+                });
+                log("WebView 走代理：HTTP 127.0.0.1:" + localHttp);
+                return;
+            }
+            if (proxy.type() == java.net.Proxy.Type.SOCKS) {
+                // ★ WebView 的 ProxyController 对 socks5 支持不稳（2026-10-19 实测）：
+                // 设置回调说「已挂上」，但页面根本不加载（onPageFinished 一次都不触发），
+                // 而同一个 socks 用 OkHttp 走是通的（能拿到 103）。
+                // 设备是 WebView 143，不是版本老的问题，是这条路本身不可靠。
+                //
+                // 所以在本进程起一个只认 CONNECT 的 HTTP→SOCKS 桥，WebView 走 http://。
+                // 桥只绑 127.0.0.1、只转发、不缓存，用完即弃。
+                url = "http://127.0.0.1:" + SocksBridge.ensure(isa.getHostString(), isa.getPort());
+            } else {
+                url = "http://" + isa.getHostString() + ":" + isa.getPort();
+            }
 
-            java.util.List<androidx.webkit.ProxyConfig.ProxyRule> rules =
-                    java.util.Collections.singletonList(
-                            new androidx.webkit.ProxyConfig.ProxyRule(
-                                    androidx.webkit.ProxyConfig.MATCH_ALL_SCHEMES, url));
-            androidx.webkit.ProxyConfig config = new androidx.webkit.ProxyConfig(
-                    rules, java.util.Collections.<String>emptyList(), false);
+            androidx.webkit.ProxyConfig config = configFor(url);
 
             controller.setProxyOverride(config, MAIN, new Runnable() {
                 @Override
@@ -873,6 +1397,15 @@ final class SiteFetchWebView {
             // 表现退回成「过不去盾」，而不是崩在设置代理这一步。
             log("挂代理失败，退回直连：" + e.getClass().getSimpleName() + " " + e.getMessage());
         }
+    }
+
+    private static androidx.webkit.ProxyConfig configFor(String url) {
+        java.util.List<androidx.webkit.ProxyConfig.ProxyRule> rules =
+                java.util.Collections.singletonList(
+                        new androidx.webkit.ProxyConfig.ProxyRule(
+                                androidx.webkit.ProxyConfig.MATCH_ALL_SCHEMES, url));
+        return new androidx.webkit.ProxyConfig(
+                rules, java.util.Collections.<String>emptyList(), false);
     }
 
     /** {@code setProxyOverride} 要求一个 Executor 和一个完成回调，两边都在主线程。 */
@@ -889,6 +1422,221 @@ final class SiteFetchWebView {
         public void run() {
         }
     };
+
+    // ── 图片通道：导航过去再读像素 ────────────────────────────────────
+
+    /**
+     * 把图片当页面 navigate 过去，再用 canvas 把像素读回来。
+     *
+     * <p>存在的理由（2026-10-19 真机实测三条路都断了）：
+     * <ul>
+     *   <li>okhttp 取 {@code fourhoi.com} 的封面 → 失败；</li>
+     *   <li>站点页里 {@code fetch()} 它 → 跨源没 ACAO，{@code TypeError: Failed to fetch}；</li>
+     *   <li>站点页里 {@code new Image()} → 被站点 CSP 的 img-src 拦（CDP 报 blockedReason=csp）；</li>
+     *   <li>主页面（appassets）里 {@code new Image()} → {@code net::ERR_BLOCKED_BY_ORB}。</li>
+     * </ul>
+     * 导航是唯一不受 CSP / ORB 管辖的加载方式：整份文档就是那张图，图片成了同源
+     * 资源，canvas 画上去不 taint，{@code toDataURL} 能读。
+     *
+     * <p>返回原始图片字节（JPEG 重编码后的）。失败抛 IOException，上层照常降级成占位字。
+     */
+    byte[] doFetchImage(String absoluteUrl) throws Exception {
+        ensureImageView();
+        acquire(imageLock, TIMEOUT_MS, "图片通道排队超时。");
+        try {
+            final String target = absoluteUrl;
+            onMain(new Runnable() {
+                @Override
+                public void run() {
+                    if (imageView == null) return;
+                    imageView.loadUrl(target);
+                }
+            });
+
+            // 等图片解码完成。不能只等 onPageFinished —— 图片文档的 finish 早于
+            // 解码，那时 naturalWidth 还是 0，canvas 会画出空白。
+            long deadline = System.currentTimeMillis() + IMAGE_TIMEOUT_MS;
+            boolean ready = false;
+            while (System.currentTimeMillis() < deadline) {
+                Thread.sleep(300);
+                String probe = evalOnImage("(function(){var im=document.images&&document.images[0];"
+                        + "return im&&im.complete&&im.naturalWidth>0?'Y':'N';})()");
+                if ("Y".equals(probe)) { ready = true; break; }
+            }
+            if (!ready) {
+                String ct = evalOnImage("String(document.contentType||'')");
+                throw new IOException("图片没加载出来（contentType=" + ct + "）：" + absoluteUrl);
+            }
+
+            String data = evalOnImage("(function(){var im=document.images[0];"
+                    + "try{var c=document.createElement('canvas');"
+                    + "c.width=im.naturalWidth;c.height=im.naturalHeight;"
+                    + "c.getContext('2d').drawImage(im,0,0);"
+                    + "return c.toDataURL('image/jpeg',0.92).split(',')[1]||'';}"
+                    + "catch(e){return 'E'+e;}})()");
+            if (data == null || data.length() == 0) {
+                throw new IOException("图片读不出像素：" + absoluteUrl);
+            }
+            if (data.charAt(0) == 'E') {
+                throw new IOException("图片读像素失败：" + data.substring(1));
+            }
+            return Base64.decode(data, Base64.DEFAULT);
+        } finally {
+            // 导航下一个地址前先清空，避免上一张的像素被当成这一张。
+            onMain(new Runnable() {
+                @Override
+                public void run() {
+                    if (imageView != null) imageView.loadUrl("about:blank");
+                }
+            });
+            imageLock.release();
+        }
+    }
+
+    /** 同步跑一段 JS，返回 unquote 后的字符串。超时返回 ""。 */
+    private String evalOnImage(final String js) throws Exception {
+        final CountDownLatch latch = new CountDownLatch(1);
+        final String[] out = new String[]{""};
+        onMain(new Runnable() {
+            @Override
+            public void run() {
+                WebView wv = imageView;
+                if (wv == null) { latch.countDown(); return; }
+                wv.evaluateJavascript(js, new ValueCallback<String>() {
+                    @Override
+                    public void onReceiveValue(String value) {
+                        out[0] = unquote(value);
+                        latch.countDown();
+                    }
+                });
+            }
+        });
+        latch.await(6, TimeUnit.SECONDS);
+        return out[0];
+    }
+
+    private void ensureImageView() throws Exception {
+        if (imageView != null && alive) return;
+        Activity host = hostRef.get();
+        if (host == null && appContext == null) {
+            throw new IOException("没有可用的宿主页面，图片通道起不来。");
+        }
+        final android.content.Context ctx = host != null ? host : appContext;
+        final CountDownLatch latch = new CountDownLatch(1);
+        final Throwable[] failed = new Throwable[1];
+        onMain(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    WebView wv = new WebView(ctx);
+                    WebSettings s = wv.getSettings();
+                    s.setJavaScriptEnabled(true);
+                    s.setBlockNetworkImage(false);
+                    s.setUserAgentString(UA_CHROME);
+                    s.setAllowFileAccess(false);
+                    s.setAllowContentAccess(false);
+                    wv.setWebViewClient(new WebViewClient());
+                    Activity host = hostRef.get();
+                    if (host != null) {
+                        ViewGroup decor = (ViewGroup) host.getWindow().getDecorView();
+                        wv.setVisibility(View.GONE);
+                        decor.addView(wv, new FrameLayout.LayoutParams(1, 1));
+                    }
+                    applyProxy(wv);
+                    imageView = wv;
+                } catch (Throwable e) {
+                    failed[0] = e;
+                } finally {
+                    latch.countDown();
+                }
+            }
+        });
+        latch.await(8, TimeUnit.SECONDS);
+        if (failed[0] != null) throw new IOException("图片通道起不来：" + failed[0]);
+        if (imageView == null) throw new IOException("图片通道起不来（没建出 WebView）");
+    }
+
+    /**
+     * 代理从「没有」变成「有」之后，把 ProxyController 重挂一次。
+     *
+     * <p>2026-10-19 真机：冷启动时代理核心还没就绪（{@code [core] 核心就绪} 比
+     * WebView 第一次加载晚 300ms），那次 {@code applyProxy} 判定成「直连」，
+     * 而它只在建 WebView 的时候跑一次 —— 于是整个进程生命周期里这个 WebView
+     * 都在直连，missav 直连是 {@code ERR_CONNECTION_TIMED_OUT}，过盾永远超时。
+     */
+    private void reapplyProxyIfChanged() {
+        // 比的是「当前实际生效的代理」，不是 proxyHint —— 后者只有 :spider 进程会设，
+        // 主进程拿不到。2026-10-19 真机：主进程的 WebView 在代理核心起来之前就建好了，
+        // applyProxy 判定成直连，之后再也不重挂，missav 直连 ERR_CONNECTION_TIMED_OUT。
+        String want;
+        try {
+            java.net.Proxy proxy = AiiHttp.effectiveJavaProxy();
+            want = (proxy == null || proxy == java.net.Proxy.NO_PROXY)
+                    ? "direct" : String.valueOf(proxy.address());
+        } catch (Throwable e) {
+            return;
+        }
+        if (want.equals(appliedProxyHint)) return;
+        final WebView wv = webView;
+        if (wv == null) return;
+        appliedProxyHint = want;
+        onMain(new Runnable() {
+            @Override
+            public void run() {
+                applyProxy(wv);
+            }
+        });
+    }
+
+    /** 已经挂到 ProxyController 上的那份 hint。空串 = 没挂过（或挂的是直连）。 */
+    private volatile String appliedProxyHint = "";
+
+    /** 把主进程递过来的 cookie 写进本进程的 CookieManager（每个进程只写一次）。 */
+    private static void applyCookieHint() {
+        final String raw = cookieHint;
+        if (cookieApplied || raw == null || raw.length() == 0) return;
+        try {
+            android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
+            cm.setAcceptCookie(true);
+            String declared = ShieldProfile.cookieOrigin();
+            String origin = declared.length() > 0
+                    ? declared
+                    : ("https://" + hostOf(ShieldProfile.warmup()));
+            for (String part : raw.split(";")) {
+                String item = part.trim();
+                if (item.length() == 0 || item.indexOf('=') <= 0) continue;
+                cm.setCookie(origin, item + "; path=/");
+            }
+            cm.flush();
+            cookieApplied = true;
+            log("已注入主进程 cookie：" + origin);
+        } catch (Throwable e) {
+            log("cookie 注入失败：" + e);
+        }
+    }
+
+    /**
+     * 主进程侧：确保自己过完盾，然后把 cookie 交给要跨进程的那一次调用。
+     *
+     * <p>首次会阻塞 1~2 秒（主进程有 window，实测 1.3 秒过盾）；之后直接返回。
+     * 拿不到就返回空串，子进程退回自己过盾（慢，但不会因此失败）。
+     */
+    static String cookieSnapshot() {
+        try {
+            SiteFetchWebView wv = get();
+            MainActivity host = MainActivity.host;
+            if (host != null) wv.bindHost(host);
+            wv.ensureWarm();
+            String declared = ShieldProfile.cookieOrigin();
+            String target = declared.length() > 0 ? declared : ShieldProfile.warmup();
+            if (target.length() == 0) return "";
+            String raw = android.webkit.CookieManager.getInstance().getCookie(target);
+            return raw == null ? "" : raw;
+        } catch (Throwable e) {
+            log("取 cookie 快照失败：" + e);
+            return "";
+        }
+    }
 
     /** 真正销毁。**必须在主线程上**。 */
     private void destroyNow() {
@@ -907,6 +1655,14 @@ final class SiteFetchWebView {
                 ((ViewGroup) holder.getParent()).removeView(holder);
             }
             holder = null;
+            if (imageView != null) {
+                imageView.stopLoading();
+                imageView.loadUrl("about:blank");
+                android.view.ViewParent p = imageView.getParent();
+                if (p instanceof ViewGroup) ((ViewGroup) p).removeView(imageView);
+                imageView.destroy();
+                imageView = null;
+            }
             passed = false;
         } catch (Throwable ignored) {
             // 销毁路径上什么都别做：抛出去只会打断 Activity 的销毁流程。
@@ -948,9 +1704,12 @@ final class SiteFetchWebView {
     /** Cloudflare 挑战页的特征，命中任意一个就算挑战页。 */
     static boolean looksLikeChallenge(String html) {
         if (html == null) return false;
+        // 2026-10-19 真机踩到：原来这里还认 "challenges.cloudflare.com"，
+        // 而**正常页面自己就会引用挑战脚本**（Turnstile / 站点后台的机器人校验），
+        // 于是真实的列表页被判成挑战页，日志里冒出「站点那边重新要了一次访问验证」，
+        // 内容却明明抓到了（title/innerText="4|113"）。
+        // 现在只认挑战页独有的东西：那句标题，和挑战页才有的 _cf_chl_opt。
         return html.contains("Just a moment")
-                || html.contains("challenges.cloudflare.com")
-                || html.contains("cf-browser-verification")
                 || html.contains("_cf_chl_opt");
     }
 
@@ -972,15 +1731,13 @@ final class SiteFetchWebView {
 
     // ── 站点侧要过盾的域名 ────────────────────────────────────────────
 
-    /** 要过盾的域名：站点本身，以及它的视频 CDN。 */
-    private static final String[] SHIELDED_HOSTS = { "missav.live", "surrit.com" };
-
+    /**
+     * 要过盾的域名来自源配置的 {@code web.shield.hosts}。
+     *
+     * <p>这里原来是 {@code {"missav.live", "surrit.com"}} 两行硬编码 ——
+     * 壳知道某个源的站点域和视频 CDN，换源就得改 Java。
+     */
     static boolean isShielded(String url) {
-        String host = hostOf(url);
-        if (host.length() == 0) return false;
-        for (int i = 0; i < SHIELDED_HOSTS.length; i++) {
-            if (host.equals(SHIELDED_HOSTS[i]) || host.endsWith("." + SHIELDED_HOSTS[i])) return true;
-        }
-        return false;
+        return ShieldProfile.isShielded(url);
     }
 }

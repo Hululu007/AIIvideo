@@ -433,7 +433,15 @@ final class SpiderRuntime {
                 // 要重试也是上层（界面 + 退避）该管的事，不是在这里原地重打。
                 raw = null;   // 失败时保持 null，下面的兜底靠它判断
                 Exception httpFailure = null;
-                try {
+                // 盾后站点不再先试 okhttp。
+                //
+                // 2026-10-19 真机：missav.live 的每个请求都要先撞一次 okhttp，
+                // 而 okhttp 永远过不去（HTTP 103 / 403），要等满 NET_TIMEOUT_S
+                // 的 15 秒才轮到 WebView —— 首页一次、详情一次、播放一次，
+                // 光这一层就吃掉 45 秒，看门狗直接判超时。
+                // 域名表是确定的（isShielded），没有任何理由先撞那 15 秒。
+                final boolean shieldedEarly = SiteFetchWebView.isShielded(url);
+                if (!shieldedEarly) try {
                     if (cookieJar != null && prof != null) {
                         raw = AiiHttp.getRaw(url, headers, NET_TIMEOUT_S, prof, cookieJar);
                     } else if (cookieJar != null) {
@@ -465,7 +473,7 @@ final class SpiderRuntime {
                 // 判据用域名表（isShielded）而不是"看响应像不像挑战页"：
                 // net 对非 2xx 直接抛异常、拿不到正文（见契约 §三），所以这里
                 // 根本看不见那个挑战页。域名是此刻唯一能拿到的信号。
-                if (raw == null && SiteFetchWebView.isShielded(url)) {
+                if (raw == null && shieldedEarly) {
                     android.util.Log.i("HG.Spider", "op=net 命中盾后站点，改走真 WebView：" + host);
                     try {
                         String html = SiteFetchWebView.fetchPage(url);

@@ -77,6 +77,10 @@ public class SpiderService extends Service {
                 AiiHttp.applyProcessProxyOverride(
                         req.optString("proxyMode", ""),
                         req.optString("effectiveProxy", ""));
+                // 过盾那个 WebView 要跟着走同一条代理，但它拿不到主进程的 ProxyCore。
+                SiteFetchWebView.setProxyHint(req.optString("effectiveProxy", ""));
+                // 主进程过好的盾搬进来（见 SiteFetchWebView.cookieHint 的注释）。
+                SiteFetchWebView.setCookieHint(req.optString("cookieHint", ""));
                 final JSONObject payload = SpiderRuntime.call(
                         getApplicationContext(),
                         req.optString("source", ""),

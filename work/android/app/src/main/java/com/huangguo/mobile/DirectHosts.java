@@ -84,6 +84,17 @@ final class DirectHosts {
             { "feifei-play.com","樱花 线路 ffzy 的镜像" },
         };
         for (String[] row : yhdmCdn) HOSTS.put(row[0], row[1]);
+
+        // ── Cloudflare 挑战平台（基础设施，不属于任何源） ──────────────
+        //
+        // 2026-10-19 真机：过盾时这个域走代理拿到 {@code net::ERR_FAILED}，
+        // 挑战脚本根本没跑起来，页面就一直转（日志里是
+        // {@code 加载失败 https://challenges.cloudflare.com/...}）。同址直连 200。
+        //
+        // 它是「所有盾后站点」共用的挑战运行时，不是某个源的私事 —— 所以放在
+        // 这张全局直连表里，而不是收进源的 web.shield（那边收的是**这个源**
+        // 的站点域/图床/CDN，这两笔别混在一起）。
+        HOSTS.put("challenges.cloudflare.com", "Cloudflare 挑战运行时（走代理 ERR_FAILED）");
     }
 
     /**

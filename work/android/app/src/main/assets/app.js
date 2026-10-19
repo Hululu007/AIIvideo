@@ -389,7 +389,7 @@ async function spiderApi(action, args) {
   let payload;
   try {
     payload = await bridgeCall('spider', {
-      op: 'call', id, cap, args: spiderArgs, timeoutMs: 45000
+      op: 'call', id, cap, args: spiderArgs, timeoutMs: 90000
     });
   } catch (error) {
     throw spiderErrorOf(action, error);
@@ -1195,7 +1195,7 @@ async function reconcileCards(items, onPatched) {
     if (info.caps.length && info.caps.indexOf('reconcile') < 0) return;
     try {
       const payload = await bridgeCall('spider', {
-        op: 'call', id: spiderId, cap: 'reconcile', args: { ids: missing }, timeoutMs: 45000
+        op: 'call', id: spiderId, cap: 'reconcile', args: { ids: missing }, timeoutMs: 90000
       });
       fixed = asArray(payload && payload.items);
     } catch (error) {

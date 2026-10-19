@@ -410,13 +410,13 @@ document.addEventListener('click', async event => {
   toast(label + ' · 正在跑 home…', true);
   const t0 = Date.now();
   try {
-    const home = await bridgeCall('spider', { op: 'call', id, cap: 'home', timeoutMs: 45000 });
+    const home = await bridgeCall('spider', { op: 'call', id, cap: 'home', timeoutMs: 90000 });
     const cards = asArray(home?.items);
     if (!cards.length) throw new Error('home 没有返回卡片');
     const ref = String(cards[0].id || '');
     toast(label + ' · ' + cards.length + ' 张卡 · 取详情…', true);
 
-    const detail = await bridgeCall('spider', { op: 'call', id, cap: 'detail', args: { ref }, timeoutMs: 45000 });
+    const detail = await bridgeCall('spider', { op: 'call', id, cap: 'detail', args: { ref }, timeoutMs: 90000 });
     const eps = asArray(detail?.episodes);
     const lines = asArray(detail?.lines);
     if (!eps.length) throw new Error('detail 没有返回剧集');
@@ -425,7 +425,7 @@ document.addEventListener('click', async event => {
     const line = first.line || (lines[0] && lines[0].line) || 'default';
     toast(label + ' · ' + eps.length + ' 集 · 取播放地址…', true);
     const play = await bridgeCall('spider', {
-      op: 'call', id, cap: 'play', args: { ref, line }, timeoutMs: 45000
+      op: 'call', id, cap: 'play', args: { ref, line }, timeoutMs: 90000
     });
     const url = String(play?.url || '');
     if (!url) throw new Error('play 没有返回地址');

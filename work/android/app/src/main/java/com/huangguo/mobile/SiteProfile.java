@@ -101,6 +101,9 @@ final class SiteProfile {
         // 换个源或换个播放线路就得改 Java。现在由源自己声明（http.hosts），
         // 位置就在路由旁边 —— 两个都是「这个源能碰哪些域名」，读一处就够。
         PlaybackHttpBridge.configure(jSONObjectMerge.optJSONObject("http"));
+        // 过盾这件事也跟源走（web.shield）。装在这里的理由和上面两条一样：
+        // 这是全 App 唯一一处「当前源长什么样」的组装点，散到各调用方去装必然漂。
+        ShieldProfile.install(ShieldProfile.parse(jSONObjectMerge));
         this.fingerprint = hex(MessageDigest.getInstance("SHA-256").digest(this.rules.toString().getBytes(StandardCharsets.UTF_8)));
     }
 

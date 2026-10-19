@@ -124,13 +124,23 @@
       image.dataset.loading = '1';
       const poster = image.closest('.poster');
       try {
-        let data;
+        let data = '';
         try { data = await get(url); }
         catch {
           await new Promise(resolve => setTimeout(resolve, 450));
           try { data = await get(url); }
-          // 再失败就抛给外层 catch 走占位字，别把密文当图片塞进 src 白跑一次网络。
-          catch { throw new Error('封面解密失败'); }
+          catch { data = ''; }
+        }
+        // 取字节失败时，最后一条路是把原址直接交给 <img>。
+        //
+        // <img> 不是 XHR，加载图片不受 CORS 约束 —— MissAV 的封面域 fourhoi.com
+        // 只有这条路能通：Java 侧 okhttp 取它会被拦，WebView 里 fetch 它必炸
+        // TypeError: Failed to fetch（跨源没有 ACAO 头），但图片加载器照样能画出图。
+        // 对密文源（封面是 AES 密文的那种）它只会解码失败回到占位字，
+        // 和原来「抛出去走占位」的结果一样，所以这条兜底不会让老源变差。
+        if (!data) {
+          if (!/^https?:\/\//i.test(url)) throw new Error('封面解密失败');
+          data = url;
         }
         if (!image.isConnected || image.dataset.cover !== url) return;
         await new Promise((resolve, reject) => {
