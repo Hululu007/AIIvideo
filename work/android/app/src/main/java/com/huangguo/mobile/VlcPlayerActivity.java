@@ -146,6 +146,60 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
      */
     private final VlcSession session = new VlcSession();
 
+    /**
+     * 每个 player 当前挂在哪块 TextureView 上。
+     *
+     * 用来做 attachVout 的幂等：每次 detachViews + attachViews 都会让 VLC 重建
+     * 整条视频输出链（vout 线程、窗口、首个关键帧），几百毫秒里画面是黑的，而
+     * 音频输出早就起来了 —— 用户听到声音、屏幕全黑，滑回上一集时最明显。
+     * 同一块 view 已经挂着就只更新窗口尺寸，不拆不挂。
+     */
+    private final java.util.IdentityHashMap<MediaPlayer, android.view.TextureView> attachedTo =
+            new java.util.IdentityHashMap<MediaPlayer, android.view.TextureView>();
+
+    /**
+     * 换页后等第一帧再放声音。
+     *
+     * 音频输出起来得比视频输出早：play() 一提交，aout 几十毫秒就能出声，而 vout
+     * 要建窗口、解出第一个关键帧，几百毫秒到一秒不等。这段时间用户听到新一集的
+     * 声音，屏幕上却是黑的 —— 滑回上一集时最明显。所以换页时先把音量压到 0，
+     * 等 VLC 报 Vout（视频输出就绪）再抬回来；万一没有 Vout（纯音频流），
+     * {@link #unmuteRunnable} 那个兜底定时器也会把声音放出来。
+     */
+    private boolean awaitingFirstFrame;
+    private final Runnable unmuteRunnable = new Runnable() {
+        @Override public void run() { unmute(); }
+    };
+
+    /**
+     * 相邻页预热。
+     *
+     * 两页固定落在不同的 player 上（奇偶绑定），所以「另一个槽位」正好空着 ——
+     * 把它拿去把用户最可能滑到的那一页先起播、静音、停在第一帧上。滑过去时
+     * 只需要 play()，demuxer 和第一帧都现成，翻页基本是即时的。
+     *
+     * 只预一条，按滑动方向挑：上下两个邻居奇偶相同，抢的是同一个槽位，
+     * 同时预两条就得塞第三个 player，多一份硬解实例 —— 不值得。
+     *
+     * warmPos/warmUrl 是「已就绪」的账，warmingPos 是「正在等第一帧」。
+     * 只有 Vout 事件真的来了才算就绪：没就绪就滑过去，仍然走完整重开，
+     * 不能让 playPage 误以为手上有一条暖着的流。
+     */
+    private int warmDirection = 1;   // +1 下一集，-1 上一集
+    private int warmPos = -1;
+    private String warmUrl = "";
+    private int warmingPos = -1;
+    /** 防抖：等当前这一页的硬解实例建好再去抢第二份，见 prewarmNeighbor。 */
+    private int prewarmPending = -1;
+    private final Runnable prewarmRunnable = new Runnable() {
+        @Override public void run() {
+            int pos = prewarmPending;
+            prewarmPending = -1;
+            if (pos >= 0) prewarmNeighborNow(pos);
+        }
+    };
+
+
     /** 没有备选线路时的空表，省得每处都判 null。 */
     private static final String[] NO_ALTS = new String[0];
 
@@ -483,20 +537,43 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         // 只恢复「是被后台打断的播放」。用户自己按暂停退出去，回来还该是暂停。
         if (feedMode && session.wasPlaying()) {
             session.setWasPlaying(false);
-            MediaPlayer mp = activeFeedPlayer;
-            if (mp != null) {
-                try { mp.play(); } catch (Throwable ignored) {}
-                // 后台期间 TextureView 的 buffer 可能被系统回收了，回来重挂一次
-                // 才是画面，不然是有声音的黑屏。
-                ui.postDelayed(new Runnable() {
-                    @Override public void run() { attachVout(curPos, true); }
-                }, 150);
-            }
+            resumeFeedAfterBackground();
         }
+    }
+
+    /**
+     * 从后台回来接着放。
+     *
+     * 和起播同一个顺序问题：后台期间 TextureView 的 buffer 基本都被系统回收了，
+     * 回来时 surface 要重建。先 play() 的话音频立刻响，画面要等 surface 恢复、
+     * vout 重挂、第一个关键帧解出来 —— 又是有声黑屏。
+     *
+     * 所以先挂 surface 再出声，并且静音起播，等画面真的有了再抬音量。
+     *
+     * 兜底只给 600ms，不像起播那样给 3 秒：从后台回来时数据本来就在缓冲区里，
+     * 只要 vout 挂上，一两百毫秒就有帧了。VLC 也可能认得出是同一条流、不重发
+     * Vout 事件，那时候靠这个短定时器兜住，不能让用户干等。
+     */
+    private void resumeFeedAfterBackground() {
+        final MediaPlayer mp = activeFeedPlayer;
+        if (mp == null) return;
+        // surface 还在的话这一下就够；不在了就等 onSurfaceTextureAvailable 那边补挂。
+        attachVout(curPos, true);
+        awaitingFirstFrame = true;
+        ui.removeCallbacks(unmuteRunnable);
+        ui.postDelayed(unmuteRunnable, 600);
+        try { mp.setVolume(0); } catch (Throwable ignored) {}
+        try { if (!mp.isPlaying()) mp.play(); } catch (Throwable ignored) {}
+        // 刚回到前台时 View 可能还没量好（窗口尺寸是 0），等布局落定再挂一次。
+        ui.postDelayed(new Runnable() {
+            @Override public void run() { attachVout(curPos, true); }
+        }, 150);
     }
 
     /** 两个 player 全静下来；记录「退后台前是不是在播」。 */
     private void pauseFeedForBackground() {
+        ui.removeCallbacks(prewarmRunnable);
+        prewarmPending = -1;
         MediaPlayer[] all = { playerA, playerB };
         for (int i = 0; i < all.length; i++) {
             MediaPlayer mp = all[i];
@@ -581,6 +658,12 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     }
 
     @Override public void onBackPressed() {
+        // 锁着的时候返回键不退出 —— 误触锁的一大半用途就是防这个。
+        if (locked) {
+            controls.showHint("已锁定 · 点左边的小锁解锁");
+            controls.hideHintAfter(1500, ui);
+            return;
+        }
         if (feedMode) persistFeedProgress();
         else persist(ended);
         super.onBackPressed();
@@ -642,6 +725,32 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         @Override public void onScrubStart() { ui.removeCallbacks(hideControls); }
         @Override public void onScrubEnd() { ui.postDelayed(hideControls, HIDE_CONTROLS_MS); }
         @Override public int durationMs() { return (int) durationMs; }
+        @Override public void onLockToggle() { setLocked(!locked); }
+    }
+
+    /**
+     * 防误触锁。
+     *
+     * 锁上之后：单击不再出控制栏（只提示怎么解）、横划不再拖进度、竖划不再切集、
+     * 系统返回键也不退出。屏幕上只留左边缘那个锁，点它才解开。
+     *
+     * 为什么不只藏控件：藏了控件，手势还在 —— 兜里蹭一下照样跳进度、切到下一集，
+     * 这才是用户真正被咬到的地方。
+     */
+    private boolean locked;
+
+    private void setLocked(boolean value) {
+        if (locked == value) return;
+        locked = value;
+        controls.setLocked(value);
+        ui.removeCallbacks(hideControls);
+        if (value) {
+            controls.showHint("已锁定 · 点左边的小锁解锁");
+        } else {
+            controls.showHint("已解锁");
+            setControlsVisible(true);
+        }
+        controls.hideHintAfter(1800, ui);
     }
 
     private void buildUi() {
@@ -667,10 +776,19 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
                 @Override public void run() { pager.scrollToPosition(curPos); }
             });
             pager.addOnScrollListener(new RecyclerView.OnScrollListener() {
+                @Override public void onScrolled(RecyclerView rv, int dx, int dy) {
+                    // dy>0 = 手指往上推 = 看下一集；dy<0 = 回上一集。
+                    // 有的 ROM 翻页只报一次小位移，所以谁非零就记谁。
+                    if (dy > 0) warmDirection = 1;
+                    else if (dy < 0) warmDirection = -1;
+                }
+
                 @Override public void onScrollStateChanged(RecyclerView rv, int newState) {
                     if (newState == RecyclerView.SCROLL_STATE_IDLE) {
                         int pos = centeredPosition();
                         if (pos >= 0 && pos != curPos) activate(pos);
+                        // 停在原地但换过方向（推了一半又回弹），也要把预热的目标换掉。
+                        else if (pos >= 0) prewarmNeighbor(pos);
                     }
                 }
             });
@@ -680,6 +798,22 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
                 private boolean seekMode;
 
                 @Override public boolean onInterceptTouchEvent(RecyclerView rv, MotionEvent e) {
+                    if (locked) {
+                        // 全吃掉：翻页、横划拖进度、单击出控件都不该发生。
+                        // 只留一句提示告诉用户怎么解开。
+                        if (e.getActionMasked() == MotionEvent.ACTION_UP) {
+                            float dx = e.getX() - downX, dy = e.getY() - downY;
+                            if (Math.abs(dx) < dp(TOUCH_SLOP_DP) && Math.abs(dy) < dp(TOUCH_SLOP_DP)) {
+                                controls.showHint("已锁定 · 点左边的小锁解锁");
+                                controls.hideHintAfter(1500, ui);
+                            }
+                        }
+                        if (e.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                            downX = e.getX(); downY = e.getY(); downAt = System.currentTimeMillis();
+                            seekMode = false;
+                        }
+                        return true;
+                    }
                     if (e.getActionMasked() == MotionEvent.ACTION_DOWN) {
                         downX = e.getX(); downY = e.getY(); downAt = System.currentTimeMillis();
                         seekMode = false;
@@ -706,6 +840,18 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
                 }
 
                 @Override public void onTouchEvent(RecyclerView rv, MotionEvent e) {
+                    if (locked) {
+                        // 锁定时 DOWN 已经被 intercept 吃掉，后续的 MOVE/UP 走到这里。
+                        // 提示只能在这儿给 —— 拦到 intercept 之后不会再回调它。
+                        if (e.getActionMasked() == MotionEvent.ACTION_UP) {
+                            float dx = e.getX() - downX, dy = e.getY() - downY;
+                            if (Math.abs(dx) < dp(TOUCH_SLOP_DP) && Math.abs(dy) < dp(TOUCH_SLOP_DP)) {
+                                controls.showHint("已锁定 · 点左边的小锁解锁");
+                                controls.hideHintAfter(1500, ui);
+                            }
+                        }
+                        return;
+                    }
                     if (e.getActionMasked() == MotionEvent.ACTION_MOVE && seekMode) {
                         float dx = e.getX() - downX;
                         long target = feedTimeOf(curPos) + (long) (dx / Math.max(1, rv.getWidth()) * SEEK_SPAN_MS);
@@ -767,6 +913,20 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     private int downVolume, maxVolume;
 
     private boolean onRootTouch(MotionEvent event) {
+        if (locked) {
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                downX = event.getX(); downY = event.getY(); downAt = System.currentTimeMillis();
+                gesture = 0;
+            } else if (event.getActionMasked() == MotionEvent.ACTION_UP) {
+                float dx = event.getX() - downX, dy = event.getY() - downY;
+                if (Math.abs(dx) < dp(TOUCH_SLOP_DP) && Math.abs(dy) < dp(TOUCH_SLOP_DP)
+                        && System.currentTimeMillis() - downAt < 300) {
+                    controls.showHint("已锁定 · 点左边的小锁解锁");
+                    controls.hideHintAfter(1500, ui);
+                }
+            }
+            return true;
+        }
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 downX = event.getX(); downY = event.getY(); downAt = System.currentTimeMillis();
@@ -968,6 +1128,9 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             controls.setPlayIcon(VlcControlsView.IconButton.PLAY);
             setControlsVisible(true);
             persist(true);
+        } else if (type == MediaPlayer.Event.Vout) {
+            // 视频输出就绪：这才是「画面能出来了」的时刻，把声音放开。
+            unmute();
         } else if (type == MediaPlayer.Event.EncounteredError) {
             showError("这个地址内置播放器也解不了。可能地址过期了，回上一页重新取一次。");
         }
@@ -1066,6 +1229,38 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             session.clearPlayingUrl(mp);
             if (mp == playerA) pageA = pos; else pageB = pos;
         }
+        // 预热已经就绪的那一页：demuxer、硬解、第一帧都在手上，play() 就能出画。
+        // 这条必须排在幂等分支前面 —— 幂等分支是「暂停过的地方接着放」，
+        // 预热是「从一开始放」，位置和音量都不一样。
+        PageView warmPage = feedAdapter == null ? null : feedAdapter.pageAt(pos);
+        boolean warmSurfaceOk = warmPage != null && warmPage.surfaceReady;
+        if (pos == warmPos && pageOf(mp) == pos && url.equals(warmUrl) && warmSurfaceOk) {
+            try {
+                long resume = resumeOf(pos);
+                if (resume > 2000 && mp.getTime() < resume - 500) mp.setTime(resume);
+                if (!mp.isPlaying()) mp.play();
+                mp.setVolume(100);
+            } catch (Throwable ignored) {}
+            awaitingFirstFrame = false;
+            warmPos = -1;
+            warmUrl = "";
+            if (Math.abs(feedRate - 1f) > 0.01f) {
+                try { mp.setRate(feedRate); } catch (Throwable ignored) {}
+            }
+            attachVout(pos, true);
+            activeFeedPlayer = mp;
+            MediaPlayer otherWarm = (mp == playerA) ? playerB : playerA;
+            try { if (otherWarm.isPlaying()) otherWarm.pause(); } catch (Throwable ignored) {}
+            controls.setSpinnerVisible(false);
+            setControlsVisible(false);
+            updateEpisodeUi();
+            return;
+        }
+        if (pos == warmPos && !warmSurfaceOk) {
+            // 暖着的那一页的 TextureView 已经被回收了，暖的那份用不上。
+            warmPos = -1;
+            warmUrl = "";
+        }
         // 幂等：这一页就挂在这个 player 上、地址也没变。滑走又滑回来走这条。
         if (pos == claimed && url.equals(session.playingUrlOf(mp))) {
             try {
@@ -1089,20 +1284,33 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         String agent = payload.optString("ua", "");
         if (referer.length() > 0) media.addOption(":http-referrer=" + referer);
         if (agent.length() > 0) media.addOption(":http-user-agent=" + agent);
+        // 先接 surface 再起播。反过来的话 play() 一提交，音频输出立刻起来，
+        // 而视频输出还在等 attach —— 声音先到、画面后到，中间那段就是黑屏。
+        // 单集模式那条路（startVlc）一直是先 attach 再 play，这里对齐。
+        attachVout(pos, true);
         mp.setMedia(media);
         media.release();
         session.setPlayingUrl(mp, url);
         long resume = resumeOf(pos);
+        // 先静音起播，等第一帧（Vout 事件）再把声音抬起来 —— 见 awaitingFirstFrame。
+        mp.setVolume(0);
+        awaitingFirstFrame = true;
+        ui.removeCallbacks(unmuteRunnable);
+        // 兜底给到 3 秒：--network-caching 是 1500ms，首帧常常 1.5~2 秒才来，
+        // 1.5 秒就抬音量等于没等。
+        ui.postDelayed(unmuteRunnable, 3000);
         mp.play();
         if (resume > 2000) mp.setTime(resume);
-        mp.setVolume(100);
         if (Math.abs(feedRate - 1f) > 0.01f) mp.setRate(feedRate);
+        // 兜底：setMedia 之后 VLC 有可能重建 vout，而页面此时可能才布局完。
         attachVout(pos, true);
         activeFeedPlayer = mp;
         // 另一个若在响，静下来（它认领着别的页，回滑时从原地继续）
         MediaPlayer other = (mp == playerA) ? playerB : playerA;
         try { if (other.isPlaying()) other.pause(); } catch (Throwable ignored) {}
-        controls.setSpinnerVisible(false);
+        // 转圈留到真正出帧（Playing 事件）再撤。play() 一回来就撤掉的话，
+        // 用户看到的是一块黑屏，而不是「正在加载」。
+        controls.setSpinnerVisible(true);
         setControlsVisible(false);
         updateEpisodeUi();
     }
@@ -1125,12 +1333,30 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         if (pv == null || !pv.surfaceReady) return;
         try {
             IVLCVout vout = mp.getVLCVout();
+            // 幂等：同一块 TextureView 上已经挂着，就别再拆一次。
+            boolean sameView = attachedTo.get(mp) == pv.texture;
+            if (sameView && vout.areViewsAttached()) {
+                setWindowSizeFor(mp, pv.getWidth(), pv.getHeight());
+                return;
+            }
             if (force) {
                 try { vout.detachViews(); } catch (Throwable ignored) {}
+                attachedTo.remove(mp);
             }
             vout.setVideoView(pv.texture);
             if (!vout.areViewsAttached()) vout.attachViews();
+            attachedTo.put(mp, pv.texture);
             setWindowSizeFor(mp, pv.getWidth(), pv.getHeight());
+        } catch (Throwable ignored) {}
+    }
+
+    /** 画面就绪了（或被兜底定时器叫醒）：把音量抬回正常。 */
+    private void unmute() {
+        ui.removeCallbacks(unmuteRunnable);
+        if (!awaitingFirstFrame) return;
+        awaitingFirstFrame = false;
+        try {
+            if (activeFeedPlayer != null) activeFeedPlayer.setVolume(100);
         } catch (Throwable ignored) {}
     }
 
@@ -1152,6 +1378,8 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         curPos = pos;
         updateEpisodeUi();
         persistFeedProgress();
+        ui.removeCallbacks(prewarmRunnable);
+        prewarmPending = -1;
         // 滑走就闭嘴：上一集的声音不能跟着新的一页继续响。地址还没到之前
         // 屏幕上什么都没有，声音却还是上一集 —— 用户只会当成卡死。
         silenceOthers(pos);
@@ -1166,6 +1394,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         if (url != null) {
             playPage(pos, url);
             preloadAround(pos);
+            prewarmNeighbor(pos);
             return;
         }
         // 失败过的页不拉黑名单：AGE 那条 wasm 线路要十几秒，网络抖一下就失败，
@@ -1195,10 +1424,118 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
                             playPage(target, url);
                             preloadAround(target);
                         }
+                        prewarmNeighbor(curPos);
                     }
                 });
             }
         }).start();
+    }
+
+    /**
+     * 把用户最可能滑到的那一页先起播、静音、停在第一帧上。
+     *
+     * 两个 player 按奇偶绑定，所以「另一个槽位」天然空着，不用第三个 player。
+     * 代价是不能同时预两个邻居 —— 它们在同一个槽位上，谁后跑谁把谁挤掉。
+     * 那就按滑动方向猜：手指往上推就预下一集，往下拉就预上一集，跟用户走。
+     *
+     * 只有 Vout 事件真的来了才算预热完成（见 onWarmReady）。没完成就滑过去，
+     * playPage 会照旧走完整重开 —— 不能拿一条没出过画的黑流当暖的。
+     */
+    private void prewarmNeighbor(int pos) {
+        if (!feedMode) return;
+        prewarmPending = pos;
+        ui.removeCallbacks(prewarmRunnable);
+        // 等 900ms 再动手：刚切过来的那一页正在建硬解实例，这时候再去抢一份，
+        // 有的机器只给两份硬件解码器，会把当前这一页挤掉（表现是刚出的画面又黑了）。
+        ui.postDelayed(prewarmRunnable, 900);
+    }
+
+    private void prewarmNeighborNow(int pos) {
+        if (!feedMode) return;
+        final int target = pos + warmDirection;
+        if (target < 0 || target >= eps.length) return;
+        // 已经暖着/正在暖的同一页不重复折腾。
+        if (target == warmingPos) return;
+        String url = session.urlOf(target);
+        // 地址还没取回来（preload 还在排队）。等它回来会再叫一次这个方法。
+        if (url == null || url.length() == 0) return;
+        if (target == warmPos && url.equals(warmUrl)) return;
+        MediaPlayer mp = slotFor(target);
+        if (mp == null || mp == activeFeedPlayer) return;
+        // 这个槽位本来就停在目标页上（刚从那儿滑过来、被 pause 了）—— 它比新起
+        // 一条更暖：解复用、缓冲、连最后一帧都还在。别再 restart 一遍，那样反而
+        // 把进度和缓冲全扔掉，来回滑一下就要重开两次。
+        if (pageOf(mp) == target && url.equals(session.playingUrlOf(mp))) {
+            warmingPos = -1;
+            warmPos = target;
+            warmUrl = url;
+            return;
+        }
+        PageView pv = feedAdapter == null ? null : feedAdapter.pageAt(target);
+        // 没有可用的 TextureView 就挂不上 vout，起播只会得到一个浮空窗口。
+        if (pv == null || !pv.surfaceReady) return;
+
+        // 这个槽位可能还认领着同奇偶的旧页（隔了两页以上），停掉换人。
+        try { mp.stop(); } catch (Throwable ignored) {}
+        try { mp.getVLCVout().detachViews(); } catch (Throwable ignored) {}
+        attachedTo.remove(mp);
+        session.clearPlayingUrl(mp);
+        warmPos = -1;
+        warmUrl = "";
+        if (mp == playerA) pageA = target; else pageB = target;
+
+        Media media = new Media(libVLC, Uri.parse(relayUrl(url)));
+        media.setHWDecoderEnabled(hwDecode, false);
+        String referer = payload.optString("referer", "");
+        String agent = payload.optString("ua", "");
+        if (referer.length() > 0) media.addOption(":http-referrer=" + referer);
+        if (agent.length() > 0) media.addOption(":http-user-agent=" + agent);
+        mp.setMedia(media);
+        media.release();
+        session.setPlayingUrl(mp, url);
+        attachVout(target, true);
+        mp.setVolume(0);
+        warmingPos = target;
+        try {
+            mp.play();
+        } catch (Throwable e) {
+            warmingPos = -1;
+            return;
+        }
+        // 长时间等不到 Vout（线路慢、或者这条流就是没有视频轨）就把「正在预热」
+        // 的标记撤掉，别把这一页永久占住 —— 将来再滑到这儿还能重新试。
+        final int pending = target;
+        ui.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (warmingPos == pending) warmingPos = -1;
+            }
+        }, 6000);
+        android.util.Log.d("HG.Vlc", "预热第 " + eps[target] + " 集（方向 " + warmDirection + "）");
+    }
+
+    /**
+     * 预热出第一帧了：停在这一帧上，把声音继续压着。
+     *
+     * 停住而不是让它放，是为了不跟正在看的这一集抢解码和带宽；seek 到这一集
+     * 自己的续播点会让 VLC 在暂停态下把那一帧解出来 —— 正好就是滑过去要的第一帧。
+     */
+    private void onWarmReady(int pos) {
+        if (pos != warmingPos) return;
+        warmingPos = -1;
+        MediaPlayer mp = slotFor(pos);
+        if (mp == null || pageOf(mp) != pos) return;
+        try {
+            long resume = resumeOf(pos);
+            mp.setTime(resume > 2000 ? resume : 0);
+            mp.pause();
+            mp.setVolume(0);
+        } catch (Throwable ignored) {}
+        warmPos = pos;
+        String url = session.playingUrlOf(mp);
+        warmUrl = url == null ? "" : url;
+        PageView pv = feedAdapter == null ? null : feedAdapter.pageAt(pos);
+        if (pv != null) pv.spin.setVisibility(View.GONE);
+        android.util.Log.d("HG.Vlc", "预热就绪：第 " + eps[pos] + " 集");
     }
 
     /** 相邻两集的地址先要回来（只握手，不起播），滑动出去时基本是即时的。 */
@@ -1226,6 +1563,8 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
                                 playPage(pos, url);
                                 preloadAround(pos);
                             }
+                            // 预取回来的地址可能正好是用户要滑向的那一页，趁热接上。
+                            prewarmNeighbor(curPos);
                         } else if (pos == curPos) {
                             PageView pv = feedAdapter == null ? null : feedAdapter.pageAt(pos);
                             if (pv != null) {
@@ -1401,7 +1740,15 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     }
 
     private void handleFeedEvent(MediaPlayer mp, MediaPlayer.Event event) {
-        if (mp == null || mp != activeFeedPlayer) return;
+        if (mp == null) return;
+        // 预热中的那个 player 不是 activeFeedPlayer，但它报的 Vout 正是「画面
+        // 能出来了」的信号 —— 先在这儿收下，再交给正式播放那一套。
+        if (mp != activeFeedPlayer) {
+            // 只认 Vout。Playing 在 play() 之后立刻就来，那时一帧都还没解，
+            // 拿它当「画面就绪」等于把黑屏提前钉死。
+            if (event.type == MediaPlayer.Event.Vout) onWarmReady(pageOf(mp));
+            return;
+        }
         final int type = event.type;
         if (type == MediaPlayer.Event.LengthChanged) {
             durationMs = mp.getLength();
@@ -1416,6 +1763,9 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         } else if (type == MediaPlayer.Event.Playing) {
             PageView pv = feedAdapter != null ? feedAdapter.pageAt(curPos) : null;
             if (pv != null) pv.spin.setVisibility(View.GONE);
+            // 出帧了才撤转圈。playPage 里不再提前撤，否则等 vout 的那几百毫秒
+            // 是一块黑屏 —— 声音已经到了，画面还没到，看着像卡死。
+            controls.setSpinnerVisible(false);
             controls.setPlayIcon(VlcControlsView.IconButton.PAUSE);
             // 起播成功 → 换线游标归零。下一次报错还从第一条备选试起。
             session.resetAlt(curPos);
@@ -1435,7 +1785,11 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
                 controls.setPlayIcon(VlcControlsView.IconButton.PLAY);
                 setControlsVisible(true);
             }
+        } else if (type == MediaPlayer.Event.Vout) {
+            // 视频输出就绪：这才是「画面能出来了」的时刻，把声音放开。
+            unmute();
         } else if (type == MediaPlayer.Event.EncounteredError) {
+            controls.setSpinnerVisible(false);
             tryNextAlt();
         }
     }
@@ -1582,6 +1936,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             MediaPlayer mp = playerFor(pos);
             if (mp != null) {
                 try { mp.getVLCVout().detachViews(); } catch (Throwable ignored) {}
+                attachedTo.remove(mp);
             }
             return true;
         }

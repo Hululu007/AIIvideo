@@ -5,6 +5,7 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.RectF;
 import android.os.Build;
 import android.util.AttributeSet;
 import android.view.Gravity;
@@ -50,6 +51,8 @@ final class VlcControlsView {
         void onScrubStart();
         void onScrubEnd();
         int durationMs();
+        /** 用户点了锁。锁的状态归宿主，这里只管画。 */
+        void onLockToggle();
     }
 
     private final Activity activity;
@@ -59,6 +62,12 @@ final class VlcControlsView {
     LinearLayout topBar, bottomBar;
     TextView titleView, metaView, clockView, hintView, errorView;
     IconButton playButton;
+    IconButton lockButton;
+    /**
+     * 防误触锁。锁着的时候控制栏一律不出来，屏幕上只剩这一个锁 ——
+     * 口袋里的误触、手指乱划都不会改进度、切集、退出。
+     */
+    boolean locked;
     TextView speedButton;
     SeekBar seekBar;
     LinearLayout speedPanel;
@@ -126,6 +135,7 @@ final class VlcControlsView {
         buildTopBar(root, title);
         buildBottomBar(root);
         buildSpeedPanel(root);
+        buildLockButton(root);
 
         if (interactive && touch != null) root.setOnTouchListener(touch);
         setVisible(true);
@@ -249,6 +259,51 @@ final class VlcControlsView {
         });
     }
 
+    /**
+     * 锁。贴在左边缘、竖直居中 —— 大拇指够得到，又不挡画面中间。
+     *
+     * 只有它自己接收点击，别的控件在锁定时全被藏起来（见 setVisible），
+     * 所以解锁不会被别的东西挡住。
+     */
+    private void buildLockButton(FrameLayout root) {
+        lockButton = new IconButton(activity);
+        lockButton.setIcon(IconButton.UNLOCK);
+        lockButton.setContentDescription("锁定屏幕");
+        lockButton.setBackground(rounded(0x40000000, 22));
+        lockButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { host.onLockToggle(); }
+        });
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(44), dp(44),
+                Gravity.START | Gravity.CENTER_VERTICAL);
+        params.setMargins(dp(10), 0, 0, 0);
+        root.addView(lockButton, params);
+        lockButton.setVisibility(View.INVISIBLE);
+    }
+
+    /**
+     * 锁/解锁。
+     *
+     * 锁上时立刻收起上下两条栏，只留锁自己在屏上；解开时把控制栏叫回来
+     * （宿主的自动隐藏计时会接着收它）。图标跟着换：锁着画合上的锁，解开画
+     * 打开的半边 —— 一眼能看出现在能不能划。
+     */
+    void setLocked(boolean value) {
+        locked = value;
+        if (lockButton == null) return;
+        lockButton.setIcon(value ? IconButton.LOCK : IconButton.UNLOCK);
+        lockButton.setContentDescription(value ? "解锁屏幕" : "锁定屏幕");
+        if (value) {
+            animateBar(topBar, false);
+            animateBar(bottomBar, false);
+            if (topScrim != null) topScrim.animate().alpha(0f).setDuration(180).start();
+            if (bottomScrim != null) bottomScrim.animate().alpha(0f).setDuration(180).start();
+            hideSpeedPanel();
+            lockButton.setVisibility(View.VISIBLE);
+        } else {
+            setVisible(true);
+        }
+    }
+
     /** 倍速面板：挂在底栏上方靠右，点击选项即生效。 */
     private void buildSpeedPanel(FrameLayout root) {
         speedPanel = new LinearLayout(activity);
@@ -312,6 +367,17 @@ final class VlcControlsView {
     // ── 显隐 ──────────────────────────────────────────────────────────
 
     void setVisible(boolean visible) {
+        if (locked) {
+            // 锁着：任何「显示控制栏」的调用都不算数，屏幕上只留那个锁。
+            animateBar(topBar, false);
+            animateBar(bottomBar, false);
+            if (topScrim != null) topScrim.animate().alpha(0f).setDuration(180).start();
+            if (bottomScrim != null) bottomScrim.animate().alpha(0f).setDuration(180).start();
+            hideSpeedPanel();
+            if (lockButton != null) lockButton.setVisibility(View.VISIBLE);
+            return;
+        }
+        if (lockButton != null) lockButton.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
         animateBar(topBar, visible);
         animateBar(bottomBar, visible);
         // 渐变跟着走：它是给控件垫底的，控件收了它还挂着就是两道死黑带。
@@ -540,7 +606,7 @@ final class VlcControlsView {
      * 播放控制键：图标用 Canvas 画，不走字符 —— ⏪⏸ 那类字符在小米上是彩色 emoji。
      */
     static class IconButton extends View {
-        static final int PAUSE = 0, PLAY = 1, REW = 2, FWD = 3;
+        static final int PAUSE = 0, PLAY = 1, REW = 2, FWD = 3, LOCK = 4, UNLOCK = 5;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private int icon = PLAY;
 
@@ -564,6 +630,26 @@ final class VlcControlsView {
                 path.lineTo(cx - u * 1.2f, cy + u * 2f);
                 path.close();
                 canvas.drawPath(path, paint);
+            } else if (icon == LOCK || icon == UNLOCK) {
+                // 挂锁：锁体一个圆角方块，锁梁一段圆弧。UNLOCK 时锁梁向右上张开，
+                // 并且整体往左下挪一点，形状上直接和 LOCK 区分开。
+                float bodyW = u * 2.6f, bodyH = u * 2.1f;
+                float bx = cx - bodyW / 2f, by = cy - u * 0.1f;
+                RectF body = new RectF(bx, by, bx + bodyW, by + bodyH);
+                canvas.drawRoundRect(body, u * 0.5f, u * 0.5f, paint);
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(u * 0.55f);
+                RectF shackle;
+                if (icon == LOCK) {
+                    shackle = new RectF(cx - u * 1.05f, cy - u * 2.6f, cx + u * 1.05f, cy + u * 0.4f);
+                    canvas.drawArc(shackle, 180f, 180f, false, paint);
+                } else {
+                    // 左半边固定在锁体上，右半边往上掀开
+                    shackle = new RectF(cx - u * 0.35f, cy - u * 2.8f, cx + u * 1.75f, cy + u * 0.2f);
+                    canvas.drawArc(shackle, 200f, 150f, false, paint);
+                    canvas.drawLine(cx - u * 0.35f, cy - u * 1.3f, cx - u * 0.35f, cy, paint);
+                }
+                paint.setStyle(Paint.Style.FILL);
             } else {
                 boolean fwd = icon == FWD;
                 for (int i = 0; i < 2; i++) {
