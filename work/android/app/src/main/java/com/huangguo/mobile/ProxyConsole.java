@@ -39,6 +39,8 @@ final class ProxyConsole {
     private static final String CORE_MODE_KEY = "mode";
     private static final String CORE_LINK_KEY = "link";
     private static final String SUB_URL_KEY = "subUrl";
+    /** 用户点过「停止」。true 时切回 builtin 不自动拉起，等用户点「保存并启动」。 */
+    private static final String USER_STOPPED_KEY = "userStopped";
 
     static final String MODE_DIRECT = "direct";
     static final String MODE_BUILTIN = "builtin";
@@ -130,6 +132,15 @@ final class ProxyConsole {
     static void setProxyMode(Context context, String mode) {
         proxyStore(context).edit().putString(CORE_MODE_KEY, mode).apply();
     }
+
+    /** 用户是否主动停过核心（点「停止」置位，「保存并启动」/测速候选启动清除）。 */
+    static boolean userStoppedCore(Context context) {
+        return proxyStore(context).getBoolean(USER_STOPPED_KEY, false);
+    }
+
+    static void setUserStopped(Context context, boolean stopped) {
+        proxyStore(context).edit().putBoolean(USER_STOPPED_KEY, stopped).apply();
+    }
     /** 存分享链接原文。比存解析后的 JSON 少一个「字段名谁说了算」的问题。 */
     static String proxyLink(Context context) {
         String link = proxyStore(context).getString(CORE_LINK_KEY, "");
@@ -210,8 +221,7 @@ final class ProxyConsole {
         try {
             ProxyCore core = ProxyCore.get(context);
             // start() 返回 false 时状态已经复位（阶段 1 的约定），不用先 stop 再重试。
-            if (!core.start(node)) {
-                // 启动失败**不改路由**：既不动用户的代理串，也不碰 AiiHttp 的任何状态。
+            if (!core.start(node)) {                // 启动失败**不改路由**：既不动用户的代理串，也不碰 AiiHttp 的任何状态。
                 // 把代理置空等于静默退回直连，用户会以为代理生效了。
                 JSONObject failed = proxyStatus(context, out);
                 if (failed.optBoolean("ok", false)) {
@@ -225,6 +235,7 @@ final class ProxyConsole {
             // TLS 会话挂在已建好的实例上，不换实例的话它们还连着原来的出口。
             AiiHttp.invalidateClients();
             setProxyMode(context, MODE_BUILTIN);
+            setUserStopped(context, false);
             UserSource.log("内置核心已启动 → " + node.describe());
             return proxyStatus(context, out);
         } finally {
@@ -237,8 +248,11 @@ final class ProxyConsole {
         ProxyCore.get(context).stop();
         // 停了也必须作废：否则下一次请求还在用那条已经关掉的本地端口。
         AiiHttp.invalidateClients();
+        // 记下「用户主动停过」：切模式回来、换源重建 Activity、重启 App 都不要
+        // 自动拉起，只有「保存并启动」或从测速结果连节点才算重新要代理。
+        setUserStopped(context, true);
         // 停核心不改模式 —— 用户点「停止」多半只是想临时断一下，
-        // 模式保持 builtin，下次启动还会自己拉起来。
+        // 模式继续保持 builtin，节点和订阅都留着，点一下就能回来。
         return proxyStatus(context, out);
     }
 
@@ -291,8 +305,11 @@ final class ProxyConsole {
         }
 
         // builtin：有存过的节点就立刻拉起；没有就先记下模式，等用户粘链接。
+        // 但用户主动停过（点「停止」）就不自动拉 —— 那一下「停止」的意图比
+        // 「模式还停在 builtin」更重要，要重新连就点「保存并启动」。
         setProxyMode(context, MODE_BUILTIN);
         if (proxyLink(context).length() == 0) return proxyStatus(context, out);
+        if (userStoppedCore(context)) return proxyStatus(context, out);
         return proxyStart(context, "", "", out);
     }
     /**
@@ -329,9 +346,13 @@ final class ProxyConsole {
     static JSONObject proxyBoot(Context context, JSONObject out) throws Exception {
         migrateProxyMode(context);
 
+        // 「用户点过停止」要一直有效到他自己点「保存并启动」为止。
+        // 换源会重建 Activity、WebView 整页重载，启动链又会走一遍 boot ——
+        // 不认这个标记的话，用户停掉的代理换一次源就自己活了。
         if (MODE_BUILTIN.equals(proxyMode(context))
                 && !ProxyCore.get(context).isRunning()
-                && proxyLink(context).length() > 0) {
+                && proxyLink(context).length() > 0
+                && !userStoppedCore(context)) {
             proxyStart(context, "", "", new JSONObject());
         }
         // 节点池热更新：过期了就在后台拉一次。不阻塞这条指令 ——
