@@ -1,15 +1,15 @@
 {
-  "versionName": "2.0.0",
-  "tag": "v2.0.0",
-  "versionCode": 20000,
-  "apk": "AIIvideo-v2.0.0-release.apk",
+  "versionName": "2.0.1",
+  "tag": "v2.0.1",
+  "versionCode": 20001,
+  "apk": "AIIvideo-v2.0.1-release.apk",
   "urls": [
-    "https://gh-proxy.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v2.0.0/AIIvideo-v2.0.0-release.apk",
-    "https://ghfile.geekertao.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v2.0.0/AIIvideo-v2.0.0-release.apk",
-    "https://gh.dpik.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v2.0.0/AIIvideo-v2.0.0-release.apk",
-    "https://github.com/zhaoruizhe81/AIIvideo/releases/download/v2.0.0/AIIvideo-v2.0.0-release.apk"
+    "https://gh-proxy.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v2.0.1/AIIvideo-v2.0.1-release.apk",
+    "https://ghfile.geekertao.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v2.0.1/AIIvideo-v2.0.1-release.apk",
+    "https://gh.dpik.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v2.0.1/AIIvideo-v2.0.1-release.apk",
+    "https://github.com/zhaoruizhe81/AIIvideo/releases/download/v2.0.1/AIIvideo-v2.0.1-release.apk"
   ],
-  "sha256": "382fee534aa10d0e96bb7b95e50e1dc1f01e9876f93c69d63b9a53d73c29fc6e",
-  "size": 48997412,
-  "notes": "2.0.0：架构级更新，八家内置适配器全部迁成 spider，源从 App 里搬了出去。以后加源、换源、修源就是贴一个 https 地址，不用发版：源是一份跑在 CSP 沙箱里的 js，出站只能走它自己声明的 hosts，跑在独立进程里、90 秒看门狗。Java 侧删掉八千六百多行（八份站点头 + 九份解析器 + 注册表）。源市场扩到 12 个源，新接 Iwara、Pornhub、51吃瓜；盾后站点（MissAV / Iwara）交给真浏览器内核过盾，源里不写挑战检测；代理跟着源声明走。修掉：过盾回填从未生效（MissAV 首页空白）、黄果入口域被判成走代理导致 62 秒超时、换源后核心分流表不重建、分类只能翻第一页、点分类 0 部作品、选集点错集、详情页永久 loading、91porn 卡片错位、卡片过渡动画顿一下、进度条圆弧不同心。"
+  "sha256": "5cb6cd813f419c50330b023355edfe904497d6334aed5b1c5664bf11ae6dbd72",
+  "size": 42170300,
+  "notes": "2.0.1：安装包瘦身 + 去误报。代理库 geosite.dat 由 11MB 裁到 1.97MB——上游是全量快照，1547 个分类而代码只写了 geosite:cn 一条，其余连同其中6660 条色情域名一起剔掉，CN 列表里混着的 51cg.com 也一并清了；geoip.dat 由 16.9MB 裁到 139KB，分流用的是 domainStrategy AsIs，只按域名判断，这个库本来就没被引用过。安装包 48,997,412 → 42,170,300 字节。功能一行没改。\n\n2.0.0：架构级更新，八家内置适配器全部迁成 spider，源从 App 里搬了出去。以后加源、换源、修源就是贴一个 https 地址，不用发版：源是一份跑在 CSP 沙箱里的 js，出站只能走它自己声明的 hosts，跑在独立进程里、90 秒看门狗。Java 侧删掉八千六百多行（八份站点头 + 九份解析器 + 注册表）。源市场扩到 12 个源，新接 Iwara、Pornhub、51吃瓜；盾后站点（MissAV / Iwara）交给真浏览器内核过盾，源里不写挑战检测；代理跟着源声明走。修掉：过盾回填从未生效（MissAV 首页空白）、黄果入口域被判成走代理导致 62 秒超时、换源后核心分流表不重建、分类只能翻第一页、点分类 0 部作品、选集点错集、详情页永久 loading、91porn 卡片错位、卡片过渡动画顿一下、进度条圆弧不同心。"
 }

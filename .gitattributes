@@ -1,0 +1,3 @@
+# v2ray 的 geosite.dat / geoip.dat 是 protobuf 二进制。不标 binary 的话
+# git 会按文本存，diff 出两万行、合并时还会被当文本冲突处理。
+*.dat binary

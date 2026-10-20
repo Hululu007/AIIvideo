@@ -252,7 +252,7 @@
   // 渲染层（app.js renderTags）要的是 `{name, slug, group}`：
   //   name  → 按钮文字
   //   slug  → 点下去传给 tag-list 的标识
-  //   group → 分组标题（91porn 是 'category'，hanime1 那一族有七八个组）
+  //   group → 分组标题（有的源是 'category'，有的源有七八个组）
   //
   // 两条兜底都是被真机逼出来的：slug 缺失时用 name 顶上（有的源列表项上
   // 只有中文名，slug 是同一个东西）；group 缺失时归 'other'，否则

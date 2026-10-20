@@ -206,7 +206,7 @@ const CONTENT_ACTIONS = new Set(['home', 'category', 'search', 'tags', 'tag-list
 // 不回答「这个源有没有」—— 后者由源自己说了算（见 spiderMetaOf）。
 //
 // 以前这里是「映射表 + 黑名单」两张表：黑名单里列着的动作，前端直接抛
-// 「这个 spider 源暂不支持」。91porn 补了 tags / tagList 之后前端照样拦着，
+// 「这个 spider 源暂不支持」。老源 补了 tags / tagList 之后前端照样拦着，
 // 用户看到的是「源不支持」，其实源已经实现了。问题不在那张表列了什么，
 // 在于**前端不该替所有源做这个判决**。现在改成问源。
 const SPIDER_CAP = {
@@ -302,9 +302,9 @@ function spiderCapFor(action) {
  * 第 n 集在 spider 里的 ref。
  *
  * 转换层把 episodes[].ref 原样留了下来（那是站点自己的标识：yhdm 的 `ep1`、
- * cms 的 `1`、missav 的整个 id），这里就该用它 —— 不再自己拼 `id:epN`。
+ * cms 的 `1`、单集源的整个 id），这里就该用它 —— 不再自己拼 `id:epN`。
  * 三条规则：
- *   · ref 和 id 相同（missav 是单集，ref 就是它自己）→ 只给 id。拼成
+ *   · ref 和 id 相同（单集源，ref 就是它自己）→ 只给 id。拼成
  *     `id:id` 会让它把整个串当 id 去请求，直接 404。
  *   · ref 不同 → `id:ref`。所有源的 play 都用 splitRef 拆冒号，这是通行写法。
  *   · 拿不到详情（深链直接进播放器、或详情还没回来）→ `id:ep{n}`，
@@ -457,7 +457,7 @@ function episodeShapeOf(out) {
  *
  * 「全部类型」和「类型列表」这两个动作，在绝大多数站上**不是新东西**：一个站的
  * 分类本来就写在它的配置里（`web.categories` + `ui.categoryIds/categoryLabels`），
- * 点一个分类就是 `category`。只有 91porn 那种「导航栏就是标签栏、还要按站点原文
+ * 点一个分类就是 `category`。只有 老源 那种「导航栏就是标签栏、还要按站点原文
  * 取名」的站才值得单独实现 tags。
  *
  * 没有这层退路时的表现是最糟的那种：源完全正常，用户在首页点一个类型，页面直接
@@ -470,7 +470,7 @@ function episodeShapeOf(out) {
  *   tags     → 用配置里的分类现拼：`ui.categoryIds` 配 `categoryLabels` 取名字，
  *              没有就退回 `web.categories`（cateId → 显示名）。
  *
- * 源自己实现了就优先用源的（91porn 的标签是站点原文，配置里那份是旧名字）。
+ * 源自己实现了就优先用源的（老源 的标签是站点原文，配置里那份是旧名字）。
  */
 function siteTagFallback() {
   const ui = siteUi();
@@ -694,7 +694,7 @@ function categoryTitle() {
 // 分类页副标题：**只用配置**，没配就不显示。
 //
 // 这里原来有一套默认文案（「短剧与漫剧，走进不同的人生。」「换脸与魔改，探索影像
-// 新可能。」），是黄果源自己的宣传语。套在别的源上就是纯噪音 —— 切到 hanime1 的
+// 新可能。」），是黄果源自己的宣传语。套在别的源上就是纯噪音 —— 切到别的源的
 // 3DCG 分类，标题下面写着「探索热门漫剧。」，跟页面内容半点关系没有。
 //
 // 「没配就不显示」比「猜一句通用文案」好：一句对不上内容的副标题，比没有副标题
@@ -1073,7 +1073,7 @@ api('theme').then(window.hgTheme).catch(() => {});
 
 // ── 列表校正：网格页在乱写，拿详情页盖一遍 ──────────────────────────────
 //
-// 2026-10-18：91porn 的首页/分类页每张卡上有三个 id（href 里的 viewkey、
+// 2026-10-18：老源 的首页/分类页每张卡上有三个 id（href 里的 viewkey、
 // 容器 id `playvthumb_<n>`、封面 `thumb/<n>.jpg`），三个一致才靠得住。实测
 // 一页 40 张卡里 12 个 viewkey 重复出现，同一个链接挂三四个不同封面，点进去
 // 是另一部 —— 站点故意给爬虫的迷魂阵（搜索页反而干净，两次渲染 0 变化）。
@@ -1095,7 +1095,7 @@ const reconcileUnsupported = new Set();
 // 校正很贵：真机上单条详情要 5-6 秒（走代理），一页 24 条哪怕并发 8 也要近 20 秒。
 // 只在内存里记，冷启动一次就白干一次；用户每次开 App 都得等那 20 秒。
 //
-// 存 localStorage，按源分区（不同源的 id 可能撞车，91porn 是纯数字 viewkey）。
+// 存 localStorage，按源分区（不同源的 id 可能撞车，老源 是纯数字 viewkey）。
 // 加时间戳，超过 7 天整份丢掉 —— 同一个 viewkey 的标题基本不变，但站点的片子
 // 会下架、会被投稿者改标题，留太久就会拿一份过期真值盖掉新的正确值。
 const RECONCILE_TTL_MS = 7 * 24 * 3600 * 1000;
@@ -1160,7 +1160,7 @@ async function reconcileCards(items, onPatched) {
   //
   // 这里原来有一句 `if (spiderIdOf()) return;`，理由写得很像回事：「spider 的
   // 卡片是它自己从详情页里取的 id，一上来就是真的」。**那句话是错的。**
-  // porn91.js 的 parseCards 是从网格页抠 href + 标题 + <img src>，和 Java 时代
+  // 旧播放器的 parseCards 是从网格页抠 href + 标题 + <img src>，和 Java 时代
   // 一模一样，站点那套迷魂阵原样回来了：
   //
   //   列表卡  viewkey=1536834169  标题「调教07母狗…」  封面 thumb/1252773.jpg
@@ -1460,7 +1460,7 @@ function renderTags() {
   // 那是内置源的分组词汇，对别的源是错的。
   const base = configured;
   // **数据里出现的组必须都能渲染。** 配置是「这份源有哪些组」的声明，但源是会
-  // 变的（91porn 就是：标签页列的是站点分类栏，组名叫 category，而它那份
+  // 变的（老源 就是：标签页列的是站点分类栏，组名叫 category，而它那份
   // user-source.json 是更早的版本生成的，里面根本没有 tagGroups）。只按配置
   // 渲染的结果是「10 个标签」写在标题上、页面一片空 —— 数字对、内容没有，
   // 最难查的那种。所以配置里没声明的组按数据补上，标题用通用名。
@@ -2644,7 +2644,7 @@ async function goTag(slug, label) {
   if (state.route !== 'listing' || state.listing?.kind !== 'tag-list' || state.listing?.slug !== slug) state.listingReturn = captureScreen();
   setRoute('listing'); state.tab = 'home'; setNav('home');
   // 「短剧·/漫剧·」这个前缀只在源真的按短剧/漫剧分标签时才有意义。别的源
-  // （比如 91porn，它的标签就是分类栏）套上会变成「#短剧·高清版」，纯噪音。
+  // （比如 老源，它的标签就是分类栏）套上会变成「#短剧·高清版」，纯噪音。
   const dramaTagged = (siteUi().tagGroups || []).some(([id]) => id === 'short' || id === 'comic');
   const prefix = dramaTagged ? (slug.startsWith('comic:') ? '漫剧·' : '短剧·') : '';
   searchInput.value = `#${prefix}${String(label).replace(/^#+/, '')}`;

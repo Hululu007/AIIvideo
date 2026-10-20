@@ -95,3 +95,6 @@ work/re/pie/*.so
 work/re/pie/*.strings.txt
 work/re/pie/*.png
 work/re/pie/__pycache__/
+
+# 发布件只走 GitHub Release，不进仓库（42MB）
+AIIvideo-v*.apk
