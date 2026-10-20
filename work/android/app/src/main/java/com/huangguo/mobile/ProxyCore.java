@@ -328,15 +328,35 @@ public final class ProxyCore {
      *                       传什么进去都改变不了它等多久。
      * @return 往返毫秒；-1 表示不通或超时
      */
-    static long probe(XrayConfig.Node node, String url, int timeoutSeconds) {
+    static long probe(android.content.Context context, XrayConfig.Node node, String url, int timeoutSeconds) {
         if (node == null) return -1L;
+        // measureOutboundDelay 是 Libv2ray 的静态方法，**必须先 ensureEnv()**：
+        // 它要 go.Seq.setContext + initCoreEnv 才认得了 assets 里的 geoip/geosite，
+        // 没初始化就直接返回 -1（几毫秒），看起来像「节点全都不通」。
+        // 2026-10-20 真机：冷启动后的新进程里没点过「保存并启动」，7 条免费节点
+        // 在 10 毫秒内全报不通，而同一份节点在核心起来过之后再测是 56~64ms。
+        ProxyCore core = context == null ? null : get(context);
+        if (core != null && !core.ensureEnv()) {
+            UserSource.log("测速跳过：核心环境没就绪（" + (envError == null ? "未知" : envError) + "）");
+            return -1L;
+        }
         try {
             // 端口随便给一个 —— 这份配置只用来发起一次出站连接，
             // 它的 inbound 根本不会被监听。给 0 会被 Xray 判非法，所以给个高位端口。
             String config = XrayConfig.buildString(node, 20480);
             String target = url == null || url.isEmpty() ? PROBE_URL : url;
-            return Libv2ray.measureOutboundDelay(config, target);
+            long started = System.currentTimeMillis();
+            long ms = Libv2ray.measureOutboundDelay(config, target);
+            // 单条探测瞬间返回 -1（几毫秒）几乎可以肯定是接口本身出错，而不是
+            // 「节点不通」——真去连一次，最慢也要 4 秒才判死。真机上见过 7 条
+            // 免费节点在 10 毫秒内全部报不通，这种日志能一眼区分开。
+            long spent = System.currentTimeMillis() - started;
+            if (ms < 0 && spent < 50) {
+                UserSource.log("探测立即失败（" + spent + "ms）：" + node.describe());
+            }
+            return ms;
         } catch (Throwable e) {
+            UserSource.log("探测抛异常：" + e.getClass().getSimpleName() + " " + e.getMessage());
             return -1L;
         }
     }

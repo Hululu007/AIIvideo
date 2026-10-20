@@ -660,7 +660,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     @Override public void onBackPressed() {
         // 锁着的时候返回键不退出 —— 误触锁的一大半用途就是防这个。
         if (locked) {
-            controls.showHint("已锁定 · 点左边的小锁解锁");
+            controls.showHint("已锁定 · 连点两次小锁解锁");
             controls.hideHintAfter(1500, ui);
             return;
         }
@@ -745,7 +745,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         controls.setLocked(value);
         ui.removeCallbacks(hideControls);
         if (value) {
-            controls.showHint("已锁定 · 点左边的小锁解锁");
+            controls.showHint("已锁定 · 连点两次小锁解锁");
         } else {
             controls.showHint("已解锁");
             setControlsVisible(true);
@@ -804,7 +804,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
                         if (e.getActionMasked() == MotionEvent.ACTION_UP) {
                             float dx = e.getX() - downX, dy = e.getY() - downY;
                             if (Math.abs(dx) < dp(TOUCH_SLOP_DP) && Math.abs(dy) < dp(TOUCH_SLOP_DP)) {
-                                controls.showHint("已锁定 · 点左边的小锁解锁");
+                                controls.showHint("已锁定 · 连点两次小锁解锁");
                                 controls.hideHintAfter(1500, ui);
                             }
                         }
@@ -846,7 +846,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
                         if (e.getActionMasked() == MotionEvent.ACTION_UP) {
                             float dx = e.getX() - downX, dy = e.getY() - downY;
                             if (Math.abs(dx) < dp(TOUCH_SLOP_DP) && Math.abs(dy) < dp(TOUCH_SLOP_DP)) {
-                                controls.showHint("已锁定 · 点左边的小锁解锁");
+                                controls.showHint("已锁定 · 连点两次小锁解锁");
                                 controls.hideHintAfter(1500, ui);
                             }
                         }
@@ -921,7 +921,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
                 float dx = event.getX() - downX, dy = event.getY() - downY;
                 if (Math.abs(dx) < dp(TOUCH_SLOP_DP) && Math.abs(dy) < dp(TOUCH_SLOP_DP)
                         && System.currentTimeMillis() - downAt < 300) {
-                    controls.showHint("已锁定 · 点左边的小锁解锁");
+                    controls.showHint("已锁定 · 连点两次小锁解锁");
                     controls.hideHintAfter(1500, ui);
                 }
             }

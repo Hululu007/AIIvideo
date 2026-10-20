@@ -107,8 +107,9 @@ final class SpeedTest {
      *
      * 不抛异常：测速失败是常态，把它当成结果的一部分返回。
      */
-    static List<Item> run(List<XrayConfig.Node> nodes, List<String> links, String probeUrl, Progress progress) {
-        return run(nodes, links, probeUrl, progress, 0);
+    static List<Item> run(android.content.Context context, List<XrayConfig.Node> nodes, List<String> links,
+                          String probeUrl, Progress progress) {
+        return run(context, nodes, links, probeUrl, progress, 0);
     }
 
     /**
@@ -118,8 +119,8 @@ final class SpeedTest {
      * 还用批内下标，三批的 index 全是 0/1/2，累加起来只剩 3 条（实测出来的 bug）。
      * offset 让 index 始终是**它在完整列表里的位置**，前端 use?index=N 才对得上。
      */
-    static List<Item> run(List<XrayConfig.Node> nodes, List<String> links, String probeUrl,
-                          Progress progress, int offset) {
+    static List<Item> run(android.content.Context context, List<XrayConfig.Node> nodes, List<String> links,
+                          String probeUrl, Progress progress, int offset) {
         int total = nodes.size();
         List<Item> out = new ArrayList<Item>(total);
         if (total == 0) return out;
@@ -145,7 +146,7 @@ final class SpeedTest {
                 out.add(untested(index, nodes.get(i), linkOf(links, i)));
                 continue;
             }
-            out.add(probeOne(index, nodes.get(i), linkOf(links, i), url, deadline));
+            out.add(probeOne(context, index, nodes.get(i), linkOf(links, i), url, deadline));
             int d = done.incrementAndGet();
             if (progress != null) {
                 try {
@@ -172,7 +173,8 @@ final class SpeedTest {
      * 用的是可回收的：每次新建、用完 shutdownNow。串行调用下最多有一两个
      * 残留，不会堆积。
      */
-    private static Item probeOne(int index, XrayConfig.Node node, String link, String url, long deadline) {
+    private static Item probeOne(android.content.Context context, int index, XrayConfig.Node node,
+                                 String link, String url, long deadline) {
         long left = deadline - System.currentTimeMillis();
         if (left <= 0) return untested(index, node, link);
 
@@ -183,7 +185,7 @@ final class SpeedTest {
             java.util.concurrent.Future<Long> f = one.submit(new Callable<Long>() {
                 @Override
                 public Long call() {
-                    return ProxyCore.probe(node, url, 0);
+                    return ProxyCore.probe(context, node, url, 0);
                 }
             });
             long ms = f.get(budget, TimeUnit.MILLISECONDS);

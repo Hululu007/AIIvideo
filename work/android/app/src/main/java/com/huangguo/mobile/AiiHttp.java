@@ -892,21 +892,61 @@ public final class AiiHttp {
      * 这点开销无所谓。
      */
     public static byte[] getOnce(String url, int timeoutSeconds) throws Exception {
+        return getOnce(url, timeoutSeconds, false);
+    }
+
+    /**
+     * 代理子系统自己的下载：订阅、内置节点池。
+     *
+     * 这两件事**必须不受当前内容源的路由声明影响**。2026-10-20 真机踩到：
+     * 源里写着 `net.proxy: []`（显式全直连），于是 `NetRoute.directOnly()` 对
+     * 任何域名都返回 true，连「拉订阅」都被摘掉代理去直连 —— 而机场域名正在
+     * 墙外，表现就是拉订阅一直等到超时。
+     *
+     * 内容源的 net 说的是「这个站的页面/CDN 怎么走」，跟代理设置里拉订阅没有
+     * 半点关系。所以这条入口固定先走代理，代理不通再退回直连（自建服务、内网
+     * 订阅地址走代理本来就不对）。
+     */
+    public static byte[] getOnceRouted(String url, int timeoutSeconds) throws Exception {
+        return getOnce(url, timeoutSeconds, true);
+    }
+
+    private static byte[] getOnce(String url, int timeoutSeconds, boolean ignoreSourceRoute)
+            throws Exception {
         Request request = new Request.Builder().url(url)
                 .header("Accept-Encoding", "identity")
                 .header("Connection", "close")
                 .build();
+        ProxyRoute route = ignoreSourceRoute
+                ? effectiveRoute()
+                : (NetRoute.directOnly(hostOfUrl(url)) ? null : effectiveRoute());
+        try {
+            return executeOnce(request, route, timeoutSeconds, url);
+        } catch (IOException e) {
+            // 代理不通就退回直连试一次：订阅地址可能是国内的自建服务，
+            // 走机场节点反而绕远甚至被拒。
+            if (route == null) throw e;
+            log("订阅下载走代理失败（" + e.getMessage() + "），改直连重试");
+            return executeOnce(request, null, timeoutSeconds, url);
+        }
+    }
+
+    private static byte[] executeOnce(Request request, ProxyRoute route, int timeoutSeconds,
+                                      String url) throws Exception {
         OkHttpClient.Builder oneBuilder = new OkHttpClient.Builder()
                 .connectTimeout(Math.min(timeoutSeconds, 15), TimeUnit.SECONDS)
                 .readTimeout(timeoutSeconds, TimeUnit.SECONDS)
+                // callTimeout 是**整条请求**的上限（DNS + 连接 + 读完 body）。
+                // 只有 connect/read 两个超时的话，对方慢慢吐字节就永远读不完：
+                // 真机上见过机场订阅 TTFB 9.7 秒、总耗时 10.1 秒，而桥的上限是 30 秒，
+                // 中间再有点抖动就整条卡死，用户看到的就是「拉订阅 timeout」。
+                .callTimeout(timeoutSeconds, TimeUnit.SECONDS)
                 .retryOnConnectionFailure(false)
                 .dns(IPV4_FIRST);
         // **必须挂用户配的代理。** 之前这里 new 完就直接 build，整条订阅/节点池的
         // 下载都绕过了代理去直连 GitHub —— 国内基本不通，表现是「节点池更新失败：
         // Read timed out」和「订阅拉取失败：failed to connect ... from 192.168.x.x」。
         // 这两个功能恰恰是最需要代理的：它们下载的地址就在墙外。
-        // 分流例外：直连表里的域名（AGE/黄果 这类）摘掉代理，理由见 rawWith。
-        ProxyRoute route = NetRoute.directOnly(hostOfUrl(url)) ? null : effectiveRoute();
         if (route != null) route.applyTo(oneBuilder);
         OkHttpClient one = oneBuilder.build();
         Response response = one.newCall(request).execute();

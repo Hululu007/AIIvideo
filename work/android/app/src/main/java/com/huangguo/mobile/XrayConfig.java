@@ -54,6 +54,15 @@ final class XrayConfig {
         String server;
         int port;
 
+        /**
+         * 分享链接里 `#` 后面的备注（机场一般写成「美国 1」「剩余流量：50GB」这种）。
+         *
+         * 以前解析时直接扔掉，于是节点列表只能显示 host:port —— 十来个共用同一台
+         * 机器的条目在界面上长得一模一样，用户分不出哪条是哪条，也看不出哪些
+         * 其实是机场塞进来的公告条目。
+         */
+        String name;
+
         /** vmess 的 id、vless 的 uuid、trojan 与 socks/http 的密码。 */
         String uuid;
         /** shadowsocks 的加密方式；socks/http 出站时复用成「密码」（见 socksOut）。 */
@@ -469,6 +478,17 @@ final class XrayConfig {
     static Node parseShareLink(String link) throws JSONException {
         if (empty(link)) throw new IllegalArgumentException("链接为空");
         String text = link.trim();
+        Node parsed = parseShareLinkBody(text);
+        // `#` 后面是备注，不参与协议解析，但界面上要用它区分节点。
+        int hash = text.indexOf('#');
+        if (hash >= 0) {
+            String name = percentDecode(text.substring(hash + 1)).trim();
+            if (!name.isEmpty()) parsed.name = name;
+        }
+        return parsed;
+    }
+
+    private static Node parseShareLinkBody(String text) throws JSONException {
         String lower = text.toLowerCase(Locale.ROOT);
         if (lower.startsWith("vmess://")) return parseVmess(text.substring(8));
         if (lower.startsWith("ss://")) return parseShadowsocks(text.substring(5));

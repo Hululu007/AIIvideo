@@ -52,6 +52,9 @@ final class ProxyConsole {
     /** 上次订阅地址。失败重试时用，不落盘。 */
     static volatile String lastSubUrl = "";
 
+    /** 当前出口对应测速列表里的哪一条；-1 = 不是从列表点进来的。 */
+    static volatile int activeIndex = -1;
+
     /** 测速并发。太大容易被机场限速，太小等得久。 */
     private static final int SPEED_POOL = 12;
     private static final int SPEED_BATCH = 3;
@@ -106,7 +109,8 @@ final class ProxyConsole {
             if ("boot".equals(action)) return proxyBoot(context, out);
             if ("sub".equals(action)) return proxySubscribe(context, UserSource.param(query, "url"), out);
             if ("subclear".equals(action)) return proxySubClear(context, out);
-            if ("speed".equals(action)) return proxySpeed(context, UserSource.param(query, "batch"), out);
+            if ("speed".equals(action)) return proxySpeed(context, UserSource.param(query, "batch"),
+                    UserSource.param(query, "source"), out);
             if ("use".equals(action)) return proxyUse(context, UserSource.param(query, "index"), out);
             if ("nodes".equals(action)) return proxyNodes(context, UserSource.param(query, "do"), out);
             return UserSource.fail(out, "不认识的代理指令：" + action);
@@ -182,11 +186,20 @@ final class ProxyConsole {
         // 节点只回「哪台机器」，不带 uuid —— 这份答复会被 logcat 记下来。
         XrayConfig.Node node = core.currentNode();
         out.put("node", node == null ? "" : node.describe());
+        // 机场给的名字才是人看得懂的那行字；没有就回空，前端退回 describe。
+        out.put("nodeName", node == null || node.name == null ? "" : node.name);
+        // 当前出口来自测速结果的第几条（-1 表示不是从测速列表点进来的）。
+        // 前端拿它给那一行打「使用中」，否则用户点了几条之后分不清现在走的是谁。
+        out.put("index", activeIndex);
         // lastError 是「上一次失败」，成功之后 ProxyCore 自己会清空；
         // unavailableReason() 是一旦不可用就永远存在的结论，两者分开报。
         out.put("error", core.lastError() == null ? "" : core.lastError());
         out.put("unavailable", ProxyCore.unavailableReason() == null ? "" : ProxyCore.unavailableReason());
         out.put("link", proxyLink(context));
+        // 存过的订阅地址也回一份。前端的状态只活在内存里，进程重启后
+        // 「我的订阅」那张卡会变回「有机场的话比免费节点稳得多」，
+        // 输入框空着，用户点「拉取」被判「先填一个订阅地址」。
+        out.put("subUrl", proxyStore(context).getString(SUB_URL_KEY, ""));
         return out;
     }
 
@@ -236,6 +249,8 @@ final class ProxyConsole {
             AiiHttp.invalidateClients();
             setProxyMode(context, MODE_BUILTIN);
             setUserStopped(context, false);
+            // 手填链接/换线/冷启动都走这里：不是从测速列表点的，标记清掉。
+            activeIndex = -1;
             UserSource.log("内置核心已启动 → " + node.describe());
             return proxyStatus(context, out);
         } finally {
@@ -380,11 +395,21 @@ final class ProxyConsole {
 
         Subscription.Result parsed;
         try {
-            parsed = Subscription.fetch(target, 20);
+            parsed = Subscription.fetch(target, 15);
         } catch (Throwable e) {
             String m = e.getMessage();
+            String reason = m == null || m.isEmpty() ? "订阅拉取失败" : m;
+            // 超时 + 核心没在跑 = 机场域名在墙外而这条路径没代理可走。
+            // 把下一步直接写在错误里，别让用户对着 "timeout" 猜。
+            boolean timeout = reason.toLowerCase(java.util.Locale.ROOT).contains("timeout")
+                    || reason.contains("超时") || reason.contains("timed out");
+            if (timeout && !ProxyCore.get(context).isRunning()) {
+                reason += "。代理核心没在跑，这条订阅可能要翻墙才能拉 —— 先在上面把节点连上再试";
+            } else if (timeout) {
+                reason += "。代理在跑但这次没通，过一会儿再试";
+            }
             out.put("ok", false);
-            out.put("error", m == null || m.isEmpty() ? "订阅拉取失败" : m);
+            out.put("error", reason);
             out.put("url", target);
             return out;
         }
@@ -399,6 +424,11 @@ final class ProxyConsole {
 
         proxyStore(context).edit().putString(SUB_URL_KEY, target).apply();
         lastSubUrl = target;
+        // 刚拉到的这份顺手放进缓存：紧接着的「测速」就不用再下载一次了。
+        // 机场订阅 TTFB 实测能到 10 秒，点一次「拉取并测速」拉两遍就是 20 秒。
+        cachedSubUrl = target;
+        cachedSubAt = System.currentTimeMillis();
+        cachedSub = parsed;
         // 换了订阅，旧的测速结果整套作废 —— 下标对不上了，留着只会让 use 用错节点。
         lastSpeedTest = null;
 
@@ -508,77 +538,120 @@ final class ProxyConsole {
         }
     }
     /**
-     * 测速。**默认测内置的那份**，用户导入过订阅才测订阅的。
+     * 一轮测速内只下载一次订阅。
      *
-     * 这个优先级是刻意的：没机场的人不该被要求「先去弄个订阅地址」——
-     * 他们打开设置页点一下就该看到几个能连的节点。订阅是给有机场的人
-     * 加的那条路，不是前置条件。
+     * 以前每批都重新 fetch —— 12 条分 4 批就是 4 次下载，第三次被机场限速就整轮
+     * 断掉，界面只剩一句 `timeout`。现在按 URL + 时间缓存 60 秒：同一次刷新里的
+     * 4 批共用一份解析结果，点两次「测速」之间也不会重复下载。
      *
-     * 判断依据是 SUB_URL_KEY 有没有值，不是 mode：用户可能导入过订阅但
-     * 后来又切回直连，那时候测速仍然该测他导入的那份。
+     * 只缓存一份（用户只有一个订阅地址），换地址自然失效。
      */
-    static JSONObject proxySpeed(Context context, String batchText, JSONObject out) throws Exception {
-        Subscription.Result parsed;
-        String target = proxyStore(context).getString(SUB_URL_KEY, "");
-        boolean fromSubscription = target != null && target.length() > 0;
-        try {
-            parsed = fromSubscription ? Subscription.fetch(target, 20) : Subscription.builtin(context);
-        } catch (Throwable e) {
-            String m = e.getMessage();
-            out.put("ok", false);
-            out.put("error", m == null || m.isEmpty() ? "节点列表读不出来" : m);
-            out.put("source", fromSubscription ? "subscription" : "builtin");
-            return out;
+    private static String cachedSubUrl = "";
+    private static long cachedSubAt;
+    private static Subscription.Result cachedSub;
+    private static final long SUB_TTL_MS = 60000;
+
+    static synchronized Subscription.Result subscriptionNodes(Context context, String url,
+                                                             boolean refresh) throws Exception {
+        long now = System.currentTimeMillis();
+        if (!refresh && cachedSub != null && url.equals(cachedSubUrl)
+                && now - cachedSubAt < SUB_TTL_MS) {
+            return cachedSub;
         }
-        if (parsed.size() == 0) {
-            String reason = parsed.firstError;
-            return UserSource.fail(out, reason != null && reason.length() > 0 ? reason
-                    : (fromSubscription ? "订阅里没有可用的节点" : "内置节点列表是空的"));
+        Subscription.Result parsed = Subscription.fetch(url, 20);
+        cachedSubUrl = url;
+        cachedSubAt = now;
+        cachedSub = parsed;
+        return parsed;
+    }
+
+    static synchronized void dropSubscriptionCache() {
+        cachedSub = null;
+        cachedSubUrl = "";
+        cachedSubAt = 0;
+    }
+
+    /**
+     * 测速。**订阅和免费节点分开测**，`source=subscription|builtin`。
+     *
+     * 以前合成一个池子，结果是两类东西排在同一张榜上：免费节点延迟低就排在
+     * 用户自己的线路前面，点下去等于把付费线路换成陌生人的服务器；「别用来
+     * 登录重要账号」那行提示挂在整块底下，看着对全部有效，其实只对免费有效。
+     * 现在各测各的、各显示各的，用户点哪个按钮就测哪个。
+     *
+     * 判断依据是 SUB_URL_KEY 有没有值，不是 mode：用户导入过订阅后来又切回
+     * 直连，订阅那一栏仍然该在。
+     */
+    static JSONObject proxySpeed(Context context, String batchText, String sourceText,
+                                 JSONObject out) throws Exception {
+        String source = sourceText == null ? "" : sourceText.trim().toLowerCase(java.util.Locale.ROOT);
+        if (source.isEmpty()) source = "builtin";
+        if (!"subscription".equals(source) && !"builtin".equals(source)) {
+            return UserSource.fail(out, "测速来源只能是 subscription 或 builtin");
         }
 
-        // 数量必须限量，因为测速是**串行**的（并发会互相踩断，见 SpeedTest 的注释）。
-        // 12 个 × 3 秒封顶 = 36 秒，落在 20 秒上限内能测完的最多是 6~7 个，
-        // 但大多数节点会提前返回（通的 1~2 秒、死的立刻 connection refused），
-        // 实际能覆盖到 10 个上下。
-        //
-        // 为什么不是全测：400 个串行要十几分钟。用户要的是「几个能用的」，
-        // 不是一份完整体检报告。取前 12 个已经能覆盖绝大多数情况。
-        // 分批发测，每批 3 个。前端循环调用，每批回来就刷新一次界面 ——
-        // 一次测 12 个要 20 多秒，中途什么都不显示，用户会以为卡死了。
-        //
-        // 为什么要后端分批而不是后端一次算完再推进度：桥是「一问一答」的，
-        // 有个 Promise 对应一次请求，没有服务端推送。分批是这套桥下最省事的
-        // 做法，而且天然带断点 —— 用户中途退出，已测的结果不会白费。
-        int limit = Math.min(parsed.size(), SPEED_POOL);
         int batch;
         try {
             batch = batchText == null || batchText.trim().isEmpty() ? 0 : Integer.parseInt(batchText.trim());
         } catch (NumberFormatException e) {
             batch = 0;
         }
-        // batch == 0 表示新一轮开始 —— 清掉上一轮的累计。
-        // 不清的话，第二次测速会把第一次的结果一起算进去，
-        // 表现是「测了 12 个，列表里冒出 20 多个」。
         if (batch == 0) {
             synchronized (SPEED_LOCK) {
                 speedAccum = null;
                 lastSpeedTest = null;
             }
+            // 这里**不清订阅缓存**：刚「拉取并测速」时那份已经在缓存里，
+            // 清掉等于同一份订阅连下两遍。要换新内容就点「更新订阅」，
+            // 那条走 proxySubscribe，会重新下载并覆盖缓存。
         }
 
+        Subscription.Result parsed;
+        try {
+            if ("subscription".equals(source)) {
+                String target = proxyStore(context).getString(SUB_URL_KEY, "");
+                if (target == null || target.length() == 0) {
+                    return UserSource.fail(out, "还没有订阅地址");
+                }
+                parsed = subscriptionNodes(context, target, false);
+            } else {
+                parsed = Subscription.builtin(context);
+            }
+        } catch (Throwable e) {
+            String m = e.getMessage();
+            String reason = m == null || m.isEmpty() ? "节点列表读不出来" : m;
+            boolean timeout = reason.toLowerCase(java.util.Locale.ROOT).contains("timeout")
+                    || reason.contains("超时") || reason.contains("timed out");
+            if (timeout && "subscription".equals(source) && !ProxyCore.get(context).isRunning()) {
+                reason += "。核心没在跑，机场地址可能要翻墙才能拉";
+            }
+            out.put("ok", false);
+            out.put("error", reason);
+            out.put("source", source);
+            return out;
+        }
+        if (parsed.size() == 0) {
+            String reason = parsed.firstError;
+            return UserSource.fail(out, reason != null && reason.length() > 0 ? reason
+                    : ("subscription".equals(source) ? "订阅里没有可用的节点" : "内置节点列表是空的"));
+        }
+
+        // 数量必须限量，因为测速是**串行**的（并发会互相踩断，见 SpeedTest 的注释）。
+        // 12 个 × 3 秒封顶 = 36 秒，落在 20 秒上限内能测完的最多是 6~7 个，
+        // 但大多数节点会提前返回（通的 1~2 秒、死的立刻 connection refused）。
+        // 分批发测，每批 3 个。前端循环调用，每批回来就刷新一次界面。
+        int limit = Math.min(parsed.size(), SPEED_POOL);
         int from = batch * SPEED_BATCH;
         if (from >= limit) {
-            // 已经测完，把累计结果原样返回。
-            return speedResult(out, true, fromSubscription, parsed.size());
+            return speedResult(context, out, true, source, parsed.size());
         }
         int to = Math.min(from + SPEED_BATCH, limit);
 
         List<XrayConfig.Node> nodes = parsed.nodes.subList(from, to);
         List<String> links = parsed.links.subList(from, to);
 
-        List<SpeedTest.Item> items = SpeedTest.run(nodes, links, null, null, from);
+        List<SpeedTest.Item> items = SpeedTest.run(context, nodes, links, null, null, from);
 
-        // 累计到一个 map 里，按 index 存 —— 分批之间靠它拼回完整结果。
         synchronized (SPEED_LOCK) {
             if (speedAccum == null) speedAccum = new java.util.TreeMap<Integer, SpeedTest.Item>();
             for (SpeedTest.Item item : items) speedAccum.put(Integer.valueOf(item.index), item);
@@ -587,9 +660,10 @@ final class ProxyConsole {
         }
 
         boolean done = to >= limit;
-        if (done) UserSource.log("测速完成，本轮共测 " + listSize());
-        return speedResult(out, done, fromSubscription, parsed.size());
+        if (done) UserSource.log("测速完成（" + source + "），本轮共测 " + listSize());
+        return speedResult(context, out, done, source, parsed.size());
     }
+
     /**
      * 对上次拉到的订阅里的节点批量测速。
      *
@@ -616,8 +690,8 @@ final class ProxyConsole {
      * done 表示这一轮测完了 —— 前端据此决定还要不要继续调下一批。
      * 每批都回完整列表（不是增量），前端拿到就整块重画，不用自己拼。
      */
-    static JSONObject speedResult(JSONObject out, boolean done,
-                                          boolean fromSubscription, int pool) throws Exception {
+    static JSONObject speedResult(Context context, JSONObject out, boolean done,
+                                          String source, int pool) throws Exception {
         List<SpeedTest.Item> items;
         synchronized (SPEED_LOCK) {
             items = lastSpeedTest == null
@@ -631,6 +705,10 @@ final class ProxyConsole {
             JSONObject o = new JSONObject();
             o.put("index", item.index);
             o.put("node", item.node.describe());
+            // 机场给的名字（`#` 后面的备注）。没有就回空串，前端退回 host:port。
+            o.put("name", item.node.name == null ? "" : item.node.name);
+            // 「🇺🇸 美国」。查不到就是空串，前端不加前缀。
+            o.put("country", GeoIp.label(context, item.node.server));
             o.put("protocol", item.node.protocol);
             o.put("ms", item.ms);
             o.put("ok", item.ok());
@@ -643,7 +721,7 @@ final class ProxyConsole {
         out.put("total", Math.min(pool, SPEED_POOL));
         out.put("usable", usable);
         out.put("nodes", arr);
-        out.put("source", fromSubscription ? "subscription" : "builtin");
+        out.put("source", source);
         out.put("pool", pool);
         return out;
     }
@@ -675,7 +753,12 @@ final class ProxyConsole {
         if (!hit.ok()) return UserSource.fail(out, "这个节点没测通，换一个");
         if (hit.link == null || hit.link.length() == 0) return UserSource.fail(out, "这个节点没有原始链接");
 
-        return proxyStart(context, hit.link, null, out);
+        JSONObject started = proxyStart(context, hit.link, null, out);
+        if (started.optBoolean("ok", false) && started.optBoolean("running", false)) {
+            activeIndex = hit.index;
+            started.put("index", activeIndex);
+        }
+        return started;
     }
     /** 前端的 node JSON → XrayConfig.Node。字段名和 XrayConfig 前向生成时一致。 */
     static XrayConfig.Node nodeFromJson(JSONObject json) {

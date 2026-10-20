@@ -32,7 +32,9 @@ const coverImageUrl = raw => window.HGCover.resolveUrl(raw);
 // settle —— 页面一直 loading，连错误都没有。Java 的读超时是 15 秒，这里给
 // 30 秒上限（CMS 的详情偶尔要连两个接口），超时就当失败处理，页面能进错误态、
 // 返回键也正常。
-const BRIDGE_TIMEOUT_MS = 30000;
+// 桥的等待上限。订阅下载实测 TTFB 能到 10 秒、加上重试就 20 秒往上，
+// 30 秒会把「正在拉」变成「请求超时」。放宽到 45 秒，仍然有上限。
+const BRIDGE_TIMEOUT_MS = 45000;
 function bridgeCall(action, args = {}) {
   return new Promise((resolve, reject) => {
     const id = bridgeInstance + ':' + (++requestNumber);
@@ -3354,6 +3356,9 @@ document.addEventListener('submit', async event => {
     if (!input || !button) return;
     const url = input.value.trim();
     if (!url) { toast('先填一个订阅地址', true); return; }
+    // http 也要放行：2.0.4 起明文策略已经放开，自建服务和一部分机场只给
+    // http://IP:port/p/xxxx。以前这里只认 https://，等于底层允许、表单拦着。
+    if (!/^https?:\/\//i.test(url)) { toast('地址要以 http:// 或 https:// 开头', true); return; }
     button.disabled = true;
     button.textContent = '正在拉取…';
     const sub = subState();
@@ -3362,14 +3367,24 @@ document.addEventListener('submit', async event => {
       const result = await proxyCoreCommand('sub?url=' + encodeURIComponent(url));
       if (result.ok === false) throw new Error(result.error || '订阅没拉到');
       // 换了订阅，上一次的测速结果整套作废 —— 下标对不上了。
-      // busy 必须是 false：runSpeedTest() 第一行就是 `if (sub.busy) return`，
-      // 这里改成 true 等于让它直接返回 —— 界面停在「测速中」再也不动。
-      state.proxySub = { url: result.url || url, count: result.count || 0,
-                         summary: result.summary || '', speedNote: '正在测速，最多 20 秒…',
-                         speed: [], testing: true, busy: false };
+      // 注意 busy 必须是 false：那一格现在只管「节点库正在更新」，
+      // 测速的进行状态在 subTesting / freeTesting 里，两份状态各管各的。
+      // 只换订阅这一半，免费节点那份（nodes / nodesNote / freeSpeed）原样留着。
+      // 以前这里整块重建 state，把节点库状态一起清成 null，于是「免费节点」那行
+      // 从「维护于 2026-10-18 · 7 条」退化成「节点库：读取中…」，而没人再去读。
+      const prev = subState();
+      state.proxySub = Object.assign({}, prev, {
+        url: result.url || url, count: result.count || 0,
+        summary: result.summary || '', busy: false,
+        // 拉到了就已经有节点数了，这句比「正在测速，最多 20 秒」有信息量：
+        // 慢的是下载那一步（机场 TTFB 能到 10 秒），测本身一两秒。
+        subSpeed: [], subNote: '订阅已拉到 ' + (result.count || 0) + ' 个节点，正在测速…',
+        subTesting: true, subBad: false,
+        freeTesting: false,
+      });
       renderProxySettingsKeepScroll();
-      // 拉完直接测，用户不用再点一次 —— 「拉取」这个动作的意图就是要连上。
-      runSpeedTest();
+      // 拉完直接测这份订阅，用户不用再点一次 —— 「拉取」这个动作的意图就是要连上。
+      runSpeedTest('subscription');
     } catch (problem) {
       if (statusLine) { statusLine.hidden = false; statusLine.classList.add('is-bad'); statusLine.textContent = problem.message; }
       button.disabled = false;
@@ -3505,11 +3520,16 @@ document.addEventListener('click', async event => {
   if (subAction) {
     const action = subAction.dataset.proxySub;
     if (action === 'clear') {
+      // 这一步会把订阅地址和它的测速结果一起清掉，只留一个「改回免费」的小胶囊
+      // 杵在那儿，误触一次就没了。先问一句。
+      if (!await askConfirmation('改回用免费节点', '会清空已导入的订阅地址和它测出来的节点，之后可以重新粘贴。', '清空订阅')) return;
       subAction.disabled = true;
       proxyCoreCommand('subclear').then(() => {
         state.proxySub = {
-          url: '', count: 0, summary: '', speedNote: '', speed: [], testing: false, busy: false,
+          url: '', count: 0, summary: '', busy: false,
           nodes: null, nodesBusy: false, nodesNote: '',
+          subSpeed: [], subNote: '', subTesting: false,
+          freeSpeed: [], freeNote: '', freeTesting: false,
         };
         renderProxySettingsKeepScroll();
         loadNodesStatus();
@@ -3521,7 +3541,8 @@ document.addEventListener('click', async event => {
       refreshNodesFeed();
       return;
     }
-    runSpeedTest();
+    if (action === 'speed-sub') { runSpeedTest('subscription'); return; }
+    runSpeedTest('builtin');
     return;
   }
   const useNode = event.target.closest('[data-proxy-use]');

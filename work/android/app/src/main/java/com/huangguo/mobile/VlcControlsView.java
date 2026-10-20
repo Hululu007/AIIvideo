@@ -63,6 +63,9 @@ final class VlcControlsView {
     TextView titleView, metaView, clockView, hintView, errorView;
     IconButton playButton;
     IconButton lockButton;
+    /** 锁定态常驻的小角标。只有一枚小锁在屏上时，用户过一会儿就忘了自己锁着。 */
+    TextView lockChip;
+    private long lastLockTap;
     /**
      * 防误触锁。锁着的时候控制栏一律不出来，屏幕上只剩这一个锁 ——
      * 口袋里的误触、手指乱划都不会改进度、切集、退出。
@@ -270,14 +273,41 @@ final class VlcControlsView {
         lockButton.setIcon(IconButton.UNLOCK);
         lockButton.setContentDescription("锁定屏幕");
         lockButton.setBackground(rounded(0x40000000, 22));
+        // 锁定态要「双击」才解开：单击只提示一次。锁的存在意义是防误触，
+        // 单击即解等于把防误触反过来用在解锁上 —— 手指蹭一下屏幕就解开了。
         lockButton.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { host.onLockToggle(); }
+            @Override public void onClick(View v) {
+                if (!locked) { host.onLockToggle(); return; }
+                long now = android.os.SystemClock.uptimeMillis();
+                if (now - lastLockTap <= 900) {
+                    lastLockTap = 0;
+                    host.onLockToggle();
+                    return;
+                }
+                lastLockTap = now;
+                showHint("已锁定 · 再点一次解锁");
+                hideHintAfter(1400, new android.os.Handler(android.os.Looper.getMainLooper()));
+            }
         });
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(44), dp(44),
                 Gravity.START | Gravity.CENTER_VERTICAL);
         params.setMargins(dp(10), 0, 0, 0);
         root.addView(lockButton, params);
         lockButton.setVisibility(View.INVISIBLE);
+
+        lockChip = new TextView(activity);
+        lockChip.setText("已锁定");
+        lockChip.setTextColor(0xE6FFFFFF);
+        lockChip.setTextSize(11f);
+        lockChip.setGravity(Gravity.CENTER);
+        lockChip.setBackground(rounded(0x66000000, 12));
+        lockChip.setPadding(dp(10), dp(5), dp(10), dp(5));
+        FrameLayout.LayoutParams chipParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.START | Gravity.CENTER_VERTICAL);
+        chipParams.setMargins(dp(14), 0, 0, dp(58));
+        root.addView(lockChip, chipParams);
+        lockChip.setVisibility(View.GONE);
     }
 
     /**
@@ -299,7 +329,9 @@ final class VlcControlsView {
             if (bottomScrim != null) bottomScrim.animate().alpha(0f).setDuration(180).start();
             hideSpeedPanel();
             lockButton.setVisibility(View.VISIBLE);
+            if (lockChip != null) lockChip.setVisibility(View.VISIBLE);
         } else {
+            if (lockChip != null) lockChip.setVisibility(View.GONE);
             setVisible(true);
         }
     }
@@ -375,6 +407,7 @@ final class VlcControlsView {
             if (bottomScrim != null) bottomScrim.animate().alpha(0f).setDuration(180).start();
             hideSpeedPanel();
             if (lockButton != null) lockButton.setVisibility(View.VISIBLE);
+            if (lockChip != null) lockChip.setVisibility(View.VISIBLE);
             return;
         }
         if (lockButton != null) lockButton.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);

@@ -50,6 +50,13 @@ final class Subscription {
         int unsupported;
         /** 不支持的协议名，用于提示（去重，最多几个）。 */
         final java.util.Set<String> unsupportedNames = new LinkedHashSet<String>();
+        /**
+         * 同一份配置重复出现的条数（机场拿同一条线路复制好几份凑数）。
+         * 从结果里剔掉，只计数 —— 全留着的话测速会把同一条测五六遍。
+         */
+        int duplicates;
+        /** 被认成公告的条数（「剩余流量：50GB」「套餐到期」「拆盲盒」这类）。 */
+        int notices;
         String firstError;
 
         int size() {
@@ -121,7 +128,15 @@ final class Subscription {
             throw new IllegalArgumentException("订阅地址要以 http:// 或 https:// 开头");
         }
 
-        byte[] body = AiiHttp.getOnce(target, timeoutSeconds);
+        byte[] body;
+        try {
+            body = AiiHttp.getOnceRouted(target, timeoutSeconds);
+        } catch (Exception first) {
+            // 机场的 TTFB 实测能到 9~10 秒，第一次偶尔正好撞上节点抖动。
+            // 重试一次比让用户手点第二次强 —— 这条路上失败一次就得重粘地址。
+            UserSource.log("订阅第一次没下来（" + first.getMessage() + "），重试一次");
+            body = AiiHttp.getOnceRouted(target, timeoutSeconds);
+        }
         if (body == null || body.length == 0) {
             throw new Exception("订阅返回空内容");
         }
@@ -177,6 +192,8 @@ final class Subscription {
 
         // 去重：同一份订阅里重复节点很常见（多个分组会互相包含）。
         Set<String> seen = new LinkedHashSet<String>();
+        // 配置指纹 → 它在 result.nodes 里的下标。重复条目要靠它决定「留哪个名字」。
+        java.util.HashMap<String, Integer> keptAt = new java.util.HashMap<String, Integer>();
         for (String line : text.split("\\r?\\n")) {
             if (result.nodes.size() >= MAX_NODES) break;
             String item = line.trim();
@@ -196,6 +213,29 @@ final class Subscription {
                 XrayConfig.Node node = XrayConfig.parseShareLink(item);
                 // 解析出来还要能生成配置，否则是「解析器认得但 Xray 吃不下」的畸形节点。
                 XrayConfig.buildString(node, 20480);
+                String signature = signatureOf(node);
+                Integer kept = keptAt.get(signature);
+                if (kept != null) {
+                    // 同一份配置又出现一次。机场很爱把一条线路复制五份、再夹几条
+                    // 「剩余流量：50GB」「套餐到期」当节点塞进来 —— 这些条目的
+                    // 配置和真节点一模一样，名字才是区别。
+                    XrayConfig.Node first = result.nodes.get(kept.intValue());
+                    boolean notice = looksLikeNotice(node.name);
+                    if (notice) {
+                        result.notices++;
+                    } else if (looksLikeNotice(first.name)) {
+                        // 第一次遇到这份配置时拿到的名字是公告（订阅经常把
+                        // 「剩余流量」排在第一条），真名字在后面才出现 —— 用它覆盖，
+                        // 否则列表里那条节点就叫「剩余流量：50 GB」。
+                        first.name = node.name;
+                        result.links.set(kept.intValue(), item);
+                        result.notices++;
+                    } else {
+                        result.duplicates++;
+                    }
+                    continue;
+                }
+                keptAt.put(signature, Integer.valueOf(result.nodes.size()));
                 result.nodes.add(node);
                 result.links.add(item);
             } catch (Throwable e) {
@@ -208,6 +248,36 @@ final class Subscription {
             }
         }
         return result;
+    }
+
+    /**
+     * 一份配置的指纹：协议 + 服务器 + 端口 + 凭据 + 传输层的 path / Host / SNI。
+     *
+     * 不能用 host:port 当指纹 —— 同一台机器上跑着十个不同 uuid 的节点是正常配置，
+     * 那样会把真节点误删。反过来只看协议也不行。这里取的是「连上去以后行为会不会
+     * 一样」的那几个字段。
+     */
+    private static String signatureOf(XrayConfig.Node node) {
+        return node.protocol + '|' + node.server + ':' + node.port + '|'
+                + node.uuid + '|' + node.network + '|' + node.path + '|' + node.host
+                + '|' + node.tls + '|' + node.serviceName;
+    }
+
+    /**
+     * 名字看起来像不像机场的公告条目。
+     *
+     * 只在「配置与前面某条重复」时才用它 —— 万一某个真节点就叫「到期提醒」，
+     * 而它是唯一一条，那它还是节点，照样留着。
+     */
+    private static boolean looksLikeNotice(String name) {
+        if (name == null || name.isEmpty()) return false;
+        String n = name.toLowerCase(Locale.ROOT);
+        String[] keys = {"剩余流量", "流量", "到期", "套餐", "订阅", "官网", "客服", "加群",
+                "群组", "频道", "电报", "tg", "购买", "续费", "公告", "盲盒", "解锁", "倍率"};
+        for (String key : keys) {
+            if (n.contains(key)) return true;
+        }
+        return false;
     }
 
     private static boolean containsScheme(String text) {
@@ -501,6 +571,8 @@ final class Subscription {
         if (result == null) return "";
         StringBuilder sb = new StringBuilder();
         sb.append(result.size()).append(" 个节点");
+        if (result.duplicates > 0) sb.append("，").append(result.duplicates).append(" 条重复已合并");
+        if (result.notices > 0) sb.append("，").append(result.notices).append(" 条公告已忽略");
         if (result.failed > 0) sb.append("，").append(result.failed).append(" 个看不懂被跳过");
         if (result.unsupported > 0) {
             sb.append("，").append(result.unsupported).append(" 个不支持（");

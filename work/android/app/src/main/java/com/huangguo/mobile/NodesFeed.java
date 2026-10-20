@@ -239,7 +239,7 @@ final class NodesFeed {
         for (String url : candidates) {
             tried.add(url);
             try {
-                byte[] body = AiiHttp.getOnce(url, TIMEOUT_SECONDS);
+                byte[] body = AiiHttp.getOnceRouted(url, TIMEOUT_SECONDS);
                 if (body == null || body.length == 0) {
                     lastError = "返回空内容";
                     continue;
