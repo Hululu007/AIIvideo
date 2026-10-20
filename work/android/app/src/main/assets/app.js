@@ -3828,10 +3828,16 @@ api('app-version').then(version => {
   const label = content.querySelector('.app-version-text');
   if (label) label.textContent = `版本 v${appVersion}`;
 }).catch(() => {});
-// 启动后原来会 setTimeout 3 秒去 api('check-update') —— 那条链路指向
-// github.com/MrSsg/HuangguoAPP-for-Andriod 的 Releases，而那个仓库已经 404。
-// 每次冷启动白打一次外网，拿不回任何东西，已移除。见 UpdateManager.check 的注释。
-function startHome() { goHome(); }
+// 启动 4 秒后静默查一次更新（app-update.js 的 autoCheckUpdate）。
+//
+// 当年那段是删掉的：它指向 github.com/MrSsg/HuangguoAPP-for-Andriod，那个仓库
+// 404 了，每次冷启动都白打一次外网。现在清单在 android-update.json，通道是活的，
+// 而且原生那边有 12 小时节流（manual:false），重启几次也只打一次网络。
+// 只有真的发现新版本才弹一句提示，同一个版本只弹一次。
+function startHome() {
+  goHome();
+  setTimeout(() => { if (typeof autoCheckUpdate === 'function') autoCheckUpdate(); }, 4000);
+}
 // 年龄门的两颗按钮跟着私密入口一起去掉了（那条命令 Java 侧也删了，
 // 留着监听只会在用户误触时拿到一句「未知请求」）。DOM 仍在 app.html 里，
 // 但 age-gate 没有任何打开路径，恒 hidden。

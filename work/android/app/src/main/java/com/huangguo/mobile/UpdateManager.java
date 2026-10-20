@@ -40,6 +40,15 @@ import org.json.JSONObject;
  */
 final class UpdateManager {
     private static final long AUTO_INTERVAL_MS = 43200000;
+    /**
+     * 自动检查失败后的重试间隔。
+     *
+     * 计时器是在打网络**之前**写的（这样离线状态下反复冷启动也不会每次都去撞墙），
+     * 代价是一次失败就把整段 12 小时窗口用掉了 —— 第二天才补一次，用户当版
+     * 早就该升了。所以失败时把时间戳往回拨到「12 小时前 + 30 分钟」，下一次
+     * 冷启动 30 分钟后再试；离线连撞几次也是每半小时一次，不心疼。
+     */
+    private static final long AUTO_RETRY_MS = 1800000;
     private static final String MANIFEST_URL = Endpoints.UPDATE_MANIFEST;
     private static final int MANUAL_LIMIT = 5;
     private static final long MANUAL_WINDOW_MS = 3600000;
@@ -210,6 +219,13 @@ final class UpdateManager {
         }
 
         JSONObject manifest = fetchManifest();
+        if (manifest == null && !manual) {
+            // 没拿到清单：把自动检查的窗口缩短到 30 分钟，别把一次网络抖动
+            // 变成「今天不查了」。
+            this.preferences.edit()
+                    .putLong("last_auto_check", now - AUTO_INTERVAL_MS + AUTO_RETRY_MS)
+                    .apply();
+        }
         if (manual) {
             // 手点一次也算「刚查过」，把自动检查的计时器一起推后
             this.preferences.edit().putLong("last_auto_check", now).apply();

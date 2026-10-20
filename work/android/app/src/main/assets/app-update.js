@@ -46,6 +46,42 @@ function renderUpdateCheck() {
   tail.innerHTML = updateTailMarkup();
 }
 
+/**
+ * 启动后静默查一次更新。
+ *
+ * ── 为什么补这个 ──
+ * 上一版把启动时那次 check-update 删了（后台当年指向的仓库 404），从此「有新版本」
+ * 这件事只有用户自己翻到「设置 → 版本」点检查才会知道。装 2.0.4 的人不知道 2.0.5
+ * 已经能装上了 —— 版本更新成了需要用户主动猜的功能。
+ *
+ * manual:false 走原生那条 12 小时节流的自动通道，命中节流时它直接回缓存，不打网络。
+ *
+ * 提示只弹一次：同一个版本号记在 localStorage，用户看过之后就只剩设置页里那个
+ * 「更新到 vX」的按钮。不弹对话框、不拦启动 —— 这东西不该挡着人看片。
+ */
+const UPDATE_PROMPT_KEY = 'hgupd:prompted';
+
+async function autoCheckUpdate() {
+  if (updateCheck.phase === 'downloading' || updateCheck.phase === 'available') return;
+  let result;
+  try {
+    result = await api('check-update', { manual: false });
+  } catch (error) {
+    return;   // 没网、清单拉不到：静默算了，别在启动时甩一条红条给用户
+  }
+  if (String(result?.status || '') !== 'available') return;
+  updateCheck.phase = 'available';
+  updateCheck.info = result.available_manifest || result;
+  if (typeof renderUpdateCheck === 'function') renderUpdateCheck();
+  const version = String(updateCheck.info?.version || '');
+  if (!version) return;
+  let prompted = '';
+  try { prompted = localStorage.getItem(UPDATE_PROMPT_KEY) || ''; } catch (error) {}
+  if (prompted === version) return;
+  try { localStorage.setItem(UPDATE_PROMPT_KEY, version); } catch (error) {}
+  toast(`发现新版本 v${version} · 设置 → 版本 里更新`);
+}
+
 async function checkAppUpdate() {
   // 下载中就别重新检查了：那会把进度条换成「正在检查更新…」，看起来像点了没反应。
   if (updateCheck.phase === 'downloading') return;
