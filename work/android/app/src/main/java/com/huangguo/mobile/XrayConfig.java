@@ -730,7 +730,12 @@ final class XrayConfig {
 
 
     private static Node parseVmess(String base64) throws JSONException {
-        String json = utf8(base64Decode(base64));
+        // # 后面是节点备注，不属于 base64 载荷。真实链接几乎都带，
+        // 不切掉的话解码器会在补的「=」后面多出一堆字母，然后整条链接被拒。
+        String payload = base64;
+        int hash = payload.indexOf('#');
+        if (hash >= 0) payload = payload.substring(0, hash);
+        String json = utf8(base64Decode(payload.trim()));
         JSONObject raw = new JSONObject(json);
         Node node = new Node("vmess", raw.optString("add"), raw.optInt("port", 443));
         node.uuid = raw.optString("id");

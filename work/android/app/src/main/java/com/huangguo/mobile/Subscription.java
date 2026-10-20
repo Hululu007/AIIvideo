@@ -21,7 +21,8 @@ import java.util.Set;
  *   2. base64 包着  整段 base64，解开之后就是上面那种
  *   3. Clash YAML   `proxies:` 下的一串映射
  *
- * 前两种占绝大多数，这里都支持；Clash YAML **不做**，理由见 parse()。
+ * 三种都支持。Clash YAML 不引 YAML 库，只按缩进把 `proxies:` 读成一张张扁平表，
+ * 再转成上面那两种链接走同一套解析（见 clashToLinks）。
  *
  * ── 为什么不用现成的订阅转换服务 ──
  * 那些服务（subconverter 之类）要跑一个常驻进程，而且会把节点地址过一遍
@@ -335,9 +336,126 @@ final class Subscription {
                     + "?security=tls" + hash);
             return;
         }
-        // 认得出类型但这一版不转的（vmess / vless / hysteria2 / tuic …）
+        if ("vless".equals(type) || "vmess".equals(type) || "v2ray".equals(type)) {
+            String link = vlessOrVmessLink(type, p, server, port, hash);
+            // 缺 uuid 之类的不算「协议不支持」—— 这条映射本身是坏的，
+            // 记进 failed 才和摘要里的「看不懂被跳过」对得上。
+            if (link != null) out.add(link);
+            else result.failed++;
+            return;
+        }
+        // 认得出类型但这一版不转的（hysteria2 / tuic / ssr …）。
+        // 它们不是「格式没写好」，是 XrayConfig 里没有对应的 outbound。
         result.unsupported++;
         if (result.unsupportedNames.size() < 3) result.unsupportedNames.add(type);
+    }
+
+    /**
+     * Clash 的 vmess / vless 映射 → 同协议的分享链接。
+     *
+     * ── 为什么这两条非做不可 ──
+     * Clash Verge、CMFA、机场后台的「Clash 订阅」里，vmess 和 vless 占了绝大多数。
+     * 只转 ss/trojan/http 的话，用户把一份正常的 Clash 配置导进来会看到「0 个节点」，
+     * 然后以为是订阅坏了。
+     *
+     * ── 字段名映射 ──
+     * Clash 用连字符、分享链接用驼峰或缩写，两边对不上，逐个抄在这里：
+     *   network            → type
+     *   servername / sni   → sni
+     *   client-fingerprint → fp
+     *   reality-opts.public-key / short-id → pbk / sid（嵌套层会被摊平成顶层键，
+     *                        见 clashToLinks 的注释：解析器只认「最后一段冒号前的键」）
+     *   ws-opts.path / ws-opts.headers.Host → path / host
+     *   grpc-service-name  → serviceName
+     *   cipher（vmess）    → scy
+     *
+     * 返回值 null 表示这条映射缺关键字段（没 uuid 或者没 server），静默跳过即可。
+     */
+    private static String vlessOrVmessLink(String type, java.util.Map<String, String> p,
+                                           String server, String port, String hash) {
+        String uuid = pick(p, "uuid", "id", "password");
+        if (uuid.isEmpty()) return null;
+
+        String network = lower(pick(p, "network", "net"));
+        if (network.isEmpty()) network = "tcp";
+        // h2 在分享链接里写 h2，Clash 里写 http —— 统一成前者。
+        if ("http".equals(network)) network = "h2";
+
+        String publicKey = pick(p, "public-key", "pbk");
+        boolean reality = !publicKey.isEmpty();
+        boolean tlsOn = "true".equalsIgnoreCase(pick(p, "tls")) || reality;
+        String sni = pick(p, "servername", "sni");
+        String wsHost = pick(p, "host", "Host", "ws-host", "headers.Host");
+        String wsPath = pick(p, "path");
+        String grpcName = pick(p, "grpc-service-name", "servicename");
+        // vmess 的 grpc 把 serviceName 写在 path 上，和其它协议的习惯一致。
+        if ("grpc".equals(network) && grpcName.isEmpty() && !wsPath.isEmpty()) {
+            grpcName = wsPath;
+        }
+
+        if ("vmess".equals(type) || "v2ray".equals(type)) {
+            JSONObject json = new JSONObject();
+            try {
+                json.put("v", "2");
+                json.put("ps", p.get("name") == null ? "" : p.get("name"));
+                json.put("add", server);
+                json.put("port", port);
+                json.put("id", uuid);
+                // alterId 的键名在 Clash 里是 alterId，机场偶尔写 alterid。
+                String aid = pick(p, "alterId", "alterid", "aid");
+                json.put("aid", aid.isEmpty() ? "0" : aid);
+                String scy = pick(p, "cipher");
+                json.put("scy", scy.isEmpty() ? "auto" : scy);
+                json.put("net", network);
+                json.put("type", "none");
+                json.put("host", wsHost);
+                json.put("path", "grpc".equals(network) ? grpcName : wsPath);
+                json.put("tls", tlsOn ? "tls" : "none");
+                json.put("sni", sni);
+            } catch (Exception e) {
+                return null;
+            }
+            // parseVmess 只吃 base64(JSON)，不吃明文。
+            String body = java.util.Base64.getEncoder()
+                    .encodeToString(json.toString().getBytes(StandardCharsets.UTF_8));
+            return "vmess://" + body + hash;
+        }
+
+        StringBuilder q = new StringBuilder("encryption=none");
+        q.append("&security=").append(reality ? "reality" : (tlsOn ? "tls" : "none"));
+        q.append("&type=").append(network);
+        if (!wsPath.isEmpty() && !"/".equals(wsPath) && !"grpc".equals(network)) {
+            q.append("&path=").append(urlEncode(wsPath));
+        }
+        if (!wsHost.isEmpty()) q.append("&host=").append(urlEncode(wsHost));
+        if (!sni.isEmpty()) q.append("&sni=").append(urlEncode(sni));
+        String fp = pick(p, "client-fingerprint");
+        if (!fp.isEmpty()) q.append("&fp=").append(urlEncode(fp));
+        if (reality) {
+            q.append("&pbk=").append(urlEncode(publicKey));
+            String sid = pick(p, "short-id", "sid");
+            if (!sid.isEmpty()) q.append("&sid=").append(urlEncode(sid));
+        }
+        String flow = pick(p, "flow");
+        if (!flow.isEmpty()) q.append("&flow=").append(urlEncode(flow));
+        if (!grpcName.isEmpty()) q.append("&serviceName=").append(urlEncode(grpcName));
+
+        return "vless://" + urlEncode(uuid) + "@" + server + ":" + port + "?" + q + hash;
+    }
+
+    /** 按顺序取第一个非空的键。Clash 各家的键名写法不统一，全都试一遍。 */
+    private static String pick(java.util.Map<String, String> p, String... keys) {
+        for (String key : keys) {
+            String value = p.get(key);
+            if (value == null || value.isEmpty() || "None".equals(value)) continue;
+            String trimmed = value.trim();
+            if (trimmed.length() >= 2 && ((trimmed.startsWith("'") && trimmed.endsWith("'"))
+                    || (trimmed.startsWith("\"") && trimmed.endsWith("\"")))) {
+                trimmed = trimmed.substring(1, trimmed.length() - 1);
+            }
+            if (!trimmed.isEmpty()) return trimmed;
+        }
+        return "";
     }
 
     private static String lower(String v) {

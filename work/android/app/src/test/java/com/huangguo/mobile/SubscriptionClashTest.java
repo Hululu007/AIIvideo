@@ -47,9 +47,10 @@ public class SubscriptionClashTest {
         assertTrue("名字没带过去", links.get(0).contains("#"));
         assertTrue(links.get(1).startsWith("socks5://10.0.0.9:1080"));
 
-        // vmess 这一版不转，但要计数 —— 用户得知道「有 1 条没认」
-        assertEquals(1, r.unsupported);
-        assertEquals("vmess", r.unsupportedNames.iterator().next());
+        // 那条 vmess 缺 uuid，转不成链接：算「看不懂被跳过」，不是「协议不支持」
+        assertEquals("缺 uuid 的映射该记进 failed", 1, r.failed);
+        assertEquals("vmess 现在是支持的协议，不该进 unsupported 名单",
+                0, r.unsupported);
     }
 
     /** 整份 YAML 走 parse()，出来的节点要能生成 Xray 配置。 */
@@ -69,6 +70,73 @@ public class SubscriptionClashTest {
         assertTrue("没写出 tls：" + text, text.contains("\"security\":\"tls\""));
         assertTrue("没写 allowInsecure", text.contains("\"allowInsecure\":true"));
         assertTrue("没走 http 出站", text.contains("\"protocol\":\"http\""));
+    }
+
+    /**
+     * Clash Verge / CMFA 导出的 vmess 与 vless（含 reality）要能转出来。
+     *
+     * 这两类占了 Clash 订阅的绝大多数，只转 ss/trojan 的话正常配置导进来是 0 个节点。
+     */
+    @Test
+    public void VMESS与VLESS都能转成链接() throws Exception {
+        String yaml = "proxies:\n"
+                + "  - name: \"bwh-usca6-reality\"\n"
+                + "    type: vless\n"
+                + "    server: 64.64.224.121\n"
+                + "    port: 443\n"
+                + "    uuid: 2ccbb505-15f2-4e31-b309-169ba1cbaf39\n"
+                + "    network: tcp\n"
+                + "    udp: true\n"
+                + "    tls: true\n"
+                + "    flow: xtls-rprx-vision\n"
+                + "    servername: www.samsung.com\n"
+                + "    client-fingerprint: chrome\n"
+                + "    skip-cert-verify: false\n"
+                + "    reality-opts:\n"
+                + "      public-key: Cf3w2GhZxnWntQlWimHBx3a2oGvuPrqXEn1zrj8IMxg\n"
+                + "      short-id: d5710f7e182acefb\n"
+                + "  - name: ws 节点\n"
+                + "    type: vmess\n"
+                + "    server: 1.2.3.4\n"
+                + "    port: 8443\n"
+                + "    uuid: 11111111-2222-3333-4444-555555555555\n"
+                + "    alterId: 0\n"
+                + "    cipher: auto\n"
+                + "    network: ws\n"
+                + "    tls: true\n"
+                + "    ws-opts:\n"
+                + "      path: /ray\n"
+                + "      headers:\n"
+                + "        Host: cdn.example.com\n";
+
+        Subscription.Result r = Subscription.parse(yaml);
+        assertEquals("两条都该认出来：" + r.firstError, 2, r.size());
+
+        XrayConfig.Node vless = r.nodes.get(0);
+        assertEquals("vless", vless.protocol);
+        assertEquals("64.64.224.121", vless.server);
+        assertEquals("reality", vless.tls);
+        assertEquals("xtls-rprx-vision", vless.flow);
+        assertEquals("www.samsung.com", vless.host);
+        assertEquals("chrome", vless.fingerprint);
+        assertEquals("Cf3w2GhZxnWntQlWimHBx3a2oGvuPrqXEn1zrj8IMxg", vless.publicKey);
+        assertEquals("d5710f7e182acefb", vless.shortId);
+        // 能生成出来才算真认得
+        String cfg = XrayConfig.build(vless, 20482).toString();
+        assertTrue("reality 没写进配置：" + cfg, cfg.contains("reality"));
+
+        XrayConfig.Node vmess = r.nodes.get(1);
+        assertEquals("vmess", vmess.protocol);
+        assertEquals("1.2.3.4", vmess.server);
+        assertEquals(8443, vmess.port);
+        assertEquals("ws", vmess.network);
+        assertEquals("tls", vmess.tls);
+        assertEquals("/ray", vmess.path);
+        assertEquals("cdn.example.com", vmess.host);
+        assertNotNull(XrayConfig.build(vmess, 20483));
+
+        assertEquals(0, r.failed);
+        assertEquals(0, r.unsupported);
     }
 
     /** 反例：认不出任何代理时给一句人话，而不是「0 个节点」。 */
