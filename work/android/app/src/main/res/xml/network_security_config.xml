@@ -1,9 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    明文 HTTP 的取舍。
+
+    以前 base-config 是 false，只给三条抖音 CDN 开了白名单。但「订阅地址」是
+    用户自己填的任意 URL，很多机场和自建服务只给 http://IP:port/p/xxxx ——
+    这类地址永远不可能进白名单，于是拉订阅直接报
+    「CLEARTEXT communication to x.x.x.x not permitted by network security policy」。
+    节点本身也不受影响（Xray 出站是自己的 socket，不走这套策略）。
+
+    所以整个 App 放开明文：这东西本来就是满世界抓 http 资源的内容客户端，
+    白名单拦不住的东西比它拦住的多。域外 HTTPS 仍然照常走 TLS。
+-->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="false" />
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">douyinvod.com</domain>
-        <domain includeSubdomains="true">byteicdn.com</domain>
-        <domain includeSubdomains="true">byteimg.com</domain>
-    </domain-config>
+    <base-config cleartextTrafficPermitted="true" />
 </network-security-config>
