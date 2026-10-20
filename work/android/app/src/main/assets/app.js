@@ -712,8 +712,8 @@ const state = {
   sourceGroup: '', sourceQueue: [], previous: null, compactHeld: false,
   // 正在改备注的那个源的地址（内容源页面用）。空串 = 没有在编辑。
   sourceNote: '',
-  // 源市场 {loading, items, error}；TVBox 导入 {url, loading, items, error}
-  market: null, marketReturn: null, tvbox: null,
+  // 源市场 {loading, items, error}
+  market: null, marketReturn: null,
   // 内置播放器能力 {native, abi}；null = 还没问过
   nativeInfo: null,
   // 内置代理核心的状态 {mode, running, port, host, node, error, effective, ...}；
@@ -3260,7 +3260,6 @@ document.addEventListener('submit', async event => {
         hint = '已装源码 ' + name + '。它不会自己切换 —— 再贴这份源对应的 .json 配置（里面写着 web.spider）才会用上。';
         input.value = '';
         toast('已装 spider 源码 ' + name, true);
-        await loadSpiderSources(true);
       } catch (problem) {
         hint = '安装失败：' + (problem.message || problem);
       }
@@ -3314,13 +3313,6 @@ document.addEventListener('submit', async event => {
       state.market = { loading: false, error: failure.message || '获取失败' };
       if (state.route === 'market') renderMarket();
     });
-    return;
-  }
-  if (event.target.id === 'tvbox-form') {
-    event.preventDefault();
-    const url = String(document.getElementById('tvbox-value')?.value || '').trim();
-    if (!/^https:\/\//.test(url)) { state.tvbox = { url, loading: false, items: [], error: '地址必须以 https:// 开头' }; renderSourceSettings(); return; }
-    importTvBox(url);
     return;
   }
   const noteForm = event.target.closest('[data-source-note-form]');
@@ -3557,13 +3549,6 @@ document.addEventListener('click', async event => {
     const url = marketUse.dataset.marketUse;
     marketUse.disabled = true; marketUse.textContent = '正在切换…';
     addSourceFromMarket(url).catch(error => { toast(error.message, true); marketUse.disabled = false; marketUse.textContent = '添加并使用'; });
-    return;
-  }
-  const tvboxUse = event.target.closest('[data-tvbox-use]');
-  if (tvboxUse) {
-    const url = tvboxUse.dataset.tvboxUse;
-    tvboxUse.disabled = true; tvboxUse.textContent = '正在切换…';
-    addSourceFromMarket(url).catch(error => { toast(error.message, true); tvboxUse.disabled = false; tvboxUse.textContent = '添加并使用'; });
     return;
   }
   if (event.target.closest('[data-source-forget]')) {

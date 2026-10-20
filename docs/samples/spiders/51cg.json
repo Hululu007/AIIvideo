@@ -1,0 +1,202 @@
+{
+  "_note": "51吃瓜（51cg1.com）。自研 Typecho 系主题，服务端渲染，裸 curl 直接 200 —— 不是盾后站，没有 shield 块。封面写在 <script>loadBannerDirect('…')</script> 的参数里，不在 <img src>。播放走详情页 DPlayer 的 data-config：两条 m3u8（H.264 / H.265），分片是 AES-128 加密的 HLS，分片主机和 master 不同域，http.hosts 两个都要列。",
+  "origin": "https://51cg1.com",
+  "headers": {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36",
+    "Referer": "https://51cg1.com/",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+  },
+  "cover": {
+    "mode": "plain",
+    "allowedHosts": [
+      "pic.gyezbp.cn"
+    ],
+    "hostRewrites": {}
+  },
+  "http": {
+    "_why": "播放层出口。master 在 hls.weagdnz.cn；分片和 #EXT-X-KEY 的 crypt.key 在 tx.doudou520.online / mts.hhjd.mobi / ts.zhixunkeji.xyz 之间轮换（同一批视频也会换）。rewriteM3u8 只改写非 # 开头的行，所以分片走中继、key 由 VLC 直取 —— 两条都不经过站点本身。真机报「主机不在播放层白名单里」就把那个名字补进来。",
+    "hosts": [
+      "hls.weagdnz.cn",
+      "tx.doudou520.online",
+      "mts.hhjd.mobi",
+      "ts.zhixunkeji.xyz"
+    ]
+  },
+  "web": {
+    "spider": "https://149.104.21.177.sslip.io/spiders/51cg.js",
+    "firstPageSize": 25,
+    "pageSize": 25,
+    "categories": {
+      "wpcz": "今日吃瓜",
+      "cbdj": "AI成人短剧",
+      "xsxy": "学生校园",
+      "whhl": "网红黑料",
+      "rdsj": "热门大瓜",
+      "mrdg": "吃瓜榜单",
+      "bkdg": "必看大瓜",
+      "ysyl": "成人视频",
+      "mrds": "每日大赛",
+      "lldd": "伦理道德",
+      "gcjq": "国产视频",
+      "thjx": "探花精选",
+      "whhj": "网黄合集",
+      "snsn": "骚男骚女",
+      "whmx": "明星爆料",
+      "hwcg": "海外吃瓜",
+      "rrcg": "人人吃瓜",
+      "ldcg": "领导干部",
+      "jpll": "软萌甜妹",
+      "sjb": "竞技吃瓜",
+      "qubk": "吃瓜看戏",
+      "dcbq": "擦边撩骚",
+      "zzs": "性爱技巧",
+      "cgxw": "吃瓜新闻",
+      "51djc": "51剧场",
+      "yczq": "原创博主",
+      "51hd": "往期活动"
+    },
+    "ui": {
+      "tabs": [
+        {
+          "key": "wpcz",
+          "label": "今日吃瓜",
+          "icon": "sparkle"
+        },
+        {
+          "key": "whhl",
+          "label": "网红黑料",
+          "icon": "film"
+        },
+        {
+          "key": "mrds",
+          "label": "每日大赛",
+          "icon": "star"
+        },
+        {
+          "key": "ysyl",
+          "label": "成人视频",
+          "icon": "tv"
+        },
+        {
+          "key": "more",
+          "label": "更多",
+          "icon": "grid"
+        }
+      ],
+      "categoryIds": {
+        "wpcz": [
+          "wpcz"
+        ],
+        "whhl": [
+          "whhl"
+        ],
+        "mrds": [
+          "mrds"
+        ],
+        "ysyl": [
+          "ysyl"
+        ],
+        "more": [
+          "cbdj",
+          "xsxy",
+          "rdsj",
+          "mrdg",
+          "bkdg",
+          "lldd",
+          "gcjq",
+          "thjx",
+          "whhj",
+          "snsn",
+          "whmx",
+          "hwcg",
+          "rrcg",
+          "ldcg",
+          "jpll",
+          "sjb",
+          "qubk",
+          "dcbq",
+          "zzs",
+          "cgxw",
+          "51djc",
+          "yczq",
+          "51hd"
+        ]
+      },
+      "categoryLabels": {
+        "wpcz": [
+          "今日吃瓜"
+        ],
+        "whhl": [
+          "网红黑料"
+        ],
+        "mrds": [
+          "每日大赛"
+        ],
+        "ysyl": [
+          "成人视频"
+        ],
+        "more": [
+          "AI成人短剧",
+          "学生校园",
+          "热门大瓜",
+          "吃瓜榜单",
+          "必看大瓜",
+          "伦理道德",
+          "国产视频",
+          "探花精选",
+          "网黄合集",
+          "骚男骚女",
+          "明星爆料",
+          "海外吃瓜",
+          "人人吃瓜",
+          "领导干部",
+          "软萌甜妹",
+          "竞技吃瓜",
+          "吃瓜看戏",
+          "擦边撩骚",
+          "性爱技巧",
+          "吃瓜新闻",
+          "51剧场",
+          "原创博主",
+          "往期活动"
+        ]
+      },
+      "categoryTitles": {
+        "wpcz": "今日吃瓜",
+        "whhl": "网红黑料",
+        "mrds": "每日大赛",
+        "ysyl": "成人视频",
+        "more": "更多分类"
+      },
+      "popularTags": [
+        [
+          "wpcz",
+          "今日吃瓜"
+        ],
+        [
+          "whhl",
+          "网红黑料"
+        ],
+        [
+          "mrds",
+          "每日大赛"
+        ],
+        [
+          "ysyl",
+          "成人视频"
+        ],
+        [
+          "thjx",
+          "探花精选"
+        ]
+      ],
+      "publicPopularTags": [],
+      "tagGroups": [
+        [
+          "category",
+          "分类"
+        ]
+      ]
+    }
+  }
+}

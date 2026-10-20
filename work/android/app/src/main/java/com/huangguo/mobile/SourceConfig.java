@@ -967,6 +967,17 @@ final class SourceConfig {
                 // 换源只重建 Activity，**进程不死** —— 而预热结果和连接池都是 static，
                 // 不清的话新源会拿到旧源的首页字节（实测：切完直接弹「内容更新失败」）。
                 AiiHttp.resetForSourceChange();
+                // 内置核心的分流表也是「启动时固化」的（XrayConfig.buildString 抄的是
+                // 那一刻的 NetRoute.declaredProxyHosts）。换源不重建它，就会出现
+                // 「App 判代理、核心判直连」各走各的 —— 2026-10-20 黄果 62 秒超时
+                // 就是这么来的。这里跟着连接池一起重置。
+                try {
+                    ProxyCore.get(context).reapplyRouting();
+                } catch (Throwable broken) {
+                    // 核心没起来 / 正在切换时重建失败不该拦住换源本身 ——
+                    // 下一次连节点还会按新声明重建一次。
+                    UserSource.log("核心分流表重建失败（不影响换源）：" + broken);
+                }
                 JSONObject saved = read(context);
                 long spent = System.currentTimeMillis() - started;
                 UserSource.log("已设置用户源 → " + (saved == null ? "" : saved.optString("origin", ""))

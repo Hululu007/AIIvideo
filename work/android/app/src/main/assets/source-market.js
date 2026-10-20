@@ -1,5 +1,5 @@
 'use strict';
-// 自 app.js 拆出：源市场、TVBox 订阅导入、源设置页。
+// 自 app.js 拆出：源市场、源设置页。
 // 这三块只碰「源的地址清单」，不碰当前生效配置的内容（那是 Java 侧 user-source.json）。
 // 入口还留在 app.js，这里提供 renderMarket / goMarket / renderSourceSettings / goSourceSettings。
 // 内容源管理。
@@ -8,10 +8,10 @@
 // 切换 = 拿那个地址的本地缓存 + 覆盖当前配置，跟着第一次填走完全一样的校验 ——
 // 校验和干跑一个都不少（那才是「别把应用锁死」的那道闸），少的只是**网络那一段**。
 // 缓存不在时（第一次切到某个源）照旧现场拉一次，拉回来的那份会存成缓存。
-// ── 源市场与 TVBox 订阅导入 ────────────────────────────────────────────
+// ── 源市场 ────────────────────────────────────────────────────────────
 // 市场是一份静态清单（服务器上的 market.json），点一下等于走一遍和手动粘贴
 // 完全相同的 set 流程 —— 校验链一条不少，市场只是把「从哪找地址」这件事
-// 替你办了。TVBox 单仓配置同理：拉回来解析出 type 0/1 的源，逐个可加。
+// 替你办了。
 // 市场地址不内置 —— App 出厂不带任何地址，谁来维护清单由用户自己决定。
 // 用户粘一份清单地址，存在本地；换地址随时改。清单格式见 market.json 约定。
 const MARKET_KEY = 'hgmarket:v1';
@@ -88,7 +88,7 @@ function renderMarket() {
         <p id="market-error" class="auth-error" role="alert" hidden></p>
         <button type="submit">使用这个市场</button>
       </form>
-      <p class="market-footnote">没有清单地址？可以在「内容源」里手动添加单个源，或导入 TVBox 配置。</p>
+      <p class="market-footnote">没有清单地址？可以在「内容源」里手动添加单个源。</p>
     </div>`;
     return;
   }
@@ -128,74 +128,6 @@ function goMarket() {
   });
 }
 
-// 拉一份 TVBox 单仓配置并解析。结果留在 state.tvbox 里，页面重渲染不会丢。
-async function importTvBox(url) {
-  state.tvbox = { url, loading: true, items: [], error: '' };
-  if (state.route === 'source-settings') renderSourceSettings();
-  try {
-    const text = await fetchTextViaBridge(url);
-    const items = parseTvBox(text);
-    state.tvbox = { url, loading: false, items, error: '' };
-    try { localStorage.setItem(TVBOX_KEY, JSON.stringify({ url, at: Date.now() })); } catch (error) {}
-  } catch (error) {
-    state.tvbox = { url, loading: false, items: [], error: '解析失败：' + (error.message || error) };
-  }
-  if (state.route === 'source-settings') renderSourceSettings();
-}
-
-// TVBox 单仓配置：{sites:[{type,key,name,api}]}。只认 type 0/1（苹果CMS 采集），
-// spider JAR 那类需要下载执行代码的，明确标不支持、不显示。
-const TVBOX_KEY = 'tvbox:v1';
-function parseTvBox(text) {
-  const parsed = JSON.parse(text);
-  const sites = asArray(parsed.sites);
-  if (!sites.length) throw new Error('这份配置里没有 sites 列表');
-  return sites
-    .filter(site => site && [0, 1, '0', '1'].includes(site.type))
-    .map(site => ({
-      name: String(site.name || site.key || '未命名'),
-      api: String(site.api || '').trim(),
-      group: String(site.group || ''),
-    }))
-    .filter(site => /^https?:\/\//.test(site.api));
-}
-
-
-// TVBox 订阅区：粘一个单仓地址，解析出里面能用的 type 0/1 源。
-// 解析结果存在 state.tvbox 里，重新进设置页也还在（同一会话内），不用反复粘贴。
-function tvboxSection() {
-  const box = state.tvbox;
-  const rows = box && box.items && box.items.length
-    ? `<ul class="tvbox-list">${box.items.map(site => `
-        <li class="tvbox-item"><div class="tvbox-copy"><strong>${esc(site.name)}</strong><small>${esc(site.api)}</small></div>
-        <button type="button" class="tvbox-add" data-tvbox-use="${esc(site.api)}">添加并使用</button></li>`).join('')}</ul>`
-    : box && box.items
-      ? '<p class="field-hint">这份配置里没有能直接用的苹果CMS源（spider 类不支持）。</p>'
-      : '';
-  return `<section class="settings-card" aria-label="TVBox 导入">
-    <div class="settings-row is-static">
-      <span class="settings-icon">${icon('update')}</span>
-      <span class="settings-body"><strong>TVBox 配置</strong><small>只导入苹果CMS源，spider 类会跳过</small></span>
-    </div>
-    <form id="tvbox-form" class="password-form settings-form${box && box.loading ? ' is-loading' : ''}">
-      <input id="tvbox-value" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://example.com/tvbox.json" value="${esc(box?.url || '')}" aria-label="TVBox 地址">
-      ${box && box.error ? `<p class="auth-error" role="alert">${esc(box.error)}</p>` : ''}
-      <button type="submit" ${box && box.loading ? 'disabled' : ''}>${box && box.loading ? '正在解析…' : '解析配置'}</button>
-    </form>
-    ${rows}
-  </section>`;
-}
-
-// ── spider 源（阶段 1）─────────────────────────────────────────────
-//
-// 这一段是「加源不发版」第一次露在界面上：源不再是配置里的一个地址，而是一个
-// 可以随时下发的 js 文件。列表来自 Java 的 SpiderStore（热更 ui/spiders/ 优先，
-// APK assets 兜底），每一条都带 ok/reason —— 被 ABI 门禁拒掉的也在里面，因为
-// 「为什么这个源用不了」比「它不在列表里」有用得多。
-//
-// 点一下跑 home，只报卡片数。阶段 1 的目标是证明这条链路通了，不是做播放器；
-// 等模型定稿（阶段 2）再把结果接进真正的渲染路径。
-
 // ── 加源入口的分流（阶段 2）────────────────────────────────────────
 //
 // 一个输入框，两条路。后缀决定装什么：
@@ -214,57 +146,7 @@ function sourceKindOf(url) {
 
 /** 装 spider 源码，返回 {id,name,version}；失败把原因抛给调用方。 */
 async function installSpiderSource(url) {
-  const meta = await bridgeCall('spider', { op: 'install', url });
-  state.spiders = null;          // 清单变了，下次渲染重新读
-  return meta || {};
-}
-
-async function loadSpiderSources(force = false) {
-  if (state.spiders && !force) return state.spiders;
-  try {
-    const reply = await bridgeCall('spider', { op: 'list' });
-    state.spiders = { abi: Number(reply?.abi) || 0, items: asArray(reply?.spiders), error: '' };
-  } catch (error) {
-    state.spiders = { abi: 0, items: [], error: error.message || String(error) };
-  }
-  return state.spiders;
-}
-
-function spiderSection() {
-  const box = state.spiders;
-  const items = asArray(box?.items);
-  const rows = items.map(item => {
-    const ok = item.ok === true || item.ok === 'true';
-    const origin = item.source === 'user' ? '已安装' : (item.source === 'hot' ? '热更' : '内置');
-    const meta = [item.id, 'v' + (item.version || 0), origin].filter(Boolean).join(' · ');
-    const chip = ok ? '可用' : '不可用';
-    const user = item.source === 'user';
-    return `<li class="source-row${ok ? '' : ' is-disabled'}">
-      <button type="button" class="source-pick" data-spider-call="${esc(item.id)}" ${ok ? '' : 'disabled'}>
-        <span><strong>${esc(item.name || item.id || '未命名')}</strong><small>${esc(meta)}</small></span>
-        <em class="${ok ? 'is-ok' : 'is-warn'}">${esc(chip)}</em>
-      </button>
-      ${user ? `<button type="button" class="source-drop" data-spider-remove="${esc(item.id)}" aria-label="删除 ${esc(item.name || item.id)}">×</button>` : ''}
-      ${ok ? '' : `<p class="settings-form-hint">${esc(item.reason || '加载不了')}</p>`}
-    </li>`;
-  }).join('');
-  const hint = box == null
-    ? '正在读源清单…'
-    : (items.length ? `${items.length} 个 · 点一个跑一次 home` : '这个版本还没装任何 spider 源');
-  return `<section class="settings-card" aria-label="spider 源">
-    <div class="settings-row is-static">
-      <span class="settings-icon">${icon('source')}</span>
-      <span class="settings-body"><strong>spider 源</strong><small>${esc(box?.error || hint)}</small></span>
-      <span class="settings-tail"><button type="button" class="settings-mini" data-spider-refresh="1">刷新</button></span>
-    </div>
-    ${items.length ? `<ul class="source-list">${rows}</ul>` : ''}
-    <form class="password-form settings-form" data-spider-install="1">
-      <input id="spider-url" type="text" inputmode="url" autocomplete="off" autocapitalize="off"
-             spellcheck="false" placeholder="https://…/source.js" aria-label="spider 源地址">
-      <button type="submit">添加源</button>
-    </form>
-    <p class="settings-form-hint">${box ? 'ABI ' + box.abi + ' · 贴一个 js 地址即可，不用更新应用' : ''}</p>
-  </section>`;
+  return (await bridgeCall('spider', { op: 'install', url })) || {};
 }
 
 function renderSourceSettings() {
@@ -326,117 +208,10 @@ function renderSourceSettings() {
       <p class="settings-form-hint">.json 是源配置（切换并重启）；.js 是 spider 源码（装进运行时，不切换源）。</p>
     </section>
 
-    ${tvboxSection()}
-    ${spiderSection()}
   </div>`;
 }
 
 /** 写/清一个源的备注。空串 = 清掉，退回自动取的名字。 */
-// spider 的点击与刷新走 document 上的委托：这几行是这个文件自己的一小块，
-// 不值得再往 app.js 那个巨大的点击处理器里塞一条分支。
-document.addEventListener('submit', async event => {
-  const form = event.target.closest('[data-spider-install]');
-  if (!form) return;
-  event.preventDefault();
-  const input = form.querySelector('#spider-url');
-  const url = String(input?.value || '').trim();
-  if (!/^https:\/\//i.test(url)) { toast('地址必须以 https:// 开头'); return; }
-  input.disabled = true;
-  toast('正在装源…', true);
-  try {
-    // 走 setup.js 的 addOneSource，不是这里的 installSpiderSource。
-    //
-    // 差别只有一件事，但它是决定性的：spider 源**要装两样**（js 源码 + json 配置），
-    // 而这份表单原来只装源码、然后弹一句「还要贴它的 json 配置才会生效」。
-    // 用户照做的话得再去找那个 json 的地址 —— 而他手里通常只有一个。
-    // addOneSource 会自己推同目录的另一半，两个入口必须行为一致。
-    const one = window.HGSetup && window.HGSetup.addOneSource
-      ? await window.HGSetup.addOneSource(url)
-      : null;
-    if (!one) {
-      // setup.js 没加载时退回老路（只装源码）。不该发生，但别让按钮永远转圈。
-      const meta = await installSpiderSource(url);
-      toast('已装源码 ' + (meta?.name || meta?.id || '源'));
-    } else if (one.ok) {
-      toast('已装好：' + (one.spider || '源')
-        + (one.installedJs ? '（源码 + 配置）' : '（配置）'));
-    } else {
-      toast(one.error || '添加失败');
-    }
-    input.value = '';
-    await loadSpiderSources(true);
-  } catch (error) {
-    toast('添加失败：' + (error.message || error));
-  } finally {
-    input.disabled = false;
-    if (state.route === 'source-settings') renderSourceSettings();
-  }
-});
-
-document.addEventListener('click', async event => {
-  const drop = event.target.closest('[data-spider-remove]');
-  if (drop) {
-    event.preventDefault();
-    const id = drop.getAttribute('data-spider-remove');
-    const accepted = await askConfirmation('删除这个源', '删掉之后它就不再出现在列表里，可以重新添加。', '删除');
-    if (!accepted) return;
-    try {
-      await bridgeCall('spider', { op: 'remove', id });
-      state.spiders = null;
-      await loadSpiderSources(true);
-    } catch (error) {
-      toast('删除失败：' + (error.message || error));
-    }
-    if (state.route === 'source-settings') renderSourceSettings();
-    return;
-  }
-  const call = event.target.closest('[data-spider-call]');
-  const refresh = event.target.closest('[data-spider-refresh]');
-  if (!call && !refresh) return;
-  event.preventDefault();
-  if (refresh) {
-    state.spiders = null;
-    await loadSpiderSources(true);
-    if (state.route === 'source-settings') renderSourceSettings();
-    return;
-  }
-  const id = call.getAttribute('data-spider-call');
-  const label = call.querySelector('strong')?.textContent || id;
-  // 一次点按跑完整条链：home → detail（第一张卡的详情）→ play（第一集）。
-  //
-  // 只跑 home 证明不了什么 —— 选集和播放地址才是这条链路容易断的地方
-  // （集号是站点自己的字符串、线路要现取、地址在一段时间内有效）。
-  // 三段都过，这个源才算真的能用。
-  toast(label + ' · 正在跑 home…', true);
-  const t0 = Date.now();
-  try {
-    const home = await bridgeCall('spider', { op: 'call', id, cap: 'home', timeoutMs: 90000 });
-    const cards = asArray(home?.items);
-    if (!cards.length) throw new Error('home 没有返回卡片');
-    const ref = String(cards[0].id || '');
-    toast(label + ' · ' + cards.length + ' 张卡 · 取详情…', true);
-
-    const detail = await bridgeCall('spider', { op: 'call', id, cap: 'detail', args: { ref }, timeoutMs: 90000 });
-    const eps = asArray(detail?.episodes);
-    const lines = asArray(detail?.lines);
-    if (!eps.length) throw new Error('detail 没有返回剧集');
-
-    const first = eps[0];
-    const line = first.line || (lines[0] && lines[0].line) || 'default';
-    toast(label + ' · ' + eps.length + ' 集 · 取播放地址…', true);
-    const play = await bridgeCall('spider', {
-      op: 'call', id, cap: 'play', args: { ref, line }, timeoutMs: 90000
-    });
-    const url = String(play?.url || '');
-    if (!url) throw new Error('play 没有返回地址');
-    const secs = ((Date.now() - t0) / 1000).toFixed(1);
-    toast(label + ' · ' + cards.length + ' 卡 / ' + eps.length + ' 集 / ' + asArray(play.alts).length
-      + ' 备选 · ' + secs + 's');
-  } catch (error) {
-    toast(label + ' · 失败：' + (error.message || error));
-  }
-});
-
 async function saveSourceNote(url, text) {
   const clean = String(text == null ? '' : text).trim();
   try {
@@ -487,7 +262,5 @@ function goSourceSettings() {
   setRoute('source-settings');
   renderSourceSettings();
   refreshSources().then(() => { if (state.route === 'source-settings') renderSourceSettings(); }).catch(() => {});
-  // spider 清单是本地文件 IO，很快；读到之后单独重画一次，不挡源列表。
-  loadSpiderSources().then(() => { if (state.route === 'source-settings') renderSourceSettings(); }).catch(() => {});
   content.querySelector('#source-value')?.focus();
 }

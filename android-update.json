@@ -1,15 +1,15 @@
 {
-  "versionName": "1.0.31",
-  "tag": "v1.0.31",
-  "versionCode": 10031,
-  "apk": "AIIvideo-v1.0.31-release.apk",
+  "versionName": "2.0.0",
+  "tag": "v2.0.0",
+  "versionCode": 20000,
+  "apk": "AIIvideo-v2.0.0-release.apk",
   "urls": [
-    "https://gh-proxy.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.31/AIIvideo-v1.0.31-release.apk",
-    "https://ghfile.geekertao.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.31/AIIvideo-v1.0.31-release.apk",
-    "https://gh.dpik.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.31/AIIvideo-v1.0.31-release.apk",
-    "https://github.com/zhaoruizhe81/AIIvideo/releases/download/v1.0.31/AIIvideo-v1.0.31-release.apk"
+    "https://gh-proxy.com/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v2.0.0/AIIvideo-v2.0.0-release.apk",
+    "https://ghfile.geekertao.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v2.0.0/AIIvideo-v2.0.0-release.apk",
+    "https://gh.dpik.top/https://github.com/zhaoruizhe81/AIIvideo/releases/download/v2.0.0/AIIvideo-v2.0.0-release.apk",
+    "https://github.com/zhaoruizhe81/AIIvideo/releases/download/v2.0.0/AIIvideo-v2.0.0-release.apk"
   ],
-  "sha256": "48ef43d72600d49738ee4f76c601d194c923f77b2fa616805e7499e26c3cb783",
-  "size": 48998879,
-  "notes": "新增 MissAV 源：整站挂在 Cloudflare 后面，抓取全部走真 WebView 过盾后同源 fetch；视频 CDN surrit.com 同样挡 okhttp，取流改借 WebView 逐块取字节、播放列表改写后交给中继，两小时片长可拖进度、四档码率。顺带修四处：分类只有第一页（缺 pages 字段）、点分类 0 部作品（分类地址三种形态拼错）、全部类型空白（要分组信封）、集数 undefined（别名表缺 episodeNumber）。「无码影片」下补 12 个子站（无码流出/FC2/HEYZO/东京热/一本道/Caribbeancom/Gachinco/人妻斩…），素人 5 个。另修桥调用无超时导致详情页永久 loading。"
+  "sha256": "382fee534aa10d0e96bb7b95e50e1dc1f01e9876f93c69d63b9a53d73c29fc6e",
+  "size": 48997412,
+  "notes": "2.0.0：架构级更新，八家内置适配器全部迁成 spider，源从 App 里搬了出去。以后加源、换源、修源就是贴一个 https 地址，不用发版：源是一份跑在 CSP 沙箱里的 js，出站只能走它自己声明的 hosts，跑在独立进程里、90 秒看门狗。Java 侧删掉八千六百多行（八份站点头 + 九份解析器 + 注册表）。源市场扩到 12 个源，新接 Iwara、Pornhub、51吃瓜；盾后站点（MissAV / Iwara）交给真浏览器内核过盾，源里不写挑战检测；代理跟着源声明走。修掉：过盾回填从未生效（MissAV 首页空白）、黄果入口域被判成走代理导致 62 秒超时、换源后核心分流表不重建、分类只能翻第一页、点分类 0 部作品、选集点错集、详情页永久 loading、91porn 卡片错位、卡片过渡动画顿一下、进度条圆弧不同心。"
 }

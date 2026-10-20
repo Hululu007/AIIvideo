@@ -46,6 +46,21 @@
       "name": "黄果短剧",
       "desc": "spider · AI成人短剧 / 9 个分区 156 个标签 / 需代理 · 走内置核心",
       "url": "https://149.104.21.177.sslip.io/spiders/huangguo.json"
+    },
+    {
+      "name": "Iwara",
+      "desc": "spider · 二次元创作投稿 / 整站含 api 都在 Cloudflare 盾后，由真浏览器内核过盾 / 播放是两跳：签名清单再挑 CDN / http.hosts 列了 31 个域名",
+      "url": "https://149.104.21.177.sslip.io/spiders/iwara.json"
+    },
+    {
+      "name": "Pornhub",
+      "desc": "spider · 服务端渲染 / 无需过盾 / 97 个分类 / 封面是签名临时地址 / 播放走详情页 flashvars 的四档 HLS",
+      "url": "https://149.104.21.177.sslip.io/spiders/pornhub.json"
+    },
+    {
+      "name": "51吃瓜",
+      "desc": "spider · 服务端渲染 / 无需过盾 / 27 个分类 / 封面在脚本参数里 / 播放是 AES-128 的 HLS（H.264 + H.265 两线）",
+      "url": "https://149.104.21.177.sslip.io/spiders/51cg.json"
     }
   ]
 }

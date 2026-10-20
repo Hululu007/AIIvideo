@@ -1,0 +1,171 @@
+{
+  "_note": "Iwara（iwara.tv）。整站含 api 都在 Cloudflare 盾后 → web.shield 必须声明；封面图床 i.iwara.tv 没盾，走普通 okhttp。播放是两跳：/video/{id} 给 fileUrl，fileUrl 回来的是清晰度清单（不是视频），清单里的 src.view 才是直链，而那个主机名每次从固定池里随机挑 —— 所以 http.hosts 列的是实测到的整池，漏一个的表现是「能看详情、点播放报主机不在白名单」。",
+  "origin": "https://www.iwara.tv",
+  "headers": {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36",
+    "Referer": "https://www.iwara.tv/",
+    "Accept": "application/json, text/plain, */*"
+  },
+  "cover": {
+    "mode": "plain",
+    "allowedHosts": [
+      "i.iwara.tv"
+    ],
+    "hostRewrites": {}
+  },
+  "http": {
+    "_why": "播放层出口。filesq 是签名清单那一跳；其余是视频直链的随机主机池（站点把 Honkai/星铁的角色名当 CDN 别名轮换）。实测 2026-10-19：抽查 120 条视频的清单共出现 13 个不同主机，两次请求同一条视频主机名就会变。池子是固定的，但新名字会陆续出现 —— 真机日志里如果出现「主机不在播放层白名单里：xxx.iwara.tv」，把那个名字补进来即可。",
+    "hosts": [
+      "filesq.iwara.tv",
+      "files.iwara.tv",
+      "acheron.iwara.tv",
+      "aiko.iwara.tv",
+      "asta.iwara.tv",
+      "bailu.iwara.tv",
+      "blade.iwara.tv",
+      "bronya.iwara.tv",
+      "camellya.iwara.tv",
+      "clara.iwara.tv",
+      "firefly.iwara.tv",
+      "hanya.iwara.tv",
+      "herta.iwara.tv",
+      "hime.iwara.tv",
+      "himeko.iwara.tv",
+      "hook.iwara.tv",
+      "jade.iwara.tv",
+      "kafka.iwara.tv",
+      "lumi.iwara.tv",
+      "mikoto.iwara.tv",
+      "naja.iwara.tv",
+      "pela.iwara.tv",
+      "phoebe.iwara.tv",
+      "robin.iwara.tv",
+      "silverwolf.iwara.tv",
+      "sparkle.iwara.tv",
+      "topaz.iwara.tv",
+      "welt.iwara.tv",
+      "youhu.iwara.tv",
+      "yukong.iwara.tv",
+      "zani.iwara.tv"
+    ]
+  },
+  "web": {
+    "spider": "https://149.104.21.177.sslip.io/spiders/iwara.js",
+    "firstPageSize": 32,
+    "pageSize": 32,
+    "shield": {
+      "_why": "www/api/filesq/视频 CDN 全在 Cloudflare 盾后：带完整安卓 Chrome 头裸 curl 也是 403 + 5.4KB 的 Just a moment（差的是 TLS 指纹，不是 UA）。这里只写 iwara.tv 一个裸域 —— ShieldProfile.matches 是「精确相等 或 后缀 .iwara.tv」，一条就把 www / api / filesq / 那三十来个随机 CDN 别名全罩住。warmup 选最轻的列表页，cookie 是 clearance 归属的 origin。",
+      "warmup": "https://www.iwara.tv/videos",
+      "hosts": [
+        "iwara.tv"
+      ],
+      "cookie": "https://www.iwara.tv/"
+    },
+    "categories": {
+      "date": "最新投稿",
+      "trending": "正在流行",
+      "popularity": "人气最高",
+      "views": "播放最多",
+      "likes": "最多喜欢"
+    },
+    "ui": {
+      "tabs": [
+        {
+          "key": "date",
+          "label": "最新",
+          "icon": "sparkle"
+        },
+        {
+          "key": "trending",
+          "label": "流行",
+          "icon": "film"
+        },
+        {
+          "key": "popularity",
+          "label": "人气",
+          "icon": "star"
+        },
+        {
+          "key": "views",
+          "label": "播放",
+          "icon": "tv"
+        },
+        {
+          "key": "more",
+          "label": "更多",
+          "icon": "grid"
+        }
+      ],
+      "categoryIds": {
+        "date": [
+          "date"
+        ],
+        "trending": [
+          "trending"
+        ],
+        "popularity": [
+          "popularity"
+        ],
+        "views": [
+          "views"
+        ],
+        "more": [
+          "likes"
+        ]
+      },
+      "categoryLabels": {
+        "date": [
+          "最新投稿"
+        ],
+        "trending": [
+          "正在流行"
+        ],
+        "popularity": [
+          "人气最高"
+        ],
+        "views": [
+          "播放最多"
+        ],
+        "more": [
+          "最多喜欢"
+        ]
+      },
+      "categoryTitles": {
+        "date": "最新投稿",
+        "trending": "正在流行",
+        "popularity": "人气最高",
+        "views": "播放最多",
+        "more": "更多排序"
+      },
+      "popularTags": [
+        [
+          "date",
+          "最新投稿"
+        ],
+        [
+          "trending",
+          "正在流行"
+        ],
+        [
+          "popularity",
+          "人气最高"
+        ],
+        [
+          "views",
+          "播放最多"
+        ],
+        [
+          "likes",
+          "最多喜欢"
+        ]
+      ],
+      "publicPopularTags": [],
+      "tagGroups": [
+        [
+          "sort",
+          "排序"
+        ]
+      ]
+    }
+  }
+}

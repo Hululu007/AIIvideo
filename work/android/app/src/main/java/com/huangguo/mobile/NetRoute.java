@@ -85,10 +85,18 @@ final class NetRoute {
             }
             if (net.optBoolean("declared", false)) has = true;
         }
-        // origin 一定要在表里。这一条防的是「适配器忘了写 net」这种低级错误：
-        // 忘了写就整站直连，而站点入口恰好是被墙的那个 —— 症状是加源直接超时，
-        // 用户完全看不出原因。
-        if (has && origin != null) {
+        // origin 兜底进代理表 —— **只在作者真的列了代理域时**。
+        //
+        // 2026-10-20 真机（黄果）：源写的是 `{declared:true, proxy:[]}`，按规范
+        // §7.1 那是「显式全直连」。但这里原来无条件把 origin 塞进表里，于是
+        // huangguoai.com 被判成「必须代理」，日志里 `路由 → 代理` 和配置上写的
+        // 「全直连」正好相反。当时的表现是每次请求 62 秒超时。
+        //
+        // 空表不是「忘了写」，是「一个都不想代理」—— 这两种语义必须分开：
+        //   proxy: ["yhdm.one"]  → 列了的走代理；origin 若漏了补上（防手误）
+        //   proxy: []            → 全直连，origin 也不碰
+        // `net` 整个不写（has=false）时依旧走老规则，这条兜底不参与。
+        if (has && !hosts.isEmpty() && origin != null) {
             String host = hostOf(origin);
             if (host.length() > 0 && !hosts.contains(host)) hosts.add(host);
         }

@@ -39,6 +39,10 @@ work/shells/chengzi-v0.3.15.apk
 work/shells/*.apk
 work/shells/*.keystore
 
+# 2026-10-20：水果派（pie）的原始安装包。逆向只读它，产物是 pie.js，
+# 26MB 的 APK 没有理由进仓库。要复现就自己下同版本。
+pie_*.apk
+
 # ── 过程中的截图（25MB）───────────────────────────────────────────────
 # README 用的三张在 docs/shots/ 里。
 work/shots/
@@ -83,3 +87,11 @@ work/shells/nativetest/libEGL.so
 work/shells/nativetest/libc++.so
 work/shells/nativetest/libjnigraphics.so
 work/shells/nativetest/libz.so
+
+# ── pie 逆向的中间产物（2026-10-20）──────────────────────────────────
+# 别人的 so、strings 转储、截图，都能从原始 APK 重新生成。
+# 原始 APK 本身已经在上面忽略掉了，这几样更没理由进仓库。
+work/re/pie/*.so
+work/re/pie/*.strings.txt
+work/re/pie/*.png
+work/re/pie/__pycache__/

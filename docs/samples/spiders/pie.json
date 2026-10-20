@@ -1,0 +1,108 @@
+{
+  "origin": "https://926api.25xzguk9.com",
+  "headers": {
+    "User-Agent": "okhttp/4.12.0",
+    "Content-Type": "application/json"
+  },
+  "cover": {
+    "mode": "plain",
+    "allowedHosts": [
+      "img.2ktdfje.top",
+      "qzpic.jxpolygon.com"
+    ]
+  },
+  "web": {
+    "spider": "https://cdn.example.com/spiders/pie.js",
+    "ui": {
+      "tabs": [
+        {
+          "key": "1",
+          "label": "吃瓜",
+          "icon": "fire"
+        },
+        {
+          "key": "2",
+          "label": "AV资讯",
+          "icon": "film"
+        },
+        {
+          "key": "5",
+          "label": "ASMR",
+          "icon": "star"
+        },
+        {
+          "key": "6",
+          "label": "漫画",
+          "icon": "grid"
+        },
+        {
+          "key": "7",
+          "label": "图文故事",
+          "icon": "grid"
+        }
+      ],
+      "categoryIds": {
+        "1": [
+          "1"
+        ],
+        "2": [
+          "2"
+        ],
+        "5": [
+          "5"
+        ],
+        "6": [
+          "6"
+        ],
+        "7": [
+          "7"
+        ]
+      },
+      "categoryLabels": {
+        "1": [
+          "吃瓜"
+        ],
+        "2": [
+          "AV资讯"
+        ],
+        "5": [
+          "ASMR"
+        ],
+        "6": [
+          "漫画"
+        ],
+        "7": [
+          "图文故事"
+        ]
+      }
+    },
+    "categories": {
+      "1": "吃瓜",
+      "2": "AV资讯",
+      "5": "ASMR",
+      "6": "漫画",
+      "7": "图文故事",
+      "8": "热门推荐"
+    }
+  },
+  "net": {
+    "declared": true,
+    "proxy": [
+      "926api.25xzguk9.com",
+      "926api.0a858f.com",
+      "926api.9mjcuuq.com",
+      "926api.1e079e6.com",
+      "api.u7kt9ez.com",
+      "926api.fe76wug.com",
+      "926api.9db322c.com",
+      "api926.aed8c8.com",
+      "api926.0098104.com",
+      "api926.12ee0a3.com",
+      "api.3hvkdg.com",
+      "api.ek8rmg.com",
+      "api.gpmhkg.com",
+      "api.rgydg4.com",
+      "api.xmxfmq.com"
+    ]
+  }
+}

@@ -126,6 +126,31 @@ public final class ProxyCore {
     // ── 启停 ──────────────────────────────────────────────────────────
 
     /**
+     * 换源之后重建分流表。
+     *
+     * <p><b>为什么需要这个</b>（2026-10-20 真机，黄果 62 秒超时）：核心的 routing 是
+     * {@link XrayConfig#buildString} 在<b>启动那一刻</b>固化的，里面抄的是当时的
+     * {@code NetRoute.declaredProxyHosts()}。而用户是「先连代理、后切源」——
+     * 切源只重建 Activity，进程不死、核心也不重启，于是核心那份表里根本没有新源的
+     * 声明，落到了 DirectHosts 那条 direct 规则上。
+     *
+     * <p>结果是一条请求被两边判成相反的方向：App 侧说「这个域走代理」（把它塞进
+     * SOCKS），核心侧说「这个域直连」（把它交给运营商网络）—— 日志里 Xray 那行
+     * {@code accepted tcp:host:443 [direct]} 就是证据。用户看到的是转 60 秒然后失败。
+     *
+     * <p>不能靠 {@link #start} 自己发现：同一个节点重复调用会在
+     * {@code sameNode} 那一行直接 return，配置永远不重建。
+     */
+    synchronized void reapplyRouting() {
+        if (!isRunning() || currentNode == null) return;
+        XrayConfig.Node node = copy(currentNode);
+        // stop 之后 isRunning() 为 false，再 start 就一定会重新 buildString ——
+        // 这正是我们要的：拿新的 declaredProxyHosts 重新生成一遍 routing。
+        stop();
+        start(node);
+    }
+
+    /**
      * 用给定节点起核心。同一个节点重复调用是空操作。
      *
      * @return 起来了（或本来就在跑）返回 true

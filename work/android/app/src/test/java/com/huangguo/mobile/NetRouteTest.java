@@ -63,13 +63,37 @@ public class NetRouteTest {
         assertFalse(NetRoute.proxyUnavailable("bfikuncdn.com"));
     }
 
-    /** origin 就算源配置忘了写进 net.proxy，也必须进代理表 —— 否则整站直连，加源直接超时。 */
-    @Test public void origin兜底进代理表() throws Exception {
+    /**
+     * 作者列了代理域、但漏了 origin → 兜底补上（防手误）。
+     *
+     * <p>这条是「手写源忘了把入口域写进 net.proxy」的保险。补的只是<b>漏项</b>，
+     * 不是「只要声明了就把 origin 拉进代理」—— 那种语义会把显式全直连翻过来，
+     * 见下一个用例。
+     */
+    @Test public void origin漏写时兜底进代理表() throws Exception {
         JSONObject net = new JSONObject();
-        net.put("proxy", new JSONArray());        // 空表，等于「什么都不代理」
+        net.put("proxy", new JSONArray().put("some-cdn.example"));   // 列了别的，没列 origin
         NetRoute.configure(net, "https://yhdm.one");
         assertTrue("origin 必须被兜底塞进代理表", NetRoute.mustProxy("yhdm.one"));
         assertTrue(NetRoute.directOnly("bfikuncdn.com"));
+    }
+
+    /**
+     * `{declared:true, proxy:[]}` = **显式全直连**（规范 §7.1 的原话）。
+     *
+     * <p>2026-10-20 真机：黄果源就是这么写的，而 configure 无条件把 origin 塞进
+     * 代理表，于是 huangguoai.com 被判成「必须代理」—— 和作者的声明正好相反，
+     * 表现是每次请求 62 秒超时。空表和「忘了写」必须分开。
+     */
+    @Test public void 空代理表等于全直连() throws Exception {
+        JSONObject net = new JSONObject();
+        net.put("declared", true);
+        net.put("proxy", new JSONArray());        // 一个都不想代理
+        NetRoute.configure(net, "https://huangguoai.com");
+        assertTrue("声明过 net 块", NetRoute.declared());
+        assertFalse("origin 不该被拉进代理表", NetRoute.mustProxy("huangguoai.com"));
+        assertTrue("origin 应该直连", NetRoute.directOnly("huangguoai.com"));
+        assertTrue("别的域也直连", NetRoute.directOnly("pic.example.com"));
     }
 
     /** 没声明 net 的源维持老语义：DirectHosts 白名单 + 全局开关。 */

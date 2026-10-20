@@ -541,6 +541,225 @@ const PROFILES = {
     },
   },
 
+  // ── yarn 9：iwara（JSON 接口 + 盾后站）────────────────────────────────
+  //
+  // 这个源和其它八家的差别只有两条，都在夹具里体现：
+  //   ① 列表夹具故意做成「盾后回填形态」—— JSON 被包在 <pre> 里，外面还有
+  //      <html><body>。真机上主进程过盾交回来的就是这个（WebView 的 outerHTML），
+  //      所以回归必须跑这条，否则 unwrap() 那半边永远没人验。
+  //   ② 搜索和详情是裸 JSON（模拟壳直接回字节的那条路），两条路都覆盖。
+  //
+  // 数字全部来自 2026-10-19 的真实响应：首页 limit=32 回 32 条（count=33 是站点的
+  // 假数 —— 恒等于 page*limit+n+1，别拿它判 hasMore）；搜索 "hatsune miku" 的 count=1566。
+  iwara: {
+    dir: 'iwara',
+    routes: [
+      // 第二跳：签名清单。必须排在 /video/ 前面（都在 iwara 域，先命中先赢）。
+      { match: /filesq\.iwara\.tv\/file\//, file: 'file-manifest.json' },
+      { match: /api\.iwara\.tv\/search\?/, file: 'search-hatsune-p0.json' },
+      { match: /api\.iwara\.tv\/video\/PCueI2c9srkJ0r/, file: 'video-pcue.json' },
+      { match: /api\.iwara\.tv\/videos\?/, file: 'videos-date-p0.html' },
+    ],
+    checks: {
+      home: [
+        ['32 张卡（实测 limit=32 满页）', r => (r.items || []).length === 32],
+        ['hasMore 是布尔 true', r => r.hasMore === true],
+        ['首条 id 是 0bmwbE50acZY4B', r => String((r.items || [])[0] && r.items[0].id) === '0bmwbE50acZY4B'],
+        ['封面走 i.iwara.tv（<pre> 包壳已剥开）',
+          r => (r.items || []).every(one => String(one.cover || '').indexOf('https://i.iwara.tv/image/') === 0)],
+        ['自定义封面走 /image/original/（FqzgOSpbK2hwsY）',
+          r => (r.items || []).some(one => String(one.cover || '').indexOf('/image/original/') > 0)],
+        ['缩略图序号两位零填充',
+          r => (r.items || []).filter(one => String(one.cover || '').indexOf('/image/thumbnail/') > 0)
+            .every(one => /thumbnail-\d{2}\.jpg$/.test(String(one.cover)))],
+        ['时长格式 m:ss（494 秒 → 8:14）',
+          r => String((r.items || [])[0] && r.items[0].duration) === '8:14'],
+        ['标签非空', r => ((r.items || [])[0] && (r.items[0].tags || []).length) > 0],
+      ],
+      category: [
+        ['32 张卡', r => (r.items || []).length === 32],
+        ['page 回 1', r => r.page === 1],
+        ['hasMore 是布尔 true', r => r.hasMore === true],
+      ],
+      search: [
+        ['32 张卡', r => (r.items || []).length === 32],
+        // 搜索接口的 count 是真总数（1566），所以 hasMore 该按 count 算。
+        ['hasMore 是布尔 true（count=1566）', r => r.hasMore === true],
+        ['命中的是 miku（首条标题含 Miku）',
+          r => /miku/i.test(String((r.items || [])[0] && r.items[0].title))],
+      ],
+      detail: [
+        ['id 是 PCueI2c9srkJ0r', r => String(r.id || '') === 'PCueI2c9srkJ0r'],
+        ['标题非空', r => String(r.title || '').length > 0],
+        ['单集（一条投稿就是一个视频）', r => (r.episodes || []).length === 1],
+        ['episodeCount 是 1', r => r.episodeCount === 1],
+        ['episodes[0].ref 是视频 id', r => String((r.episodes || [{}])[0].ref) === 'PCueI2c9srkJ0r'],
+        ['封面是 i.iwara.tv 绝对地址',
+          r => String(r.cover || '').indexOf('https://i.iwara.tv/') === 0],
+      ],
+      play: [
+        ['两档线路（360 + preview）', r => (r.alts || []).length === 2],
+        ['默认播 360P，不是 preview', r => String((r.alts || [{}])[0].line) === '360'],
+        // 契约 §5.3：url 必须落在 alts 里，否则切一次线路再切回来就换源了。
+        ['url 落在 alts 里', r => (r.alts || []).some(one => one.url === r.url)],
+        ['url 是 https 绝对地址（协议相对地址已补全）',
+          r => /^https:\/\/[a-z0-9.-]+\.iwara\.tv\//.test(String(r.url || ''))],
+        ['没把清单 JSON 的地址当播放地址',
+          r => String(r.url || '').indexOf('filesq.iwara.tv/file/') < 0],
+      ],
+    },
+    args: {
+      home: {},
+      category: { slug: 'date', page: 1 },
+      search: { keyword: 'hatsune miku', page: 1 },
+      detail: { ref: 'PCueI2c9srkJ0r' },
+      play: { ref: 'PCueI2c9srkJ0r', ep: 1 },
+    },
+  },
+
+  // ── yarn 10：pornhub（服务端渲染 HTML，无盾）──────────────────────────
+  //
+  // 夹具是从真实页面**裁**出来的，不是造的：1MB 的页面塞进仓库太重，所以只留
+  // 两段 —— 前 100KB（含 <link rel="next">，hasMore 就靠它）和头 12 张卡的原始
+  // 标记。卡片标记一个字节没改，所以正则这边等价于跑整页。
+  //
+  // 搜索页必须单独一份：它的时长 span 是 `bgEffect time`、标题 <a> 多一个
+  // `thumbnailTitle`，跟列表页不是同一套标记 —— 这正是最容易「看起来正常、
+  // 其实一张都没解析出来」的地方。
+  pornhub: {
+    dir: 'pornhub',
+    routes: [
+      { match: /view_video\.php\?viewkey=/, file: 'detail.html' },
+      { match: /\/video\/search\?/, file: 'search.html' },
+      { match: /\/video\?c=/, file: 'category.html' },
+      { match: /\/video$/, file: 'list.html' },
+    ],
+    checks: {
+      home: [
+        ['12 张卡（夹具裁到头 12 张）', r => (r.items || []).length === 12],
+        ['hasMore 是布尔 true（靠 <link rel="next">）', r => r.hasMore === true],
+        ['首条 id 是 vkey（不是数字 video-id）',
+          r => String((r.items || [])[0] && r.items[0].id) === '6ad1206973670'],
+        ['id 是 13 位 viewkey 形状',
+          r => (r.items || []).every(one => /^[0-9a-f]{13}$/.test(String(one.id)))],
+        ['封面在 phncdn 图床',
+          r => (r.items || []).every(one => /^https:\/\/[a-z0-9.-]+\.phncdn\.com\//.test(String(one.cover)))],
+        ['时长是 m:ss（首条 15:10）',
+          r => String((r.items || [])[0] && r.items[0].duration) === '15:10'],
+        ['标题非空且无 HTML 残留',
+          r => (r.items || []).every(one => String(one.title).length > 0 && String(one.title).indexOf('<') < 0)],
+      ],
+      category: [
+        ['12 张卡', r => (r.items || []).length === 12],
+        ['page 回传 1', r => r.page === 1],
+        ['hasMore 是布尔 true', r => r.hasMore === true],
+      ],
+      search: [
+        ['搜索页 12 张卡（bgEffect time 那套标记也能解析）', r => (r.items || []).length === 12],
+        ['首条是中文标题（搜索命中的那条）',
+          r => String((r.items || [])[0] && r.items[0].title).indexOf('整张床') === 0],
+        // videoViews 只有搜索页有，能解析出来就说明走的确实是搜索页那套结构。
+        ['能读出播放量（1.9M）',
+          r => String((r.items || [])[0] && r.items[0].score) === '1.9M'],
+        ['hasMore 是布尔 true', r => r.hasMore === true],
+      ],
+      detail: [
+        ['id 是 viewkey', r => String(r.id || '') === '6ad1206973670'],
+        ['标题取自 flashvars.video_title',
+          r => String(r.title || '').indexOf('Japanese sexy Yume Hoshino') === 0],
+        ['单集', r => (r.episodes || []).length === 1],
+        ['选集说明里带时长 15:10',
+          r => String((r.episodes || [{}])[0].title).indexOf('15:10') >= 0],
+        ['封面在 phncdn', r => /^https:\/\/[a-z0-9.-]+\.phncdn\.com\//.test(String(r.cover || ''))],
+      ],
+      play: [
+        ['四档 HLS（1080/720/480/240）', r => (r.alts || []).length === 4],
+        ['默认给 1080P', r => String((r.alts || [{}])[0].line) === '1080'],
+        ['url 落在 alts 里', r => (r.alts || []).some(one => one.url === r.url)],
+        ['给的是 m3u8，不是 /video/get_media（那条实测回来是空数组）',
+          r => String(r.url || '').indexOf('master.m3u8') > 0
+            && String(r.url || '').indexOf('/video/get_media') < 0],
+        ['线路名可读（1080P 这种）', r => String((r.alts || [{}])[0].name) === '1080P'],
+      ],
+    },
+    args: {
+      home: {},
+      category: { slug: '1', page: 1 },
+      search: { keyword: 'asian', page: 1 },
+      detail: { ref: '6ad1206973670' },
+      play: { ref: '6ad1206973670', ep: 1 },
+    },
+  },
+
+  // ── yarn 11：51cg（自研主题，服务端渲染，无盾）────────────────────────
+  //
+  // 夹具同样是裁的：留着前 60KB（`<link rel="next">` 在这儿）和头 12 张卡的原始标记。
+  // 两类详情页各留一份 —— 视频帖（带 data-config）和图文帖（没有），因为
+  // 「图文帖要降级成 reason 而不是报错」是这个站独有的一条分支。
+  //
+  // 卡片封面不在 <img src> 里，而是写在 `<script>loadBannerDirect('…')</script>` 的
+  // 参数里，所以断言盯的是「封面来自那个脚本参数」而不是「有 src 属性」。
+  '51cg': {
+    dir: '51cg',
+    routes: [
+      { match: /\/archives\/279044\//, file: 'detail-video.html' },
+      { match: /\/archives\/279391\//, file: 'detail-text.html' },
+      { match: /\/search\//, file: 'search.html' },
+      { match: /\/category\//, file: 'category.html' },
+      { match: /51cg1\.com\/(?:$|\?|page\/)/, file: 'list.html' },
+    ],
+    checks: {
+      home: [
+        ['卡片 ≥ 12 张', r => (r.items || []).length >= 12],
+        ['hasMore 是布尔 true（靠 <link rel="next">）', r => r.hasMore === true],
+        ['首条 id 是 279044', r => String((r.items || [])[0] && r.items[0].id) === '279044'],
+        ['id 都是纯数字', r => (r.items || []).every(one => /^\d+$/.test(String(one.id)))],
+        ['封面来自 loadBannerDirect 的 pic.gyezbp.cn',
+          r => (r.items || []).every(one => /^https:\/\/pic\.gyezbp\.cn\//.test(String(one.cover)))],
+        // 角标「热搜 HOT」嵌在 <h2> 里的 <div class="wrap">，剥不干净就会粘在标题尾巴上。
+        ['标题里没有残留的「热搜 HOT」角标',
+          r => (r.items || []).every(one => String(one.title).indexOf('热搜 HOT') < 0)],
+        ['标题非空且无 HTML 残留',
+          r => (r.items || []).every(one => String(one.title).length > 0 && String(one.title).indexOf('<') < 0)],
+      ],
+      category: [
+        ['卡片 ≥ 12 张', r => (r.items || []).length >= 12],
+        ['首条 id 是 279407', r => String((r.items || [])[0] && r.items[0].id) === '279407'],
+        ['hasMore 是布尔 true', r => r.hasMore === true],
+      ],
+      search: [
+        ['卡片 ≥ 12 张', r => (r.items || []).length >= 12],
+        ['首条 id 是 279423', r => String((r.items || [])[0] && r.items[0].id) === '279423'],
+        ['hasMore 是布尔 true', r => r.hasMore === true],
+      ],
+      detail: [
+        ['id 回传', r => String(r.id || '') === '279044'],
+        ['标题非空（取自 <h1>）', r => String(r.title || '').length > 0],
+        ['单集', r => (r.episodes || []).length === 1],
+        ['选集说明标了正片（HLS）', r => String((r.episodes || [{}])[0].title).indexOf('HLS') >= 0],
+        ['封面在 pic.gyezbp.cn',
+          r => /^https:\/\/pic\.gyezbp\.cn\//.test(String(r.cover || ''))],
+        ['标签从「关键词：#…」拆出来了', r => (r.tags || []).length > 3],
+      ],
+      play: [
+        // data-config 里同时给了 H.264 和 H.265 两条 m3u8。
+        ['两条线路（h264 + h265）', r => (r.alts || []).length === 2],
+        ['默认 H.264', r => String((r.alts || [{}])[0].line) === 'h264'],
+        ['url 落在 alts 里', r => (r.alts || []).some(one => one.url === r.url)],
+        ['给的是 m3u8（hls.weagdnz.cn 带 auth_key）',
+          r => /^https:\/\/hls\.weagdnz\.cn\//.test(String(r.url || ''))
+            && String(r.url || '').indexOf('auth_key=') > 0],
+      ],
+    },
+    args: {
+      home: {},
+      category: { slug: 'whhl', page: 1 },
+      search: { keyword: '吃瓜', page: 1 },
+      detail: { ref: '279044' },
+      play: { ref: '279044', ep: 1 },
+    },
+  },
+
   // ── yarn 6/7/8：agedm / cms / openlist ─────────────────────────────────
   //
   // 仓库里一份夹具都没有（这三个源的 JUnit —— AgedmAdapterTest 不存在、
@@ -572,6 +791,67 @@ const PROFILES = {
     // 所以那只测试里的数字抄不过来 —— spider 的 home/detail/play 要的是 fs/list 的
     // JSON POST 响应，那类夹具仓库里没有。
     note: '没有夹具（OpenListAdapterTest 只测纯函数，不读 HTML）；POST 响应可用 post-<末段>.json 补',
+  },
+
+  // ── 水果派（pie，com.fruit.goodgood 2.5.4）────────────────────────────
+  //
+  // 接口是 POST /v2_0/<name> + RSA/AES 信封，夹具存的是**信封原文**（不是明文）：
+  // 离线回归顺带把纯 JS 的 RSA/AES 解密路径也跑一遍。信封是用 APK 里
+  // client_private.key 对应的公钥封的，和服务器返回的形状完全一致。
+  //
+  // 五个夹具都是 2026-10-20 从 api.25xzguk9.com 的实测响应转出来的。
+  pie: {
+    dir: 'pie',
+    // POST 源按约定吃 `post-<路径末段>.json`（makeResolver 的 POST 分支只看这个，
+    // 不看 fixtures 表）—— 这里把名字写出来，等于告诉后来人补夹具放哪。
+    fixtures: {
+      'post-homePage.json': /\/v2_0\/homePage/,
+      'post-classificationContentDetails.json': /\/v2_0\/classificationContentDetails/,
+      'post-searchV21List.json': /\/v2_0\/searchV21List/,
+      'post-getSingleItem.json': /\/v2_0\/getSingleItem/,
+      'post-filmDetails.json': /\/v2_0\/filmDetails/,
+    },
+    checks: {
+      home: [
+        ['一页 5 条（接口固定 5 条/页）', r => (r.items || []).length === 5],
+        ['id 是数字串', r => /^\d+$/.test(String((r.items || [])[0] && r.items[0].id || ''))],
+        ['标题非空', r => String((r.items || [])[0] && r.items[0].title || '').length > 0],
+        ['封面是 https 绝对地址',
+          r => String((r.items || [])[0] && r.items[0].cover || '').startsWith('https://')],
+        ['hasMore 是布尔 true', r => r.hasMore === true],
+      ],
+      category: [
+        ['一页 15 条', r => (r.items || []).length === 15],
+        ['id 无重复', r => {
+          const ids = (r.items || []).map(one => String(one.id));
+          return ids.length === new Set(ids).size;
+        }],
+        ['有下一页', r => r.hasMore === true],
+      ],
+      search: [
+        ['搜索「探花」有结果', r => (r.items || []).length >= 1],
+        ['到底了不谎报下一页', r => r.hasMore === false],
+      ],
+      detail: [
+        ['标题非空（这条是图文帖，标题取自 content）', r => String(r.title || '').length > 0],
+        ['单集', r => (r.episodes || []).length === 1],
+        ['集 ref 就是 library_id',
+          r => String((r.episodes || [])[0] && r.episodes[0].ref) === '2338'],
+        ['封面在 img.2ktdfje.top',
+          r => String(r.cover || '').indexOf('img.2ktdfje.top') >= 0],
+      ],
+      play: [
+        ['降级成 reason=encrypted，不给假地址', r => r.reason === 'encrypted'],
+        ['url 为空（密文不塞进 url）', r => !r.url],
+      ],
+    },
+    args: {
+      home: {},
+      category: { slug: '1', page: 1 },
+      search: { keyword: '探花', page: 1 },
+      detail: { ref: '2338' },
+      play: { ref: '10451' },
+    },
   },
 };
 
