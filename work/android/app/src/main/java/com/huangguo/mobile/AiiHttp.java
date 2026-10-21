@@ -764,6 +764,49 @@ public final class AiiHttp {
         return m == null || !m.startsWith("HTTP ");
     }
 
+    /**
+     * 等本机代理端口能连上（只认 127.0.0.1 / localhost）。
+     *
+     * <p>真机场景（2026-10-21）：第一次安装、刚点完「保存并启动」就去拉一个必须走
+     * 代理的源，核心的 SOCKS 入站还在 listen，connect refused，于是第一条请求直接
+     * 失败；重启 App 之后核心已经跑了十几秒，同一个源就能拉。这里给 2 秒把它等回来，
+     * 比让用户重启便宜。
+     *
+     * @return 连上了返回 true（调用方据此同一条路重试一次）
+     */
+    private static boolean awaitLocalProxy(String proxy, long timeoutMs) {
+        if (proxy == null || proxy.length() == 0) return false;
+        String host;
+        int port;
+        try {
+            java.net.URI u = java.net.URI.create(proxy.contains("://") ? proxy : "http://" + proxy);
+            host = u.getHost();
+            port = u.getPort();
+        } catch (Throwable e) {
+            return false;
+        }
+        if (host == null || port <= 0) return false;
+        if (!"127.0.0.1".equals(host) && !"localhost".equalsIgnoreCase(host)) return false;
+        long began = System.currentTimeMillis();
+        while (System.currentTimeMillis() - began < timeoutMs) {
+            java.net.Socket probe = new java.net.Socket();
+            try {
+                probe.connect(new java.net.InetSocketAddress(host, port), 150);
+                return true;
+            } catch (Throwable ignored) {
+                try {
+                    Thread.sleep(60);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            } finally {
+                try { probe.close(); } catch (Throwable ignored) {}
+            }
+        }
+        return false;
+    }
+
     /** 把路由落到 client 上：direct 现拼无代理 client（保留 SmartDns），proxy 兜 proxiedClient。 */
     private static OkHttpClient clientFor(OkHttpClient http, String route, SiteProfile profile) {
         if (RouteMemory.ROUTE_DIRECT.equals(route)) {
@@ -814,6 +857,14 @@ public final class AiiHttp {
                     response.close();
                 }
             } catch (IOException e) {
+                // 走代理这条路失败，而代理是本机那个端口 —— 多半是核心刚起/刚重启，
+                // 入站还没 listen（connect refused）。给它 2 秒，同一条路再试一次，
+                // 比立刻「换路」正确：换直连对一个必须走代理的域名只会再失败一次。
+                if (isConnectFailure(e) && RouteMemory.ROUTE_PROXY.equals(route)
+                        && awaitLocalProxy(effectiveProxy(), 2000)) {
+                    log("本机代理刚就绪，重试一次 " + host);
+                    continue;
+                }
                 final String flipped = flipRoute(route);
                 final boolean canFlip = !flipped.equals(route)
                         && (!RouteMemory.ROUTE_PROXY.equals(flipped) || effectiveProxy().length() > 0);

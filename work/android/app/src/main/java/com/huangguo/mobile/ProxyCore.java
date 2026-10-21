@@ -180,7 +180,17 @@ public final class ProxyCore {
             port = chosen;
             currentNode = copy(node);
             lastError = null;
-            log("已启动 " + node.describe() + " → socks5://127.0.0.1:" + chosen);
+            // startLoop 返回 ≠ 本地 SOCKS 入站已经在 listen。它只是把配置交给核心、
+            // 起 goroutine，监听是随后在 native 那边做的。
+            //
+            // 2026-10-21 真机：第一次安装，填完节点点「保存并启动」，紧接着去拉一个
+            // 必须走代理的源，报拉取失败；重启一次 App 就好了 —— 因为重启后核心在
+            // 启动链里已经跑了十几秒。差别就是这段时间差：第一个请求撞在还没 listen
+            // 的端口上，connect refused，AiiHttp 按「这条路上不去」报错。
+            // 等到端口真的能连上再返回，代价是几百毫秒，比让用户「重启一下」便宜。
+            boolean listening = awaitListening(chosen, 2500);
+            log("已启动 " + node.describe() + " → socks5://127.0.0.1:" + chosen
+                    + (listening ? "" : "（2.5 秒内没等到入站，先放行）"));
             return true;
         } catch (Throwable e) {
             // 只把 controller 置空是**不够的**：CoreController 在 native 那边登记了一个
@@ -198,6 +208,36 @@ public final class ProxyCore {
             log("启动失败（端口 " + chosen + "）：" + lastError);
             return false;
         }
+    }
+
+
+    /**
+     * 等本地 SOCKS 入站真的能连上。
+     *
+     * <p>判据只能是「连得上」：端口被占、核心半死、goroutine 还没跑到监听点，
+     * 这三种在 Java 侧看不到区别，只有 connect 能证伪。
+     *
+     * @return 超时前连上返回 true
+     */
+    private static boolean awaitListening(int port, long timeoutMs) {
+        long began = System.currentTimeMillis();
+        while (System.currentTimeMillis() - began < timeoutMs) {
+            java.net.Socket probe = new java.net.Socket();
+            try {
+                probe.connect(new java.net.InetSocketAddress("127.0.0.1", port), 150);
+                return true;
+            } catch (Throwable ignored) {
+                try {
+                    Thread.sleep(60);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            } finally {
+                try { probe.close(); } catch (Throwable ignored) {}
+            }
+        }
+        return false;
     }
 
     /** 丢掉一个没起来的 controller。失败只记日志 —— 清理失败不该盖住调用方要看的错因。 */
