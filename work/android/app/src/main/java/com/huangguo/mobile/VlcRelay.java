@@ -240,13 +240,7 @@ final class VlcRelay {
      * 地址放成直连 —— 后者是连接超时，比 403 还难解释。
      */
     private static boolean relayViaProxy(String url) {
-        try {
-            String host = new java.net.URI(url).getHost();
-            if (host == null || host.length() == 0) return true;
-            return NetRoute.mustProxy(host);
-        } catch (Throwable e) {
-            return true;
-        }
+        return Outbound.viaProxy(url);
     }
 
     // ── base64url，不带 padding ───────────────────────────────────────
@@ -361,7 +355,7 @@ final class VlcRelay {
             if ("HEAD".equalsIgnoreCase(method)) {
                 // VLC 有时先探一次。发一个不带 body 的 GET 拿状态和长度。
                 Request.Builder probe = new Request.Builder().url(original).head();
-                applyHeaders(probe, headers);
+                applyHeaders(probe, headers, false, original);
                 response = MediaProxy.relayClient(viaProxy).newCall(probe.build()).execute();
                 writeHead(out, response);
                 return;
@@ -388,7 +382,7 @@ final class VlcRelay {
             // 播放列表不要 Range：上游会回 206，body 只有一段，改写就无从谈起
             // （真机实测 v4.ppqrrs.com 的 index.m3u8 被 VLC 带 Range 请求，回 206，
             //  于是剔广告那段整个被跳过 —— 列表原样透传）。
-            applyHeaders(builder, headers, isPlaylistUrl(original) || disguised(original));
+            applyHeaders(builder, headers, isPlaylistUrl(original) || disguised(original), original);
             response = MediaProxy.relayClient(viaProxy).newCall(builder.build()).execute();
             noteUpstream(response.code());
             log("上游 " + response.code() + " " + response.protocol()
@@ -1078,8 +1072,8 @@ final class VlcRelay {
      * CDN 会校验（VlcPlayerActivity 已经把它们塞进 payload，这里一并转过去）。
      * 其余（Accept-Encoding 之类）不搬 —— 我们要原样字节，不要上游压过的。
      */
-    private static void applyHeaders(Request.Builder builder, Map<String, String> headers) {
-        applyHeaders(builder, headers, false);
+    private static void applyHeaders(Request.Builder builder, Map<String, String> headers, String url) {
+        applyHeaders(builder, headers, false, url);
     }
 
     /**
@@ -1087,7 +1081,7 @@ final class VlcRelay {
      *                  带 Range 上游会回 206 只给一段，改写就落空。
      */
     private static void applyHeaders(Request.Builder builder, Map<String, String> headers,
-                                     boolean dropRange) {
+                                     boolean dropRange, String url) {
         String range = headers.get("range");
         if (!dropRange && range != null && range.length() > 0) builder.header("Range", range);
 
@@ -1102,7 +1096,7 @@ final class VlcRelay {
 
         // 最后套源声明的模板（UA / Referer），同名会覆盖上面 VLC 带来的那份 ——
         // 源自己写的才是权威，VLC 那个 UA 是自己的名字，防盗链一眼就拒。
-        applySourceHeaders(builder);
+        applySourceHeaders(builder, url);
     }
 
     /**
@@ -1110,25 +1104,8 @@ final class VlcRelay {
      * {@code {origin}} 换成源域名，换完是空串或光一个 {@code /} 的头直接不发
      * （缺 Referer 是 200，发个错的反而 403）。
      */
-    private static void applySourceHeaders(Request.Builder builder) {
-        SiteProfile profile = sourceProfile;
-        if (profile == null) return;
-        try {
-            org.json.JSONObject template = profile.object("headers");
-            if (template == null) return;
-            String origin = profile.origin == null ? "" : profile.origin.trim();
-            java.util.Iterator<String> keys = template.keys();
-            while (keys.hasNext()) {
-                String key = keys.next();
-                String value = template.optString(key, "");
-                if (value == null || value.length() == 0) continue;
-                String filled = value.replace("{origin}", origin);
-                if (filled.length() == 0 || filled.equals("/")) continue;
-                builder.header(key, filled);
-            }
-        } catch (Throwable e) {
-            log("源请求头模板读取失败：" + e.getClass().getSimpleName());
-        }
+    private static void applySourceHeaders(Request.Builder builder, String url) {
+        Outbound.applyHeaders(builder, sourceProfile, url);
     }
 
     /**

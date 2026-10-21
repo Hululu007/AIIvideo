@@ -1543,26 +1543,9 @@ public final class AiiHttp {
      * <p>源没声明 origin（spider 源就是这样，站点域写在 js 里）时退回目标 URL 的 origin。
      */
     private static void applyHeaders(Request.Builder builder, SiteProfile profile, String url) {
-        if (profile == null) return;
-        try {
-            JSONObject headers = profile.object("headers");
-            if (headers == null) return;
-            String siteOrigin = profile.origin == null ? "" : profile.origin.trim();
-            String origin = siteOrigin.length() > 0 ? siteOrigin : originOf(url);
-            Iterator<String> keys = headers.keys();
-            while (keys.hasNext()) {
-                String key = keys.next();
-                String value = headers.optString(key, "");
-                if (value == null || value.length() == 0) continue;
-                String filled = value.replace("{origin}", origin);
-                // 模板写了 "{origin}/" 而 origin 是空串时会得到 "/"，防盗链一律 403。
-                // 这种头没有意义，不如不发 —— 缺 Referer 是 200。
-                if (filled.length() == 0 || filled.equals("/")) continue;
-                builder.header(key, filled);
-            }
-        } catch (Exception e) {
-            log("请求头模板读取失败，按空头发送：" + e);
-        }
+        // 唯一实现在 Outbound —— 中继（播放取流）和这里共用同一份模板，
+        // 免得两处判据慢慢分叉（2026-10-21 的 Pornhub 分片 403 就是这么来的）。
+        Outbound.applyHeaders(builder, profile, url);
     }
 
     private static String hostOfUrl(String url) {
@@ -1573,15 +1556,6 @@ public final class AiiHttp {
         try { return new java.net.URL(url).getPath(); } catch (Exception e) { return url; }
     }
 
-
-    private static String originOf(String url) {        try {
-            java.net.URL parsed = new java.net.URL(url);
-            String port = parsed.getPort() > 0 ? (":" + parsed.getPort()) : "";
-            return parsed.getProtocol() + "://" + parsed.getHost() + port;
-        } catch (Exception e) {
-            return url;
-        }
-    }
 
     // ── DNS：系统解析 或 DoH ──────────────────────────────────────────
 
