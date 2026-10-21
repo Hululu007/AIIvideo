@@ -151,12 +151,16 @@
       var hm = RE_HOT.exec(blk);
       var sm = RE_STATE.exec(blk);
 
+      var hot = hm ? clean(decodeEntities(hm[1])) : '';
       out.push({
         id: idm[1],
         title: title,
         cover: cm ? decodeEntities(cm[1]) : '',
-        // 「更新第12集」「已完结」——列表页唯一的时间线索，当副标题用。
-        note: hm ? clean(decodeEntities(hm[1])) : '',
+        // 卡片右下角那行小字。**必须叫 playAt** —— 前端 model.js 只读这个键
+        //（来源是 adaptVideo 那套老算法：'共 N 集' → badge → playAt）。
+        // 自己起名 note 的话不报错，卡片小字就是空的。
+        playAt: hot,
+        note: hot,
         tags: sm ? [clean(decodeEntities(sm[1]))] : []
       });
     }
@@ -292,8 +296,11 @@
     name: '星空影视',
     version: 1,
     requires: '>=1',
-    // 只有站点本体。播放地址交给播放器，CDN 域名池不进这里。
-    hosts: ['dozagonza.com'],
+    // net 的白名单是**精确相等**（SpiderRuntime.allowed 里就是 host.equals），
+    // 不是后缀匹配 —— 写 `dozagonza.com` 挡不住 `www.dozagonza.com`，真机上
+    // 报「net 拒绝：主机不在白名单」，而界面上只看得到一句「源站响应太慢」。
+    // 这里两个都写。注意这和 web.shield.hosts 的语义不同：那个是后缀匹配。
+    hosts: ['www.dozagonza.com', 'dozagonza.com'],
 
     async home(ctx) {
       return homePage(ctx);
