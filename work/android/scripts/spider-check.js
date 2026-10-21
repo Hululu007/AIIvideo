@@ -760,6 +760,78 @@ const PROFILES = {
     },
   },
 
+  // ── yarn 12：dozagonza（苹果CMS + 自定义模板，站前 Cloudflare 盾）──────
+  //
+  // 夹具按真实结构裁过：首页 3 张卡 + 分页控件，分类页 3 张卡 + 完整的
+  // page-num（含「1/1832」那条总页数），详情页 3 集，播放页那段 player_aaaa。
+  //
+  // 两条最容易被顺手改坏的，断言专门盯：
+  //   ① 封面只在 data-original 里，src 恒为模板自带的 load.gif；
+  //   ② 详情页元信息是 <p class="director"><label>导演：</label><span>…</span></p>，
+  //      先 stripTags 再正则会把「王斯阳主演：」整个吞进导演名。
+  dozagonza: {
+    dir: 'dozagonza',
+    routes: [
+      { match: /\/play\/\d+\/\d+\/\d+/, file: 'play.html' },
+      { match: /\/video\/\d+/, file: 'detail.html' },
+      { match: /\/tv\/\d+/, file: 'tv1.html' },
+      { match: /dozagonza\.com\/?(?:$|\?|#)/, file: 'home.html' },
+    ],
+    checks: {
+      home: [
+        ['卡片 3 张', r => (r.items || []).length === 3],
+        ['首条 id 是 275134247', r => String((r.items || [])[0] && r.items[0].id) === '275134247'],
+        ['id 都是纯数字', r => (r.items || []).every(one => /^\d+$/.test(String(one.id)))],
+        ['标题取自 .thumb 的 title 属性',
+          r => String((r.items || [])[0] && r.items[0].title) === '势在必行'],
+        ['封面是 img.dozagonza.com 的绝对地址',
+          r => (r.items || []).every(one => /^https:\/\/img\.dozagonza\.com\//.test(String(one.cover)))],
+        ['没有把占位 gif 当封面',
+          r => (r.items || []).every(one => String(one.cover).indexOf('load.gif') < 0)],
+        ['更新状态进了 note', r => String((r.items || [])[0] && r.items[0].note) === '已完结'],
+        ['分类标签进了 tags', r => String((((r.items || [])[0] || {}).tags || [])[0]) === '悬疑'],
+        ['靠 title="下一页" 判 hasMore', r => r.hasMore === true],
+      ],
+      category: [
+        ['卡片 3 张', r => (r.items || []).length === 3],
+        ['首条 id 是 27557829', r => String((r.items || [])[0] && r.items[0].id) === '27557829'],
+        ['hasMore 是布尔 true（分页控件写着 1/1832）', r => r.hasMore === true],
+      ],
+      detail: [
+        ['id 回传', r => String(r.id || '') === '275179106'],
+        ['标题取自 h1.article-subject', r => String(r.title || '') === '海边的秘密'],
+        ['封面落在 upload/vod',
+          r => /^https:\/\/img\.dozagonza\.com\/upload\/vod\//.test(String(r.cover || ''))],
+        ['简介取自 .summary-con（不是 meta description）',
+          r => String(r.description || '').indexOf('超清无删减版') >= 0],
+        ['剧集 3 条', r => (r.episodes || []).length === 3],
+        ['第一集 ref 是「id:集号」',
+          r => String((((r.episodes || [])[0]) || {}).ref) === '275179106:1'],
+        ['第一集标题第01集',
+          r => String((((r.episodes || [])[0]) || {}).title) === '第01集'],
+        ['第三集标题第03集',
+          r => String((((r.episodes || [])[2]) || {}).title) === '第03集'],
+        // 这一条盯的是「别退回 stripTags 正则」：那样会拿到「王斯阳主演：」。
+        ['分类从 p.types 取（不是空的 state 位）',
+          r => (r.tags || []).indexOf('国产剧') >= 0],
+        ['线路名是「高清线路」', r => String((((r.lines || [])[0]) || {}).name) === '高清线路'],
+      ],
+      play: [
+        ['地址是 m3u8 结尾', r => /\.m3u8$/.test(String(r.url || ''))],
+        ['落在 play.hhuus.com', r => String(r.url || '').indexOf('play.hhuus.com') > 0],
+        ['备选 1 条', r => (r.alts || []).length === 1],
+        ['集号对得上', r => Number(r.episodeNumber) === 1],
+        ['note 写明 AES-128 的相对密钥', r => String(r.note || '').indexOf('AES-128') >= 0],
+      ],
+    },
+    args: {
+      home: {},
+      category: { slug: '1', page: 1 },
+      detail: { ref: '275179106' },
+      play: { ref: '275179106', ep: 1 },
+    },
+  },
+
   // ── yarn 6/7/8：agedm / cms / openlist ─────────────────────────────────
   //
   // 仓库里一份夹具都没有（这三个源的 JUnit —— AgedmAdapterTest 不存在、

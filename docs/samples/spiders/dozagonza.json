@@ -1,0 +1,180 @@
+{
+  "_note": "星空影视（www.dozagonza.com）。苹果CMS + 自定义模板 y_md_3，但 URL 结构和标准苹果CMS 完全不同（/video/<id>.html 而不是 /voddetail/）。站前挂 Cloudflare 挑战，裸 curl 403 + cf-mitigated: challenge，所以 web.shield 必须写。播放页内嵌 player_aaaa，encrypt 恒为 0，url 直给媒体列表 m3u8。",
+  "origin": "https://www.dozagonza.com",
+  "headers": {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36",
+    "Referer": "https://www.dozagonza.com/",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+  },
+  "cover": {
+    "mode": "plain",
+    "allowedHosts": [
+      "img.dozagonza.com"
+    ],
+    "hostRewrites": {}
+  },
+  "http": {
+    "_why": "播放层出口，只给 JS 播放器用（VLC 那条路只问 NetRoute.mustProxy，不查这张表）。这里的域名是抽 45 部片子实测出来的，编号还在涨：v1..v12.ppqrrs.com、v1..v6.qrssuv.com、fengbao9/11/12/14、vip1.lz-cdn*、play.hhuus.com。列不全也不影响 VLC 播放，真机上如果 JS 播放器报「主机不在播放层白名单里：xxx」，把那个名字补进来即可。",
+    "hosts": [
+      "play.hhuus.com",
+      "play.phimgood.com",
+      "m3u8.hmrvideo.com",
+      "p.hhwenjian.com",
+      "v1.ppqrrs.com",
+      "v2.ppqrrs.com",
+      "v3.ppqrrs.com",
+      "v4.ppqrrs.com",
+      "v5.ppqrrs.com",
+      "v6.ppqrrs.com",
+      "v8.ppqrrs.com",
+      "v9.ppqrrs.com",
+      "v10.ppqrrs.com",
+      "v11.ppqrrs.com",
+      "v12.ppqrrs.com",
+      "v1.qrssuv.com",
+      "v2.qrssuv.com",
+      "v3.qrssuv.com",
+      "v4.qrssuv.com",
+      "v5.qrssuv.com",
+      "v6.qrssuv.com",
+      "v11.qrssuv.com",
+      "v.fengbao11.com",
+      "fengbao12.com",
+      "v.fengbao14.com",
+      "s1.fengbao9.com",
+      "vip1.lz-cdn.com",
+      "vip1.lz-cdn1.com",
+      "vip1.lz-cdn6.com",
+      "v.cdnlz29.com",
+      "v.lzcdn28.com",
+      "v.lzfile26.com",
+      "v.lfthirtytwo.com",
+      "vodcnd09.oag7h.com",
+      "vodcnd12.oag7h.com",
+      "vv.jisuzyv.com",
+      "c1.rrcdnbf5.com",
+      "c1.ddbbffcdn.com",
+      "p.bvvvvvvvvv1f.com"
+    ]
+  },
+  "web": {
+    "_why": "首页 40KB、分类页 42 条一页，都是服务端渲染，只有盾这一关要过。",
+    "shield": {
+      "_why": "www 和 img 两个子域都在 Cloudflare 后面（带完整安卓 Chrome 头裸 curl 也是 403 + 5.6KB 的 Just a moment，差的是 TLS 指纹不是 UA）。只写裸域 dozagonza.com：ShieldProfile.matches 是「精确相等 或 后缀 .dozagonza.com」，一条就罩住 www 和 img。warmup 用首页，cookie 是 clearance 归属的 origin。",
+      "warmup": "https://www.dozagonza.com/",
+      "hosts": [
+        "dozagonza.com"
+      ],
+      "cookie": "https://www.dozagonza.com/"
+    },
+    "spider": "https://149.104.21.177.sslip.io/spiders/dozagonza.js",
+    "firstPageSize": 42,
+    "pageSize": 42,
+    "categories": {
+      "1": "电影",
+      "2": "电视剧",
+      "3": "短剧",
+      "4": "动漫",
+      "5": "综艺"
+    },
+    "ui": {
+      "tabs": [
+        {
+          "key": "2",
+          "label": "电视剧",
+          "icon": "tv"
+        },
+        {
+          "key": "1",
+          "label": "电影",
+          "icon": "film"
+        },
+        {
+          "key": "3",
+          "label": "短剧",
+          "icon": "sparkle"
+        },
+        {
+          "key": "4",
+          "label": "动漫",
+          "icon": "star"
+        },
+        {
+          "key": "5",
+          "label": "综艺",
+          "icon": "grid"
+        }
+      ],
+      "categoryIds": {
+        "1": [
+          "1"
+        ],
+        "2": [
+          "2"
+        ],
+        "3": [
+          "3"
+        ],
+        "4": [
+          "4"
+        ],
+        "5": [
+          "5"
+        ]
+      },
+      "categoryLabels": {
+        "1": [
+          "电影"
+        ],
+        "2": [
+          "电视剧"
+        ],
+        "3": [
+          "短剧"
+        ],
+        "4": [
+          "动漫"
+        ],
+        "5": [
+          "综艺"
+        ]
+      },
+      "categoryTitles": {
+        "1": "电影",
+        "2": "电视剧",
+        "3": "短剧",
+        "4": "动漫",
+        "5": "综艺"
+      },
+      "popularTags": [
+        [
+          "2",
+          "电视剧"
+        ],
+        [
+          "1",
+          "电影"
+        ],
+        [
+          "3",
+          "短剧"
+        ],
+        [
+          "4",
+          "动漫"
+        ],
+        [
+          "5",
+          "综艺"
+        ]
+      ],
+      "publicPopularTags": [],
+      "tagGroups": [
+        [
+          "category",
+          "分类"
+        ]
+      ]
+    }
+  }
+}
