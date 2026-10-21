@@ -250,6 +250,25 @@ final class SpiderStore {
     }
 
     /** 从地址里猜一个文件名，只在 js 里没写 id 时用得上（那种情况其实会被拒）。 */
+    /** 这个 id 的源装过没有 —— 换源时用来决定「要不要顺手装配置里那个 spider」。 */
+    static boolean has(Context ctx, String spiderId) {
+        return spiderId != null && spiderId.length() > 0 && find(ctx, spiderId) != null;
+    }
+
+    /**
+     * 从 URL 猜源 id：`…/spiders/dozagonza.js?v=2` → `dozagonza`。
+     *
+     * <p>和 {@link #guessName} 是同一套取名字的规则，只是把 `.js` 去掉 ——
+     * 装进目录的文件名是 `<id>.js`，查的 id 不能带后缀。
+     */
+    static String idOfUrl(String url) {
+        String name = guessName(url);
+        if (name.toLowerCase(java.util.Locale.ROOT).endsWith(".js")) {
+            name = name.substring(0, name.length() - 3);
+        }
+        return name;
+    }
+
     private static String guessName(String url) {
         try {
             String path = new java.net.URI(url).getPath();

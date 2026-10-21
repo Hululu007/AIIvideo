@@ -190,6 +190,15 @@ final class SourceConfig {
             if (config != null) {
                 String problem = verify(context, config);
                 if (problem == null) {
+                    // 缓存命中也得把 spider 装上 —— 上一次添加时如果只存下了配置、
+                    // js 没落盘（比如旧版本、或者当时下载失败），这里不补就永远缺。
+                    // 2026-10-21 模拟器就是这样：第二次点同一个源走的是缓存，
+                    // 报「找不到 spider: dozagonza」，而地址就在这份缓存配置里。
+                    String spiderProblem = ensureSpider(context, config);
+                    if (spiderProblem != null) {
+                        UserSource.log("换源被拒（缓存）@" + url + "：" + spiderProblem);
+                        return spiderProblem;
+                    }
                     try {
                         config.put("__url", url);
                         save(context, config);
@@ -225,6 +234,17 @@ final class SourceConfig {
                     + "｜顶层键：" + keysOf(config));
             return problem;
         }
+        // 配置里把 spider 写成 URL 的（现在的主流写法，像星空影视那样
+        // `"spider": "https://…/dozagonza.js"`），js 得先装进运行时。
+        //
+        // 2026-10-21 模拟器实测：只加配置文件、不加 js，换源是「成功」的，
+        // 然后首页弹「加载失败 — 找不到 spider: dozagonza」。用户没有任何
+        // 线索知道还差一个文件 —— 而地址就写在配置里，帮他装掉这一跳最省事。
+        String spiderProblem = ensureSpider(context, config);
+        if (spiderProblem != null) {
+            UserSource.log("换源被拒 @" + url + "：" + spiderProblem);
+            return spiderProblem;
+        }
         try {
             config.put("__url", url);
             save(context, config);
@@ -233,6 +253,34 @@ final class SourceConfig {
         }
         writeCache(context, url, config);
         return null;
+    }
+
+    /**
+     * 配置声明的 spider 装了没有；没装就地装。
+     *
+     * <p>只处理「`web.spider` 写成一个 https URL」这一种 —— 那是自包含的写法，
+     * 地址就在配置里，装它是确定的动作。写成裸 id（`"spider": "yhdm"`）的那种
+     * 取不到地址，只能由用户自己再贴一次，这里不猜。
+     *
+     * <p>已经装过就跳过：换源不该每次重下一份 js（几百 KB，而且失败会让
+     * 本来好好的源换不过去）。
+     *
+     * @return null 表示装好了或者本来就有；否则是能直接给用户看的一句
+     */
+    private static String ensureSpider(Context context, org.json.JSONObject config) {
+        org.json.JSONObject web = config == null ? null : config.optJSONObject("web");
+        Object raw = web == null ? null : web.opt("spider");
+        String ref = raw instanceof String ? ((String) raw).trim() : "";
+        if (!ref.toLowerCase(java.util.Locale.ROOT).startsWith("https://")) return null;
+        String id = SpiderStore.idOfUrl(ref);
+        try {
+            if (SpiderStore.has(context, id)) return null;
+            SpiderStore.install(context, ref);
+            UserSource.log("换源顺带装了 spider " + id + " ← " + ref);
+            return null;
+        } catch (Exception e) {
+            return "这个源要用 spider「" + id + "」，但没装成功：" + e.getMessage();
+        }
     }
     private static String keysOf(org.json.JSONObject obj) {
         if (obj == null) return "（空）";
