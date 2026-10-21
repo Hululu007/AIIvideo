@@ -305,9 +305,13 @@ function spiderCapFor(action) {
  *
  * 转换层把 episodes[].ref 原样留了下来（那是站点自己的标识：yhdm 的 `ep1`、
  * cms 的 `1`、单集源的整个 id），这里就该用它 —— 不再自己拼 `id:epN`。
- * 三条规则：
+ * 四条规则：
  *   · ref 和 id 相同（单集源，ref 就是它自己）→ 只给 id。拼成
  *     `id:id` 会让它把整个串当 id 去请求，直接 404。
+ *   · ref **已经以 `id:` 开头**（星空影视这种源，episodes[].ref 直接给
+ *     `275189709:13`）→ 原样用。再拼一次就成了 `id:id:13`，spider 按最后一个
+ *     冒号切，id 变成 `id:id`，站点对不存在的 id 一律回第一集 —— 真机症状是
+ *     「点第 13 集播第 1 集」，而且每一集都这样。
  *   · ref 不同 → `id:ref`。所有源的 play 都用 splitRef 拆冒号，这是通行写法。
  *   · 拿不到详情（深链直接进播放器、或详情还没回来）→ `id:ep{n}`，
  *     拆出来 id 是对的，集号退化成 1~n 里能识别的那个。
@@ -319,9 +323,10 @@ function spiderEpisodeRef(rawId, no) {
   const eps = sameVideo ? asArray(detail.episodes) : [];
   const hit = eps.find(one => Number(one.number || one.episodeNumber) === no) || eps[no - 1];
   const ref = hit && hit.ref ? String(hit.ref) : '';
-  if (ref && ref === id) return ref;
-  if (ref) return id + ':' + ref;
-  return id + ':ep' + no;
+  if (!ref) return id + ':ep' + no;
+  if (ref === id) return ref;
+  if (id && ref.indexOf(id + ':') === 0) return ref;   // 已经是完整 ref，别重复拼
+  return id + ':' + ref;
 }
 
 /**
