@@ -130,6 +130,53 @@ public class VlcRelayTest {
     }
 
     /**
+     * {@code #EXT-X-KEY} 的 URI 也必须走中继。
+     *
+     * <p>dozagonza 的媒体列表是 {@code #EXT-X-KEY:METHOD=AES-128,URI="enc.key"}，
+     * 相对路径。不改写的话 VLC 拿它对着中继地址解析，相对解析丢掉 query 落到
+     * {@code http://127.0.0.1:PORT/enc.key}，中继只认 {@code /s?u=}，回 404 ——
+     * 症状是能开播但永远黑屏，解密失败不报错。
+     */
+    @Test
+    public void 加密密钥的相对路径也要走中继() throws Exception {
+        String text = "#EXTM3U\n"
+                + "#EXT-X-KEY:METHOD=AES-128,URI=\"enc.key\",IV=0x00000000000000000000000000000000\n"
+                + "#EXTINF:3.000000,\n"
+                + "plist0.ts\n"
+                + "#EXT-X-ENDLIST\n";
+        String base = "https://play.hhuus.com/play/lejBBoPe/index.m3u8";
+        String[] out = VlcRelay.rewriteM3u8(text, base, PREFIX);
+
+        String key = out[0].split("\n")[1];
+        assertTrue("KEY 行还在：" + key, key.startsWith("#EXT-X-KEY:"));
+        assertTrue("METHOD 不能丢：" + key, key.contains("METHOD=AES-128"));
+        assertTrue("IV 不能丢：" + key, key.contains("IV=0x00"));
+        assertFalse("相对路径必须被换掉：" + key, key.contains("URI=\"enc.key\""));
+
+        java.util.regex.Matcher m =
+                java.util.regex.Pattern.compile("URI=\"([^\"]+)\"").matcher(key);
+        assertTrue("找不到 URI 属性：" + key, m.find());
+        String wrapped = m.group(1);
+        assertTrue("要包成中继：" + wrapped, wrapped.startsWith(PREFIX));
+        assertEquals("解码后必须还原成 CDN 上的绝对地址",
+                "https://play.hhuus.com/play/lejBBoPe/enc.key",
+                VlcRelay.decode(wrapped.substring(PREFIX.length())));
+
+        assertEquals("一条分片 + 一条 KEY，别把 #EXTINF 也算进去", "2", out[1]);
+        assertTrue("结束标记不能被吃掉", out[0].contains("#EXT-X-ENDLIST"));
+    }
+
+    /** fMP4 的 init segment 用单引号写，同样要包成中继。 */
+    @Test
+    public void 单引号的URI属性同样处理() {
+        String text = "#EXTM3U\n#EXT-X-MAP:URI='init.mp4'\n#EXTINF:4,\nseg1.m4s\n";
+        String[] out = VlcRelay.rewriteM3u8(text, "https://a.example/v/index.m3u8", PREFIX);
+        assertTrue("单引号也要认：" + out[0], out[0].contains("URI='" + PREFIX));
+        assertFalse("原始相对路径不能留：" + out[0], out[0].contains("URI='init.mp4'"));
+        assertEquals("EXT-X-MAP 一条 + 分片一条，标签里的 URI 也算改写", "2", out[1]);
+    }
+
+    /**
      * 空行和未知标签不能导致「改写条数」虚高。
      *
      * 真机上 {@code [relay] 播放列表改写 N 条} 是判断这条链路好没好用的第一眼

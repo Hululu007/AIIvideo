@@ -548,8 +548,23 @@ final class VlcRelay {
         for (int i = 0; i < lines.length; i++) {
             String line = lines[i];
             String t = line.trim();
-            if (t.length() == 0 || t.startsWith("#")) {
+            if (t.length() == 0) {
                 sb.append(line).append('\n');
+                continue;
+            }
+            if (t.startsWith("#")) {
+                // 标签行不能整行放过：#EXT-X-KEY 的 URI 是 AES-128 的密钥地址，
+                // #EXT-X-MAP 的 URI 是 fMP4 的 init segment。两者都可能是相对
+                // 路径（URI="enc.key"），而 VLC 会拿它对着**中继地址**解析 ——
+                // 相对解析丢掉 query，落到 http://127.0.0.1:PORT/enc.key，
+                // 中继只认 /s?u=，回 404。症状是能开播但一直黑屏：解密失败不报错。
+                String tag = rewriteTagUris(line, baseAbs, prefix);
+                if (tag != null) {
+                    sb.append(tag).append('\n');
+                    rewrites++;
+                } else {
+                    sb.append(line).append('\n');
+                }
                 continue;
             }
             String abs;
@@ -565,6 +580,47 @@ final class VlcRelay {
             rewrites++;
         }
         return new String[] { sb.toString(), String.valueOf(rewrites) };
+    }
+
+    /** {@code URI="…"} / {@code URI='…'}，HLS 标签里唯一会带出站地址的属性。 */
+    private static final java.util.regex.Pattern TAG_URI =
+            java.util.regex.Pattern.compile("URI\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)')");
+
+    /**
+     * 把标签行里的 {@code URI=} 值也包成中继地址。
+     *
+     * <p>返回 {@code null} 表示这一行没有 URI 属性（或都已经包过了），调用方原样保留。
+     * 只在真的改动了属性时才算改写过 —— 否则 {@code #EXTINF}、{@code #EXT-X-ENDLIST}
+     * 这类纯标记行会把改写条数撑大，日志读起来就失真了。
+     *
+     * <p>绝对地址照样包一层：{@code #EXT-X-KEY} 直接指向 CDN 的话，VLC 会绕过中继
+     * 去连，而这个站的 CDN 域名既不在直连表里也没走代理，一样是连不上。
+     */
+    static String rewriteTagUris(String line, String baseAbs, String prefix) {
+        java.util.regex.Matcher m = TAG_URI.matcher(line);
+        if (!m.find()) return null;
+        StringBuilder out = new StringBuilder(line.length() + 96);
+        int last = 0;
+        boolean changed = false;
+        m.reset();
+        while (m.find()) {
+            String val = m.group(1) != null ? m.group(1) : m.group(2);
+            String quote = m.group(1) != null ? "\"" : "'";
+            if (val == null || val.length() == 0 || val.startsWith(prefix)) continue;
+            String abs;
+            try {
+                abs = new java.net.URI(baseAbs).resolve(val).toString();
+            } catch (Exception e) {
+                abs = val;
+            }
+            out.append(line, last, m.start());
+            out.append("URI=").append(quote).append(prefix).append(encode(abs)).append(quote);
+            last = m.end();
+            changed = true;
+        }
+        if (!changed) return null;
+        out.append(line.substring(last));
+        return out.toString();
     }
 
     /**
