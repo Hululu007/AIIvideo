@@ -23,8 +23,8 @@ android {
         applicationId = "com.huangguo.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 20009
-        versionName = "2.0.9"
+        versionCode = 20010
+        versionName = "2.0.10"
         vectorDrawables { useSupportLibrary = true }
     }
 

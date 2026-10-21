@@ -485,7 +485,9 @@ public final class AiiHttp {
      */
     public static void warmup(final SiteProfile profile) {
         if (profile == null || appContext == null) return;
-        final String hotKey = prefetchKey(warmPath(profile));
+        final String path = warmPath(profile);
+        if (path == null) return;                                // 没有可预热的路径（spider 源）
+        final String hotKey = prefetchKey(path);
         final int gen = GENERATION.get();
         Prefetch cached = PREFETCH.get(hotKey);
         if (cached != null && cached.fresh()) return;            // 刚预热过，别重复
@@ -506,7 +508,7 @@ public final class AiiHttp {
                     if (body != null && body.length > 0 && gen == GENERATION.get()) {
                         warm.body = body;
                         PREFETCH.put(hotKey, new Prefetch(body));
-                        log("预热完成 " + warmPath(profile) + " " + body.length + " 字节 "
+                        log("预热完成 " + path + " " + body.length + " 字节 "
                                 + (System.currentTimeMillis() - started) + "ms");
                     } else if (body != null && body.length > 0) {
                         log("预热作废（期间换过源）" + body.length + " 字节");
@@ -577,6 +579,7 @@ public final class AiiHttp {
      */
     private static byte[] prefetchBody(SiteProfile profile) throws Exception {
         String path = warmPath(profile);
+        if (path == null) throw new IOException("这个源没有可预热的首页（spider 源）");
         // ⚠️ **只预热首页。** 有些站的播放地址带一次性签名、会过期，预热出来的
         //    地址等用户真去点的时候可能已经废了 —— 那种地址必须实时取。
         //    首页没有这个问题（它只是元数据），预热是安全的。
@@ -604,6 +607,15 @@ public final class AiiHttp {
             JSONObject paths = web == null ? null : web.optJSONObject("paths");
             String home = paths == null ? "" : paths.optString("home", "");
             if (home.length() > 0) return home;
+            // spider 源没有 REST 首页。老代码在这里回落 /api/home，于是每次启动都朝
+            // spider 宿主白敲一条不存在的路径（dozagonza 实测
+            //   预热失败（前端会照常发真请求）：IOException HTTP 404
+            //   @ https://www.dozagonza.com/api/home
+            // ），白付一次 TLS + 一次 404，还往日志里塞噪音。没写 home 就当没有。
+            Object spider = web == null ? null : web.opt("spider");
+            boolean hasSpider = spider != null && spider != JSONObject.NULL
+                    && String.valueOf(spider).length() > 0;
+            if (hasSpider) return null;
         } catch (Throwable ignored) {}
         return WARMUP_PATH;
     }
@@ -778,6 +790,7 @@ public final class AiiHttp {
                                        SiteProfile profile) throws Exception {
         final String host = hostOfUrl(url);
         String route = initialRoute(url);
+        final String startedRoute = route;
         IOException first = null;
         for (int attempt = 0; attempt < 2; attempt++) {
             final OkHttpClient client = clientFor(http, route, profile);
@@ -788,6 +801,14 @@ public final class AiiHttp {
                     int code = response.code();
                     if (code < 200 || code >= 300) throw new IOException("HTTP " + code + " @ " + url);
                     ResponseBody body = response.body();
+                    // 换路换对了：记住这条路，TTL 内同域首访不再先走错一次。
+                    // 老代码只有 forget 没有 learn —— opinion() 因此永远是 null，
+                    // 记忆层事实上是死的，每个新进程都要重新试错一遍（实测
+                    // img.dozagonza.com 直连 178.94.178.146 必失败，每次启动白付一次连接超时）。
+                    if (!route.equals(startedRoute)) {
+                        RouteMemory.learn(host, route);
+                        log("路由记忆 " + host + " → " + route);
+                    }
                     return body == null ? new byte[0] : body.bytes();
                 } finally {
                     response.close();
