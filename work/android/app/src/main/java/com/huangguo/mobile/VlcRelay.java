@@ -192,6 +192,10 @@ final class VlcRelay {
             // 播放列表一律绕中继 —— 中继要拿到它才能剔广告、才能改写相对地址。
             // 分片仍然按原路由走（见 rewriteM3u8Smart）：直连源的分片一条都不进中继，
             // 否则 1080p 每条分片都多绕一跳本机 OkHttp。
+            //
+            // 注意：绕进来 ≠ 走代理。中继里那条请求用哪条出口由 relayViaProxy()
+            // 单独判（2026-10-21 的回归就是这里只判了「绕不绕」、没判「走不走代理」，
+            // 直连 CDN 被塞回境外节点，AGE 全挂）。
             if (!isPlaylistUrl(originalUrl)) {
                 try {
                     String host = new java.net.URI(originalUrl).getHost();
@@ -207,6 +211,27 @@ final class VlcRelay {
         } catch (Throwable e) {
             log("包地址失败，退回直连：" + e.getClass().getSimpleName() + " " + e.getMessage());
             return null;
+        }
+    }
+
+    /**
+     * 中继里这条地址该不该带代理 —— 跟 {@link #wrap} 用同一个判据（NetRoute）。
+     *
+     * <p>两条路原来是分开的：wrap 决定「绕不绕中继」（mustProxy 才绕），
+     * 中继内部固定「跟着全局代理」。2.0.16 起播放列表一律要绕中继（剔广告、
+     * 改相对地址都得先拿到它），wrap 那道闸就不再看 mustProxy 了 —— 于是判据
+     * 必须在这里补上，否则直连域名会被塞回代理节点。
+     *
+     * <p>解析不出 host 时按「带代理」处理：宁可多绕一跳，也别把本该走代理的
+     * 地址放成直连 —— 后者是连接超时，比 403 还难解释。
+     */
+    private static boolean relayViaProxy(String url) {
+        try {
+            String host = new java.net.URI(url).getHost();
+            if (host == null || host.length() == 0) return true;
+            return NetRoute.mustProxy(host);
+        } catch (Throwable e) {
+            return true;
         }
     }
 
@@ -313,11 +338,17 @@ final class VlcRelay {
                 return;
             }
 
+            // 这一条该不该走代理：跟 wrap() 里同一个判据（NetRoute），
+            // 不能再无条件跟随 effectiveProxy() —— 播放列表现在即使该直连也
+            // 绕中继，直连域被塞回代理节点就会被 CDN 按地区拒（见 MediaProxy
+            // 里 relayClient(boolean) 的注释）。
+            final boolean viaProxy = relayViaProxy(original);
+
             if ("HEAD".equalsIgnoreCase(method)) {
                 // VLC 有时先探一次。发一个不带 body 的 GET 拿状态和长度。
                 Request.Builder probe = new Request.Builder().url(original).head();
                 applyHeaders(probe, headers);
-                response = MediaProxy.relayClient().newCall(probe.build()).execute();
+                response = MediaProxy.relayClient(viaProxy).newCall(probe.build()).execute();
                 writeHead(out, response);
                 return;
             }
@@ -344,9 +375,10 @@ final class VlcRelay {
             // （真机实测 v4.ppqrrs.com 的 index.m3u8 被 VLC 带 Range 请求，回 206，
             //  于是剔广告那段整个被跳过 —— 列表原样透传）。
             applyHeaders(builder, headers, isPlaylistUrl(original) || disguised(original));
-            response = MediaProxy.relayClient().newCall(builder.build()).execute();
+            response = MediaProxy.relayClient(viaProxy).newCall(builder.build()).execute();
             noteUpstream(response.code());
-            log("上游 " + response.code() + " " + response.protocol() + " " + shortUrl(original));
+            log("上游 " + response.code() + " " + response.protocol()
+                    + (viaProxy ? " 经代理 " : " 直连 ") + shortUrl(original));
 
             // ── 播放列表必须改写，不管走哪条路 ─────────────────────────
             //

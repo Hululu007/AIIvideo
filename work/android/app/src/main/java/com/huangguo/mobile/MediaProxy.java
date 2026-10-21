@@ -126,6 +126,7 @@ public final class MediaProxy {
             mediaAppliedProxy = null;
             relayClient = null;
             relayAppliedProxy = null;
+            relayClientDirect = null;
         }
     }
 
@@ -165,7 +166,41 @@ public final class MediaProxy {
     private static volatile OkHttpClient relayClient;
     private static volatile String relayAppliedProxy = null;
 
-    static synchronized OkHttpClient relayClient() {
+    /** 直连那一份：同样的超时语义，只是不挂代理。 */
+    private static volatile OkHttpClient relayClientDirect;
+
+    /**
+     * 给 {@link VlcRelay} 用的客户端，按「这条地址该不该走代理」分两份。
+     *
+     * <p>这一层原来不存在：中继只会收 {@code mustProxy} 的地址（见
+     * VlcRelay.wrap 的老逻辑），所以无条件跟随 {@link AiiHttp#effectiveProxy()}
+     * 是对的。2.0.16 把播放列表改成「一律绕中继」（要拿列表才能剔广告、才能
+     * 改写相对地址）之后，那道闸被绕开了 —— 直连域名也进了中继，又被这里
+     * 塞回代理节点。
+     *
+     * <p>真机上的样子（2026-10-21，用户报「AGE动漫一个都看不了」）：AGE 的
+     * ffm3u8 线路解出 {@code vip.ffzy-plays.com}，而 DirectHosts 里明明白白
+     * 写着它该直连（樱花同款采集站 CDN）。走代理出去是境外 IP，CDN 直接回
+     * {@code 403 The region has been denied} —— 一个源的所有集一起挂。
+     *
+     * <p>语义收敛成一句：**代理只给 mustProxy 的地址用**。改前靠 wrap 拦，
+     * 现在播放列表绕开了 wrap，就得在这里判。
+     *
+     * @param viaProxy 这条地址要不要走代理（调用方用 NetRoute.mustProxy 算）
+     */
+    static synchronized OkHttpClient relayClient(boolean viaProxy) {
+        if (!viaProxy) {
+            OkHttpClient direct = relayClientDirect;
+            if (direct != null) return direct;
+            direct = new OkHttpClient.Builder()
+                    .protocols(Collections.singletonList(Protocol.HTTP_1_1))
+                    .connectTimeout(15, TimeUnit.SECONDS)
+                    .readTimeout(0, TimeUnit.MILLISECONDS)
+                    .writeTimeout(0, TimeUnit.MILLISECONDS)
+                    .build();
+            relayClientDirect = direct;
+            return direct;
+        }
         final String want = AiiHttp.effectiveProxy();
         OkHttpClient c = relayClient;
         if (c != null && want.equals(relayAppliedProxy)) return c;
