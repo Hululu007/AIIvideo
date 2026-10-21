@@ -189,10 +189,15 @@ final class VlcRelay {
         // 语义只有一条：**这条地址明确该走代理才绕中继**，其余直连。
         // 伪装后缀是例外：它绕中继是为了改类型判定，不是为了代理。
         if (!disguise) {
-            try {
-                String host = new java.net.URI(originalUrl).getHost();
-                if (!NetRoute.mustProxy(host)) return null;
-            } catch (Exception ignored) {}
+            // 播放列表一律绕中继 —— 中继要拿到它才能剔广告、才能改写相对地址。
+            // 分片仍然按原路由走（见 rewriteM3u8Smart）：直连源的分片一条都不进中继，
+            // 否则 1080p 每条分片都多绕一跳本机 OkHttp。
+            if (!isPlaylistUrl(originalUrl)) {
+                try {
+                    String host = new java.net.URI(originalUrl).getHost();
+                    if (!NetRoute.mustProxy(host)) return null;
+                } catch (Exception ignored) {}
+            }
         }
         try {
             VlcRelay relay = ensure();
@@ -335,8 +340,12 @@ final class VlcRelay {
             }
 
             Request.Builder builder = new Request.Builder().url(original).get();
-            applyHeaders(builder, headers);
+            // 播放列表不要 Range：上游会回 206，body 只有一段，改写就无从谈起
+            // （真机实测 v4.ppqrrs.com 的 index.m3u8 被 VLC 带 Range 请求，回 206，
+            //  于是剔广告那段整个被跳过 —— 列表原样透传）。
+            applyHeaders(builder, headers, isPlaylistUrl(original) || disguised(original));
             response = MediaProxy.relayClient().newCall(builder.build()).execute();
+            noteUpstream(response.code());
             log("上游 " + response.code() + " " + response.protocol() + " " + shortUrl(original));
 
             // ── 播放列表必须改写，不管走哪条路 ─────────────────────────
@@ -528,7 +537,14 @@ final class VlcRelay {
      */
     private String rewritePlaylist(String text, String baseAbs) {
         String prefix = "http://127.0.0.1:" + port + PATH + "?u=";
-        String[] out = rewriteM3u8(text, baseAbs, prefix);
+        String[] ads = stripAdRuns(text, baseAbs);
+        if (!"0".equals(ads[1])) {
+            log("剔掉广告分段 " + ads[1] + " 段共 " + ads[2] + " 秒 @" + shortUrl(baseAbs)
+                    + "｜" + ads[3]);
+        } else {
+            log("播放列表结构 @" + shortUrl(baseAbs) + "｜" + ads[3]);
+        }
+        String[] out = rewriteM3u8Smart(ads[0], baseAbs, prefix);
         log("播放列表改写 " + out[1] + " 条 @" + shortUrl(baseAbs));
         return out[0];
     }
@@ -582,6 +598,392 @@ final class VlcRelay {
         return new String[] { sb.toString(), String.valueOf(rewrites) };
     }
 
+    // ── 插播广告剔除 ────────────────────────────────────────────────────
+    //
+    // 规则移植自两个开源实现（代码原创，判据照抄实测值）：
+    //   · LibreSpark/LibreTV  src/lib/m3u8.ts —— stripMarkedAdGroups /
+    //     stripInterstitialAdGroups / stripLeadAdGroup，作者在 dytt、phimgood、
+    //     rycjapi 几个采集源上量过，注释里留着真实分段秒数。
+    //   · ltxlong/cf-m3u8-filter-ad-api —— 用「ts 文件名序号断裂」抓同域名插段。
+    //   · eraycc/m3u8-proxy-script —— 同思路的 worker 版，可当第二意见。
+    //
+    // 一个共同的血的教训（LibreTV 注释里写着）：**只删 #EXT-X-DISCONTINUITY 不删分片，
+    // 会让播放器把整条流当连续时间轴**，PTS 基准跳变失效，症状是「只闻广告声不见画面」。
+    // 所以这里一律整段连分片一起删，段内的 EXT-X-KEY / EXT-X-MAP 保留（误删会导致解不开）。
+
+    /** 广告分片路径特征。LibreTV 实测 `adjump`（暴风采集云），其余是常见变体。 */
+    private static final java.util.regex.Pattern AD_PATH = java.util.regex.Pattern.compile(
+            "(?i)adjump|advert|/ads?/|/(ad|ads|adv|preroll|guanggao|gg_video)([/_.-]|$)");
+
+    /** 中插广告的时长上限：超过这个数就不像「塞进来的一段」。 */
+    private static final double AD_RUN_MAX_S = 90;
+    /** 片头广告比这更保守。 */
+    private static final double AD_HEAD_MAX_S = 90;
+    /** 片头广告的分片数上限（LibreTV：20 片）。 */
+    private static final int AD_HEAD_MAX_SEG = 20;
+    /** 「两长夹一短」里的短：≤30 秒。 */
+    private static final double AD_SHORT_MAX_S = 30;
+    /** 「两长夹一短」里的长：前后邻段都得 ≥120 秒。 */
+    private static final double AD_NEIGHBOR_MIN_S = 120;
+
+    /** 一个 discontinuity 分组（组前的边界标签单独记）。 */
+    private static final class AdGroup {
+        int start;          // 组内容起始行（不含边界标签）
+        int end;            // 组内容结束行（不含）
+        int discLine;       // 组前的 #EXT-X-DISCONTINUITY 行号，首组 -1
+        double seconds;
+        int count;
+        boolean allAdUrl;   // 组内每个分片都命中广告路径特征
+        boolean onMainHost; // 至少一条分片在全表主域名上
+        int firstNum = Integer.MIN_VALUE;   // 组首分片的文件名序号
+        int lastNum = Integer.MIN_VALUE;    // 组尾分片的文件名序号
+    }
+
+    /**
+     * 剔掉播到一半突然插进来的广告分段。
+     *
+     * <p>这不是 App 加的广告 —— 我方没有任何广告 SDK、播放器里也没有广告位。
+     * 广告是站点塞在 m3u8 里的独立分段序列，前后用 {@code #EXT-X-DISCONTINUITY} 隔开。
+     * 四条判据各自有实测出处，命中一条就删：
+     * <ol>
+     *   <li><b>路径特征</b>：组内分片全部命中 {@code adjump|advert|/ad/|/gg_video/} 之类；</li>
+     *   <li><b>序号断裂</b>：全表分片是连续编号（plist0…plist885），组首号却没接上；</li>
+     *   <li><b>两长夹一短</b>：段 ≤30 秒，且前后邻段都 ≥120 秒（正片段之间的插入物）；</li>
+     *   <li><b>换了域名</b>：组内没有一条分片在主域名上，且后面还回主域名。</li>
+     * </ol>
+     * 片头额外一条：首个分片前就有 discontinuity、该段 ≤90 秒且 ≤20 片、后面还有分段 ——
+     * 但如果这一组跟其余分组大小相当（采集站按固定块切的「多分组封装」），跳过，
+     * 那种源里杀片头等于杀正片。
+     *
+     * <p>总闸：一次删掉的时长不超过全片 60%，删完剩下的分段不少于 6 条。
+     * 宁可广告漏播，也不能把正片啃掉一块。
+     *
+     * @return {@code [新文本, 删掉的段数, 删掉的秒数, 结构摘要]}
+     */
+    static String[] stripAdRuns(String text, String baseAbs) {
+        String[] lines = text.split("\n", -1);
+        java.util.List<AdGroup> groups = scanAdGroups(lines, baseAbs);
+        int totalSeg = 0;
+        double totalSec = 0;
+        for (AdGroup g : groups) { totalSeg += g.count; totalSec += g.seconds; }
+        if (totalSeg < 6) return new String[] { text, "0", "0", "分段不足 6 条" };
+
+        String mainHost = mainHostOf(lines, baseAbs);
+        boolean sequential = numberedSequentially(lines, baseAbs, mainHost);
+        int disc = 0;
+        for (AdGroup g : groups) if (g.discLine >= 0) disc++;
+        StringBuilder sum = new StringBuilder();
+        sum.append(totalSeg).append(" 段 ").append((long) totalSec).append("s discontinuity=")
+           .append(disc).append(" 主域名 ").append(mainHost)
+           .append(sequential ? "（序号连续）" : "（无序号）");
+        final String summary = sum.toString();
+
+        int foreignGroups = 0;
+        for (AdGroup g : groups) if (g.count > 0 && !g.onMainHost) foreignGroups++;
+        boolean cdnRotation = foreignGroups >= 2;   // 两个以上外域组 = 多 CDN 轮换，不是广告
+
+        boolean[] dropGroup = new boolean[groups.size()];
+        int dropped = 0;
+        double droppedSec = 0;
+        int expected = Integer.MIN_VALUE;           // 下一个「应该」出现的序号
+        for (int k = 0; k < groups.size(); k++) {
+            AdGroup g = groups.get(k);
+            if (g.count == 0) continue;
+            boolean isLead = k == 0;
+            boolean ad = false;
+            String why = null;
+            if (g.allAdUrl) { ad = true; why = "路径特征"; }
+            else if (sequential && expected != Integer.MIN_VALUE && g.firstNum != Integer.MIN_VALUE
+                    && g.firstNum != expected && g.seconds <= AD_RUN_MAX_S && g.count <= AD_HEAD_MAX_SEG) {
+                ad = true; why = "序号断裂";
+            }
+            else if (!cdnRotation && !g.onMainHost && g.seconds <= AD_RUN_MAX_S
+                    && returnsToMain(groups, k)) { ad = true; why = "换域名"; }
+            if (!ad && !isLead && k > 0 && k + 1 < groups.size()) {
+                AdGroup prev = groups.get(k - 1), next = groups.get(k + 1);
+                if (g.seconds > 0 && g.seconds <= AD_SHORT_MAX_S
+                        && prev.seconds >= AD_NEIGHBOR_MIN_S && next.seconds >= AD_NEIGHBOR_MIN_S) {
+                    ad = true; why = "两长夹一短";
+                }
+            }
+            if (!ad && isLead && g.discLine >= 0
+                    && g.seconds > 0 && g.seconds <= AD_HEAD_MAX_S && g.count <= AD_HEAD_MAX_SEG
+                    && !uniformGrouping(groups)) {
+                ad = true; why = "片头插入段";
+            }
+            if (!ad) {
+                if (g.lastNum != Integer.MIN_VALUE) expected = g.lastNum + 1;
+                continue;
+            }
+
+            double afterS = droppedSec + g.seconds;
+            int afterN = dropped + g.count;
+            if (afterS > totalSec * 0.6 || totalSeg - afterN < 6) {
+                if (g.lastNum != Integer.MIN_VALUE) expected = g.lastNum + 1;
+                continue;
+            }
+            dropGroup[k] = true;
+            dropped += g.count;
+            droppedSec += g.seconds;
+            log("广告分段命中：" + why + "（" + g.count + " 片 " + (long) g.seconds + "s）");
+        }
+        if (dropped == 0) return new String[] { text, "0", "0", summary };
+
+        boolean[] dropLine = new boolean[lines.length];
+        for (int k = 0; k < groups.size(); k++) {
+            if (!dropGroup[k]) continue;
+            AdGroup g = groups.get(k);
+            // 边界标签一起删：留着它等于给播放器留一个空跳变点。
+            if (g.discLine >= 0) dropLine[g.discLine] = true;
+            for (int i = g.start; i < g.end; i++) {
+                String t = lines[i].trim();
+                // 解密/初始化配置留着 —— 正片若复用它，删了就解不开。
+                if (t.startsWith("#EXT-X-KEY") || t.startsWith("#EXT-X-MAP")) continue;
+                dropLine[i] = true;
+            }
+        }
+        StringBuilder sb = new StringBuilder(text.length());
+        boolean seenSegment = false;
+        for (int i = 0; i < lines.length; i++) {
+            if (dropLine[i]) continue;
+            String t = lines[i].trim();
+            boolean seg = t.length() > 0 && !t.startsWith("#");
+            if (seg) seenSegment = true;
+            // 首分片之前那个 discontinuity 已经没内容可跳，删掉。
+            if (!seenSegment && t.equals("#EXT-X-DISCONTINUITY")) continue;
+            sb.append(lines[i]).append('\n');
+        }
+        return new String[] { sb.toString(), String.valueOf(dropped),
+                String.valueOf((long) droppedSec), summary };
+    }
+
+    /** 按 discontinuity 切组，顺手把每组要用到的特征算好。 */
+    private static java.util.List<AdGroup> scanAdGroups(String[] lines, String baseAbs) {
+        String mainHost = mainHostOf(lines, baseAbs);
+        java.util.List<AdGroup> groups = new java.util.ArrayList<>();
+        java.util.List<Integer> discIdx = new java.util.ArrayList<>();
+        for (int i = 0; i < lines.length; i++) {
+            if (lines[i].trim().equals("#EXT-X-DISCONTINUITY")) discIdx.add(i);
+        }
+        java.util.List<Integer> bounds = new java.util.ArrayList<>();
+        bounds.add(0);
+        bounds.addAll(discIdx);
+        bounds.add(lines.length);
+        double pendingDur = -1;
+        for (int k = 0; k < bounds.size() - 1; k++) {
+            AdGroup g = new AdGroup();
+            g.discLine = k == 0 ? -1 : bounds.get(k);
+            g.start = k == 0 ? 0 : bounds.get(k) + 1;
+            g.end = bounds.get(k + 1);
+            g.allAdUrl = true;
+            g.onMainHost = false;
+            int firstNum = Integer.MIN_VALUE;
+            int lastNum = Integer.MIN_VALUE;
+            for (int i = g.start; i < g.end; i++) {
+                String t = lines[i].trim();
+                if (t.length() == 0) continue;
+                if (t.startsWith("#")) {
+                    if (t.startsWith("#EXTINF:")) pendingDur = parseExtinf(t);
+                    continue;
+                }
+                g.count++;
+                g.seconds += pendingDur > 0 ? pendingDur : 0;
+                pendingDur = -1;
+                String abs = resolveAbs(t, baseAbs);
+                if (!AD_PATH.matcher(pathOf(abs)).find()) g.allAdUrl = false;
+                if (hostOf(abs).equals(mainHost)) g.onMainHost = true;
+                int num = trailingNumber(abs);
+                if (firstNum == Integer.MIN_VALUE) firstNum = num;
+                if (num != Integer.MIN_VALUE) lastNum = num;
+            }
+            if (g.count == 0) { g.allAdUrl = false; }
+            g.firstNum = firstNum;
+            g.lastNum = lastNum;
+            groups.add(g);
+        }
+        return groups;
+    }
+
+    /** 全表主域名：分片数最多的那个 host。 */
+    private static String mainHostOf(String[] lines, String baseAbs) {
+        Map<String, Integer> count = new LinkedHashMap<>();
+        for (String line : lines) {
+            String t = line.trim();
+            if (t.length() == 0 || t.startsWith("#")) continue;
+            String h = hostOf(resolveAbs(t, baseAbs));
+            count.put(h, count.containsKey(h) ? count.get(h) + 1 : 1);
+        }
+        String best = "";
+        int n = -1;
+        for (Map.Entry<String, Integer> e : count.entrySet()) {
+            if (e.getValue() > n) { n = e.getValue(); best = e.getKey(); }
+        }
+        return best;
+    }
+
+    /** 这组之后还有没有回到主域名的分片。 */
+    private static boolean returnsToMain(java.util.List<AdGroup> groups, int k) {
+        for (int i = k + 1; i < groups.size(); i++) {
+            if (groups.get(i).onMainHost) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 多分组封装判定：除片头外的分组大小都差不多 ⇒ 采集站按固定块切的边界，
+     * 不是广告。LibreTV 实测 rycjapi 每组 5 片、dytt 5~20 片，这两种源里
+     * 把片头当广告删掉等于删正片。
+     */
+    private static boolean uniformGrouping(java.util.List<AdGroup> groups) {
+        if (groups.size() < 4) return false;
+        java.util.List<Integer> sizes = new java.util.ArrayList<>();
+        for (int i = 1; i < groups.size(); i++) sizes.add(groups.get(i).count);
+        java.util.Collections.sort(sizes);
+        int median = sizes.get(sizes.size() / 2);
+        int lead = groups.get(0).count;
+        return Math.abs(lead - median) <= Math.max(3, median / 2);
+    }
+
+    /**
+     * 全表分片是不是「末尾递增编号」（plist0.ts … plist885.ts）。
+     * 只有这种形状才敢用「序号断裂」判据 —— 随机名的分片本来就对不上号。
+     */
+    private static boolean numberedSequentially(String[] lines, String baseAbs, String mainHost) {
+        int numbered = 0, sequential = 0, prev = Integer.MIN_VALUE, total = 0;
+        for (String line : lines) {
+            String t = line.trim();
+            if (t.length() == 0 || t.startsWith("#")) continue;
+            // 只看主域名的分片：多 CDN 轮换的源里每组都从 0 重新编号，
+            // 把外域组算进来会让「序号连续」这个前提自己先崩。
+            if (!hostOf(resolveAbs(t, baseAbs)).equals(mainHost)) continue;
+            total++;
+            int num = trailingNumber(resolveAbs(t, baseAbs));
+            if (num == Integer.MIN_VALUE) continue;
+            numbered++;
+            if (prev != Integer.MIN_VALUE && num == prev + 1) sequential++;
+            prev = num;
+        }
+        // 阈值定得死一点：真出问题的源整集编号是连续的（886 段里 0 处断），
+        // 而「每组从 0 重来」的封装源一眼就掉到 87% 以下，必须分得开。
+        return total >= 6 && numbered >= total * 0.9 && sequential >= numbered * 0.98;
+    }
+
+    /** 地址里最后一个数字（文件名尾巴），拿不到返回 MIN_VALUE。 */
+    private static int trailingNumber(String abs) {
+        String p = pathOf(abs);
+        int end = p.length() - 1;
+        while (end >= 0 && !Character.isDigit(p.charAt(end))) end--;
+        if (end < 0) return Integer.MIN_VALUE;
+        int start = end;
+        while (start >= 0 && Character.isDigit(p.charAt(start))) start--;
+        // 只认文件名里的，别把 /20260815/ 这种日期目录当序号
+        int slash = p.lastIndexOf('/', end);
+        if (slash > start) return Integer.MIN_VALUE;
+        try {
+            return Integer.parseInt(p.substring(start + 1, end + 1));
+        } catch (Exception e) {
+            return Integer.MIN_VALUE;
+        }
+    }
+
+    private static String resolveAbs(String uri, String baseAbs) {
+        try {
+            return new java.net.URI(baseAbs).resolve(uri).toString();
+        } catch (Exception e) {
+            return uri;
+        }
+    }
+
+    private static double parseExtinf(String tag) {
+        try {
+            int comma = tag.indexOf(',');
+            String v = tag.substring(tag.indexOf(':') + 1, comma > 0 ? comma : tag.length()).trim();
+            return Double.parseDouble(v);
+        } catch (Exception e) {
+            return 0d;
+        }
+    }
+
+    private static String hostOf(String abs) {
+        try {
+            String h = new java.net.URI(abs).getHost();
+            return h == null ? "" : h.toLowerCase(Locale.US);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private static String pathOf(String abs) {
+        try {
+            String p = new java.net.URI(abs).getPath();
+            return p == null ? "" : p;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /**
+     * 同 {@link #rewriteM3u8}，但**按每条 URI 自己的路由**决定绕不绕中继。
+     *
+     * <p>为什么要有这一版：直连源（源把播放域名声明成直连）的分片本来一条都不该
+     * 进中继，可播放列表又必须进中继才能剔广告。以前 wrap() 见直连就直接放给 VLC，
+     * 于是这类源的中继一次都看不到播放列表 —— 广告过滤对它们等于不存在。
+     * 现在列表进中继、分片照旧直连，两者都拿到。
+     */
+    static String[] rewriteM3u8Smart(String text, String baseAbs, String prefix) {
+        StringBuilder sb = new StringBuilder(text.length() + 256);
+        String[] lines = text.split("\n");
+        int rewrites = 0;
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            String t = line.trim();
+            if (t.length() == 0) { sb.append(line).append('\n'); continue; }
+            if (t.startsWith("#")) {
+                String tag = rewriteTagUris(line, baseAbs, prefix);
+                if (tag != null) { sb.append(tag).append('\n'); rewrites++; }
+                else sb.append(line).append('\n');
+                continue;
+            }
+            String abs = resolveAbs(t, baseAbs);
+            // master 列表里的子列表也必须是中继地址 —— 否则 VLC 直接去拉媒体列表，
+            // 中继只在 master 上转了一圈（实测 v4.ppqrrs.com：master 一眼过，
+            // 真正的 886 段媒体列表全在直连里，剔广告等于没装）。
+            if (needsRelayHop(abs) || isPlaylistUrl(abs)) {
+                sb.append(prefix).append(encode(abs)).append('\n');
+            } else {
+                // 直连分片：写绝对地址，VLC 自己去拉，中继不掺和。
+                sb.append(abs).append('\n');
+            }
+            rewrites++;
+        }
+        return new String[] { sb.toString(), String.valueOf(rewrites) };
+    }
+
+    /** 这条地址要不要绕中继？判据和 {@link #wrap} 同源，只是不分「是不是播放列表」。 */
+    static boolean needsRelayHop(String abs) {
+        if (abs == null || abs.length() == 0) return false;
+        if (disguised(abs)) return true;
+        if (AiiHttp.effectiveProxy().length() == 0) return false;
+        try {
+            String host = new java.net.URI(abs).getHost();
+            return host != null && NetRoute.mustProxy(host);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 这条地址是不是一份播放列表（按路径后缀判，交给中继自己改写）。 */
+    static boolean isPlaylistUrl(String url) {
+        try {
+            String p = new java.net.URI(url).getPath();
+            if (p == null) return false;
+            p = p.toLowerCase(Locale.US);
+            return p.endsWith(".m3u8") || p.endsWith(".m3u");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     /** {@code URI="…"} / {@code URI='…'}，HLS 标签里唯一会带出站地址的属性。 */
     private static final java.util.regex.Pattern TAG_URI =
             java.util.regex.Pattern.compile("URI\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)')");
@@ -631,8 +1033,17 @@ final class VlcRelay {
      * 其余（Accept-Encoding 之类）不搬 —— 我们要原样字节，不要上游压过的。
      */
     private static void applyHeaders(Request.Builder builder, Map<String, String> headers) {
+        applyHeaders(builder, headers, false);
+    }
+
+    /**
+     * @param dropRange 播放列表传 true。播放列表是要整份改写的小文本，
+     *                  带 Range 上游会回 206 只给一段，改写就落空。
+     */
+    private static void applyHeaders(Request.Builder builder, Map<String, String> headers,
+                                     boolean dropRange) {
         String range = headers.get("range");
-        if (range != null && range.length() > 0) builder.header("Range", range);
+        if (!dropRange && range != null && range.length() > 0) builder.header("Range", range);
 
         String ua = headers.get("user-agent");
         if (ua != null && ua.length() > 0) builder.header("User-Agent", ua);
@@ -764,6 +1175,32 @@ final class VlcRelay {
         int q = url.indexOf('?');
         String s = q > 0 ? url.substring(0, q) : url;
         return s.length() <= 140 ? s : s.substring(0, 60) + "…" + s.substring(s.length() - 70);
+    }
+
+    // ── 上游状态码快照：给播放器说人话用 ───────────────────────────────
+
+    /**
+     * 最近一次上游返回的状态码 + 时间。
+     *
+     * <p>播放器只会拿到 VLC 的 {@code EncounteredError}，它自己分不清「地址没了」
+     * 和「编码解不开」。可真机上这两件事该说的话完全不同：前者是源站数据坏了，
+     * 换一集就好；后者才是播放器的问题。中继是唯一知道上游回了什么的地方，
+     * 于是由它留一个 15 秒内有效的快照，播放器报错时来问一句。
+     */
+    private static volatile int lastUpstreamCode = 0;
+    private static volatile long lastUpstreamAt = 0;
+
+    private static void noteUpstream(int code) {
+        lastUpstreamCode = code;
+        lastUpstreamAt = System.currentTimeMillis();
+    }
+
+    /** 15 秒内刚发生过的非 2xx，返回状态码；否则 0。 */
+    static int recentUpstreamFailure() {
+        if (lastUpstreamCode < 200 || lastUpstreamCode >= 300) {
+            return System.currentTimeMillis() - lastUpstreamAt < 15_000 ? lastUpstreamCode : 0;
+        }
+        return 0;
     }
 
     private static void log(String message) {
