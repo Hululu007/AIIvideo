@@ -180,7 +180,7 @@ final class SiteFetchWebView {
     private static final long IMAGE_TIMEOUT_MS = 12_000L;
 
     /**
-     * 剥掉 {@code ; wv} 标记的 Chrome 移动版 UA。
+     * 硬编码的 UA，只在拿不到系统默认 UA 时兜底（见 {@link #chromeUa}）。
      *
      * <p>两个 WebView 共用同一份：Cloudflare 看到 WebView 默认 UA 里的
      * {@code ; wv)} 会把挑战判成「不支持的环境」，转圈永远不放行。
@@ -188,6 +188,35 @@ final class SiteFetchWebView {
     private static final String UA_CHROME =
             "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36"
                     + " (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36";
+
+    /**
+     * 过盾用的 UA：**系统默认 UA 剥掉 {@code ; wv)}**，不硬编码版本号。
+     *
+     * <p>2026-10-21 真机（dozagonza）：硬编码 {@code Chrome/130.0.0.0}，而设备
+     * WebView 内核是更新的大版本。Cloudflare 会做 UA 与 JS 能力的一致性检查 ——
+     * UA 说 130、实测能力不是 130，挑战页就永远停在「请稍候…」（中文版的
+     * Just a moment），{@code awaitPass} 判据正确识别成没通过，45 秒 × 2 轮后超时。
+     * 同一台机器同一网络下 Chrome 浏览器能打开，报的正是它自己的真实版本。
+     *
+     * <p>所以这里改成跟随内核：拿 {@code getUserAgentString()}，只做减法 ——
+     * 去掉 {@code ; wv)} 和 {@code Version/4.0}（老 WebView 的前缀），剩下的
+     * 就是这台设备真实的 Chrome UA。兜底才用 {@link #UA_CHROME}。
+     */
+    private static String chromeUa(WebSettings s) {
+        String ua;
+        try {
+            ua = s == null ? null : s.getUserAgentString();
+        } catch (Throwable e) {
+            ua = null;
+        }
+        if (ua == null || ua.length() == 0) return UA_CHROME;
+        // WebView 的默认 UA 形如：
+        //   … AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/141.0.7390.122 Mobile Safari/537.36
+        // 去掉 wv 标记和 Version/4.0，就和一个正常的安卓 Chrome 一模一样。
+        String out = ua.replace("; wv)", ")").replace("; wv ", " ");
+        out = out.replaceAll("Version/\\d+\\.\\d+ ", "");
+        return out.length() < 40 ? UA_CHROME : out;
+    }
 
     // ── 单例 ──────────────────────────────────────────────────────────
 
@@ -1052,7 +1081,7 @@ final class SiteFetchWebView {
                     //
                     // 换成不带 wv 的 Chrome 移动版 UA，挑战把它当普通 Chrome 处理，
                     // 正常放行。
-                    s.setUserAgentString(UA_CHROME);
+                    s.setUserAgentString(chromeUa(s));
                     // 关掉用不到的能力：减少攻击面，也让加载快一点。
                     s.setAllowFileAccess(false);
                     s.setAllowContentAccess(false);
@@ -1603,7 +1632,7 @@ final class SiteFetchWebView {
                     WebSettings s = wv.getSettings();
                     s.setJavaScriptEnabled(true);
                     s.setBlockNetworkImage(false);
-                    s.setUserAgentString(UA_CHROME);
+                    s.setUserAgentString(chromeUa(s));
                     s.setAllowFileAccess(false);
                     s.setAllowContentAccess(false);
                     wv.setWebViewClient(new WebViewClient());
