@@ -1944,6 +1944,91 @@ function finishResetLogout() {
   api('logout').then(setAccount).catch(() => {});
 }
 
+// ---- 搜索历史 -------------------------------------------------------------
+//
+// 关键词住在 localStorage 的 hgpref: 命名空间，跟主题、播放偏好同一层：
+//
+//   · 不用 hgcache:。那一层是「某个源的内容缓存」，换源（cacheScope 变）和
+//     DATA_SOURCE_VERSION 升级都会成片清掉；而「我之前搜过什么词」跟源没关系，
+//     换个源接着搜同一个词是常态。
+//   · 「恢复出厂设置」会 localStorage.clear()，这里跟着一起清 —— 那正是想要的。
+//
+// 上限 20 条，最近搜过的排最前；去重按不分大小写比，但显示保留用户最后一次
+// 输入的原样（搜 abc 之后搜 ABC，显示的应是 ABC）。
+const SEARCH_HISTORY_KEY = 'hgpref:search-history';
+const SEARCH_HISTORY_LIMIT = 20;
+const searchForm = document.getElementById('search-form');
+const searchHistoryPanel = document.getElementById('search-history');
+const searchHistoryTags = document.getElementById('search-history-tags');
+const searchHistoryClear = document.getElementById('search-history-clear');
+// 「我的」那一栏的搜索框搜的是本机片单，不该往搜索历史里塞。
+const LIBRARY_ROUTES = ['library', 'settings', 'account-management'];
+
+function readSearchHistory() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SEARCH_HISTORY_KEY) || '[]');
+    return Array.isArray(parsed) ? parsed.filter(word => typeof word === 'string' && word) : [];
+  } catch (error) { return []; }
+}
+
+function paintSearchHistory() {
+  const words = readSearchHistory();
+  // 用 data-* 带回原词，不放 textContent 里 —— 词里可能有引号或 & ，esc 转义之后
+  // 读回来还是原文。按钮的可见文字也走 esc，长词由 CSS 截断加省略号。
+  searchHistoryTags.innerHTML = words.map(word => `<button type="button" data-history-word="${esc(word)}">${esc(word)}</button>`).join('');
+  return words.length;
+}
+
+// 面板跟搜索框**一样长**：左边从搜索框左边缘起，右边到搜索框右边缘，
+// 顶在搜索框下面 8px。
+//
+// 不写死像素，现量 searchForm 的 rect。原因有两个：
+//   · 搜索框左边缘不是固定的 18px —— header 里还站着头像（「我的」那几屏
+//     右侧还多一个齿轮），搜索框的起点随这些按钮走；写死就会从头像底下开始，
+//     整块比搜索框宽出一个头像的身位。
+//   · 状态栏高度、dp、屏宽各家机器都不一样，量出来最省事。
+// 换台机器、转屏、系统字体变化都不用再调这行数。
+function alignSearchHistory() {
+  const rect = searchForm.getBoundingClientRect();
+  searchHistoryPanel.style.left = rect.left + 'px';
+  searchHistoryPanel.style.width = rect.width + 'px';
+  searchHistoryPanel.style.right = 'auto';   // 有 width 了，right 得让位
+  searchHistoryPanel.style.top = (rect.bottom + 8) + 'px';
+}
+
+function showSearchHistory() {
+  if (LIBRARY_ROUTES.includes(state.route)) return;
+  if (searchInput.value.trim()) return;
+  if (!paintSearchHistory()) { searchHistoryPanel.hidden = true; return; }
+  alignSearchHistory();
+  searchHistoryPanel.hidden = false;
+}
+
+function hideSearchHistory() {
+  if (!searchHistoryPanel.hidden) searchHistoryPanel.hidden = true;
+}
+
+// 面板开着就跟着数据一起变；关着就别自作主张把它弹出来。
+function refreshSearchHistory() {
+  if (searchHistoryPanel.hidden) return;
+  if (!paintSearchHistory()) hideSearchHistory();
+}
+
+function recordSearchHistory(query) {
+  const word = String(query || '').trim();
+  if (!word) return;
+  const rest = readSearchHistory().filter(one => one.toLowerCase() !== word.toLowerCase());
+  rest.unshift(word);
+  try { localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(rest.slice(0, SEARCH_HISTORY_LIMIT))); } catch (error) {}
+  refreshSearchHistory();
+}
+
+// 输入框里出现字了就收起面板，清空之后（光标还在框里）再放出来。
+function syncSearchHistory() {
+  if (searchInput.value.trim()) { hideSearchHistory(); return; }
+  if (document.activeElement === searchInput) showSearchHistory();
+}
+
 function renderSearch() {
   // 搜索结果就是搜索结果，**不带分类胶囊**。
   //
@@ -2214,6 +2299,9 @@ function playViewEnter(route) {
 
 function setRoute(route) {
   stopBannerAuto();
+  // 换页就收起历史面板。留着的话从搜索结果退回来它还悬在半空，
+  // 而且底下的页面已经换了 —— 一眼看去像是搜索框卡住了。
+  hideSearchHistory();
   const changed = state.route !== route;
   if (state.route === 'detail' && route !== 'detail') { detailCard?.dispose(); detailCard = null; }
   const libraryArea = ['library', 'settings', 'account-management'].includes(route);
@@ -2916,6 +3004,9 @@ async function goSearch(query) {
   if (state.route === 'home') rememberScreen();
   state.previous = { route: state.route, tab: state.tab };
   setRoute('search'); state.query = query.trim(); state.search = null;
+  // 记录放在这一层而不是 submit 事件里：历史、重试（goSearch(state.query)）、
+  // 以后的深链入口都会走到这儿，一处记全。重复的词由 recordSearchHistory 去重。
+  recordSearchHistory(state.query);
   state.searchPending = true; state.searchError = '';
   scroll.scrollTop = 0;
   renderSearchLoading();
@@ -3213,10 +3304,42 @@ document.getElementById('search-form').addEventListener('submit', event => {
   else if (query) goSearch(query);
 });
 searchInput.addEventListener('input', () => {
-  if (state.route !== 'library') return;
+  if (state.route !== 'library') { syncSearchHistory(); return; }
   state.libraryQuery = searchInput.value;
   renderLibrary();
   scroll.scrollTop = 0;
+});
+
+// ---- 搜索历史的交互 ------------------------------------------------------
+// 焦点进来就弹（框里没字、有历史、不是「我的」那几屏）。
+searchInput.addEventListener('focus', showSearchHistory);
+// 转屏、系统字体变化之后搜索框的 rect 会变，面板还开着就跟着重新贴一次。
+window.addEventListener('resize', () => { if (!searchHistoryPanel.hidden) alignSearchHistory(); });
+// 点历史项会先让输入框失焦、键盘收起，此时 click 还能正常派发；所以收起面板
+// 认「手指按在哪儿」，不认 blur —— 照 blur 收的话，按下那一刻面板就没了，
+// 手指抬起来落在空处，点了没反应。
+document.addEventListener('pointerdown', event => {
+  if (searchHistoryPanel.hidden) return;
+  if (searchHistoryPanel.contains(event.target) || searchForm.contains(event.target)) return;
+  hideSearchHistory();
+}, true);
+searchHistoryTags.addEventListener('click', event => {
+  const button = event.target.closest('button[data-history-word]');
+  if (!button) return;
+  const word = button.dataset.historyWord || '';
+  if (!word) return;
+  hideSearchHistory();
+  searchInput.value = word;
+  searchInput.blur();
+  if (/^[#＃]/.test(word)) goTagQuery(word);
+  else goSearch(word);
+});
+searchHistoryClear.addEventListener('click', async () => {
+  const accepted = await askConfirmation('清空搜索历史', '清空之后，这些关键词不会再出现在搜索框下面。', '清空');
+  if (!accepted) return;
+  try { localStorage.removeItem(SEARCH_HISTORY_KEY); } catch (error) {}
+  hideSearchHistory();
+  toast('搜索历史已清空');
 });
 
 document.addEventListener('submit', async event => {

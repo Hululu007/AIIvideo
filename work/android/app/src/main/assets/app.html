@@ -36,6 +36,15 @@
       </form>
       <button id="header-settings" class="header-settings" type="button" aria-label="设置" hidden><img src="settings.svg" alt=""></button>
     </header>
+    <!-- 搜索历史：点搜索框、还没输入的时候从 header 下面浮出来。
+         放在 #scroll 外面 —— 它不能跟着内容一起滚走，也不该占内容流的高度。 -->
+    <section id="search-history" class="search-history" aria-label="搜索历史" hidden>
+      <div class="search-history-head">
+        <h2>搜索历史</h2>
+        <button id="search-history-clear" type="button">清空</button>
+      </div>
+      <div id="search-history-tags" class="search-history-tags"></div>
+    </section>
     <main id="scroll"><div id="content"></div></main>
     <div id="compact-category" aria-hidden="true"></div>
     <nav id="dock" aria-label="主导航">

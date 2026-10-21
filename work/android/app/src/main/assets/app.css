@@ -1188,3 +1188,48 @@ html[data-theme=dark] .settings-card .source-row.is-active .source-pick em{color
 .skeleton-card{display:flex;flex-direction:column;gap:8px}
 .skeleton-card .skeleton-poster{width:100%;height:auto;aspect-ratio:114/153;border-radius:10px;flex:none}
 .skeleton-card-title{height:12px;width:82%;border-radius:4px;margin:0}
+
+/* ---- 搜索历史 ------------------------------------------------------------
+   点搜索框、框里还没字的时候浮在 header 下面，样式跟 B 站那套一个意思：
+   一列「搜索历史」标题 + 右上角「清空」，下面一堆灰底胶囊。
+   颜色全部走 #app 上的变量（--dock / --field / --line / --muted），
+   深色主题不用另写一份 —— 那一层已经换过了。
+
+   位置和宽度由 JS 量搜索框现算（alignSearchHistory）—— 面板要跟搜索框
+   **一样长**：左边从搜索框左边缘起，右边到搜索框右边缘。写死 left/right 的话
+   会从头像底下开始，比搜索框宽出一个头像的身位，看着像另一块东西。
+   这里的 left/right/top 只是 JS 还没跑时的兜底，量到之后会被内联样式盖掉。 */
+.search-history{
+  position:absolute;left:18px;right:18px;
+  top:calc(58px + var(--status-bar-height));
+  z-index:7;padding:14px 16px 16px;
+  background:var(--dock);border:1px solid var(--line);border-radius:20px;
+  box-shadow:var(--shadow-soft);
+  /* 历史攒满 20 条也不会盖住整个屏幕：超了自己滚。 */
+  max-height:calc(100% - 96px - var(--status-bar-height));overflow:auto;
+  animation:search-history-in .18s var(--ease-out,ease);
+}
+/* 深色下 --shadow-soft 是给暖色背景调的，落在 #171b1d 上几乎看不见。
+   浮层要跟内容分得开，单独压一层黑。 */
+html[data-theme=dark] .search-history{box-shadow:0 20px 46px -24px #000d}
+@keyframes search-history-in{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+@media(prefers-reduced-motion:reduce){.search-history{animation:none}}
+.search-history-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:11px}
+.search-history-head h2{font-size:14px;font-weight:800;letter-spacing:-.02em;margin:0;color:var(--text)}
+.search-history-head button{
+  border:0;background:none;color:var(--muted);font-size:12px;padding:4px 2px;
+  border-radius:8px;
+}
+.search-history-head button:active{color:var(--accent)}
+.search-history-tags{display:flex;flex-wrap:wrap;gap:8px}
+.search-history-tags button{
+  /* flex:none 不能省。按钮是 flex item，默认 flex-shrink:1 —— 两个长一点的词
+     挤在一行，浏览器会先把它们各自压窄，压到装不下再换行，结果两个都被截成
+     「测…」「chatgpt…」那样。要的是「按内容宽度排，装不下就整颗换行」，
+     只有单颗超过整行时才截断（靠下面的 max-width:100%）。 */
+  flex:0 0 auto;max-width:100%;border:1px solid var(--field-edge);background:var(--field);
+  color:var(--text);border-radius:14px;padding:8px 13px;font-size:12.5px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  transition:transform .14s var(--ease-out,ease),background-color .16s ease;
+}
+.search-history-tags button:active{transform:scale(.96);background:var(--panel)}
