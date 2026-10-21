@@ -110,20 +110,34 @@
 
   // ── 列表解析 ────────────────────────────────────────────────────────
 
-  var RE_ITEM = /<li class="item">/g;
+  /**
+   * 卡片锚点。
+   *
+   * 首页/分类是 `<li class="item">`，搜索页是 `<li class="item mb15 card-wrap">`
+   * —— 多两个类名。写死 `class="item"` 的话搜索页一个锚点都切不出来，
+   * items 恒为 0（2026-10-21 真机：cap=search ok 但 itemCount=0）。
+   * 所以只认前缀，后面必须是空格或引号。
+   */
+  var RE_ITEM = /<li class="item(?=[ "])/g;
   var RE_VIDEO_ID = /\/video\/(\d+)\.html/;
   var RE_THUMB_TITLE = /class="thumb"[^>]*title="([^"]*)"/;
   var RE_COVER = /data-original="([^"]+)"/;
   var RE_HOT = /<span class="hot">([^<]*)<\/span>/;
   var RE_STATE = /<span class="state"><em>([^<]*)<\/em><\/span>/;
   var RE_BOLD = /<b>([\s\S]*?)<\/b>/;
+  /** 搜索页的标题容器；首页同样有它，所以两种页型可以走同一条路。 */
+  var RE_SUBJECT = /<h5 class="subject[^"]*">([\s\S]*?)<\/h5>/;
+  /** 片名后面挂的评分（`9.0分`），不剥会粘成「嫁金钗9.0分」。 */
+  var RE_SCORE = /<span class="douban_score">[\s\S]*?<\/span>/;
+  /** 搜索页没有 .hot，更新状态写在 `<p>资源：更新第10集</p>` 里。 */
+  var RE_RES = /资源：([^<]{1,24})/;
 
   /**
    * 一页 HTML → 卡片数组。
    *
-   * 用 `<li class="item">` 当锚点切，每段到下一个锚点为止。别用
-   * `/<li class="item">([\s\S]*?)<\/li>/g` —— 卡片里可能有嵌套 li（标签列表），
-   * 那样会在第一个内层 `</li>` 就截断。
+   * 用 `<li class="item` 当锚点切，每段到下一个锚点为止。别用
+   * `/<li class="item[^>]*>([\s\S]*?)<\/li>/g` —— 卡片里可能有嵌套 li
+   *（标签列表），那样会在第一个内层 `</li>` 就截断。
    */
   function parseCards(html) {
     var out = [];
@@ -134,24 +148,39 @@
 
     for (var i = 0; i < marks.length; i++) {
       var from = marks[i];
-      var to = i + 1 < marks.length ? marks[i + 1] : Math.min(html.length, from + 4000);
+      var to = i + 1 < marks.length ? marks[i + 1] : Math.min(html.length, from + 6000);
       var blk = html.slice(from, to);
 
       var idm = RE_VIDEO_ID.exec(blk);
       if (!idm) continue;
 
+      // 标题取值三条路，优先级从高到低：
+      //   ① <h5 class="subject">：首页和搜索页都有，是最稳的一条；
+      //   ② class="thumb" 的 title 属性：首页模板有，搜索页没有；
+      //   ③ 裸 <b>：兜底。
+      //
+      // ① 里有两个坑，都是 search 页独有的：
+      //   · 关键词被站点高亮成 `<b><b style="color:red;">嫁</b>金钗</b>` —— 嵌套 b，
+      //     所以**不能**用 `/<b>([\s\S]*?)<\/b>/` 去抠，非贪婪只吃到「嫁」；
+      //   · 片名后面跟着 `<span class="douban_score">9.0分</span>`，不剥会变成
+      //     「嫁金钗9.0分」。先整块删 span 再剥标签。
+      var sm = RE_SUBJECT.exec(blk);
       var tm = RE_THUMB_TITLE.exec(blk);
       var bm = RE_BOLD.exec(blk);
-      var title = clean(decodeEntities(
-        tm ? tm[1] : (bm ? stripTags(bm[1]) : '')
-      ));
+      var title = '';
+      if (sm) title = clean(decodeEntities(stripTags(sm[1].replace(RE_SCORE, ''))));
+      if (!title && tm) title = clean(decodeEntities(tm[1]));
+      if (!title && bm) title = clean(decodeEntities(stripTags(bm[1])));
       if (!title) continue;
 
       var cm = RE_COVER.exec(blk);
       var hm = RE_HOT.exec(blk);
-      var sm = RE_STATE.exec(blk);
+      var rm = RE_RES.exec(blk);
+      var sm2 = RE_STATE.exec(blk);
 
-      var hot = hm ? clean(decodeEntities(hm[1])) : '';
+      // 首页写 <span class="hot">已完结</span>，搜索页写 <p>资源：更新第10集</p>。
+      var hot = hm ? clean(decodeEntities(hm[1]))
+                   : (rm ? clean(decodeEntities(rm[1])) : '');
       out.push({
         id: idm[1],
         title: title,
@@ -161,7 +190,9 @@
         // 自己起名 note 的话不报错，卡片小字就是空的。
         playAt: hot,
         note: hot,
-        tags: sm ? [clean(decodeEntities(sm[1]))] : []
+        // 分类角标：首页 `<span class="state"><em>悬疑</em></span>`。
+        // 搜索页没有这个容器，所以这里的 tags 是空数组 —— 别拿 sm（标题容器）顶。
+        tags: sm2 ? [clean(decodeEntities(sm2[1]))] : []
       });
     }
     return out;

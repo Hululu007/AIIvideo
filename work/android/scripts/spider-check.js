@@ -773,6 +773,7 @@ const PROFILES = {
     dir: 'dozagonza',
     routes: [
       { match: /\/play\/\d+\/\d+\/\d+/, file: 'play.html' },
+      { match: /\/search\.html/, file: 'search.html' },
       { match: /\/video\/\d+/, file: 'detail.html' },
       { match: /\/tv\/\d+/, file: 'tv1.html' },
       { match: /dozagonza\.com\/?(?:$|\?|#)/, file: 'home.html' },
@@ -816,6 +817,23 @@ const PROFILES = {
           r => (r.tags || []).indexOf('国产剧') >= 0],
         ['线路名是「高清线路」', r => String((((r.lines || [])[0]) || {}).name) === '高清线路'],
       ],
+      // 搜索页是另一套卡片：<ul class="search-list"> 里 <li class="item mb15 card-wrap">。
+      // 2026-10-21 真机就栽在这：锚点写死成 class="item" 切不出东西、标题被
+      // 关键词高亮成嵌套 <b> 只抠到一个字、评分 span 粘在片名后面。
+      search: [
+        ['卡片 2 张（不是 0）', r => (r.items || []).length === 2],
+        ['标题是「嫁金钗」全名，不是只抠到高亮那一个字',
+          r => String(((r.items || [])[0] || {}).title) === '嫁金钗'],
+        ['标题没把「9.0分」粘上去',
+          r => String(((r.items || [])[0] || {}).title).indexOf('分') < 0],
+        ['第二条标题是「爱在无尽夏」',
+          r => String(((r.items || [])[1] || {}).title) === '爱在无尽夏'],
+        ['封面是 img.dozagonza.com',
+          r => (r.items || []).every(one => /^https:\/\/img\.dozagonza\.com\//.test(String(one.cover)))],
+        ['更新状态从「资源：」取到了',
+          r => String(((r.items || [])[0] || {}).playAt) === '更新第10集'],
+        ['id 是纯数字', r => /^\d+$/.test(String(((r.items || [])[0] || {}).id))],
+      ],
       play: [
         ['地址是 m3u8 结尾', r => /\.m3u8$/.test(String(r.url || ''))],
         ['落在 play.hhuus.com', r => String(r.url || '').indexOf('play.hhuus.com') > 0],
@@ -827,6 +845,7 @@ const PROFILES = {
     args: {
       home: {},
       category: { slug: '1', page: 1 },
+      search: { keyword: '嫁', page: 1 },
       detail: { ref: '275179106' },
       play: { ref: '275179106', ep: 1 },
     },
