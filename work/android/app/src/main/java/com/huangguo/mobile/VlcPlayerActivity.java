@@ -317,6 +317,10 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             }
         } catch (Throwable ignored) {}
 
+        // 把当前源交给中继：取流请求要套它的 headers 模板（Referer/UA），
+        // 否则防盗链的 CDN 对分片一律 403。见 VlcRelay.applySourceHeaders。
+        try { VlcRelay.setSourceProfile(SiteProfile.current(this)); } catch (Throwable ignored) {}
+
         startedAt = payload.optLong("start", 0L);
         savedPosition = startedAt;
 

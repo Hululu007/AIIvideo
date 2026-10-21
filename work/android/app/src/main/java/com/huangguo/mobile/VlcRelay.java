@@ -215,6 +215,20 @@ final class VlcRelay {
     }
 
     /**
+     * 当前源配置，播放器打开时由 {@link VlcPlayerActivity} 递进来。
+     *
+     * <p>中继转发的是「取流」这一类请求，它们和 AiiHttp 里那些接口请求是同一个
+     * 网站的，防盗链规则也一样 —— 但中继只转 VLC 给的 header，拿不到源声明的
+     * 那套模板。真机症状（2026-10-21，Pornhub）：master / variant 200，
+     * 分片 ts 一律 403，因为那把 CDN 的防盗链只认 Referer，而 VLC 不带。
+     */
+    private static volatile SiteProfile sourceProfile;
+
+    static void setSourceProfile(SiteProfile profile) {
+        sourceProfile = profile;
+    }
+
+    /**
      * 中继里这条地址该不该带代理 —— 跟 {@link #wrap} 用同一个判据（NetRoute）。
      *
      * <p>两条路原来是分开的：wrap 决定「绕不绕中继」（mustProxy 才绕），
@@ -1085,6 +1099,36 @@ final class VlcRelay {
 
         // 媒体栈要求原样字节（identity;q=1, *;q=0），别让上游压。
         builder.header("Accept-Encoding", "identity");
+
+        // 最后套源声明的模板（UA / Referer），同名会覆盖上面 VLC 带来的那份 ——
+        // 源自己写的才是权威，VLC 那个 UA 是自己的名字，防盗链一眼就拒。
+        applySourceHeaders(builder);
+    }
+
+    /**
+     * 把当前源的 headers 模板落到请求上，规则和 {@code AiiHttp.applyHeaders} 一致：
+     * {@code {origin}} 换成源域名，换完是空串或光一个 {@code /} 的头直接不发
+     * （缺 Referer 是 200，发个错的反而 403）。
+     */
+    private static void applySourceHeaders(Request.Builder builder) {
+        SiteProfile profile = sourceProfile;
+        if (profile == null) return;
+        try {
+            org.json.JSONObject template = profile.object("headers");
+            if (template == null) return;
+            String origin = profile.origin == null ? "" : profile.origin.trim();
+            java.util.Iterator<String> keys = template.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                String value = template.optString(key, "");
+                if (value == null || value.length() == 0) continue;
+                String filled = value.replace("{origin}", origin);
+                if (filled.length() == 0 || filled.equals("/")) continue;
+                builder.header(key, filled);
+            }
+        } catch (Throwable e) {
+            log("源请求头模板读取失败：" + e.getClass().getSimpleName());
+        }
     }
 
     /**
