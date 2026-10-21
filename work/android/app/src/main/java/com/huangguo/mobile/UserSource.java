@@ -362,6 +362,51 @@ public final class UserSource {
     // ── 校验 ──────────────────────────────────────────────────────────
 
     /**
+     * 配置里的 spider 引用，取不到返回空串。
+     *
+     * 三种写法都认：`web.spider: "https://…/x.js"`（现在的主流）、
+     * `web.spider: {"id": "x"}`（早期配置把对象塞进来过）、以及顶层的
+     * `spider`（个别第三方清单这么写）。只认字符串的话，后两种会被判成
+     * 「既没有 spider 也没有 paths」，报一句「web.paths 为空」—— 用户看着
+     * 完全不知道问题在哪儿。
+     */
+    private static String spiderRef(JSONObject config, JSONObject web) {
+        Object raw = web == null ? null : web.opt("spider");
+        String ref = refOf(raw);
+        if (ref.length() == 0 && config != null) ref = refOf(config.opt("spider"));
+        return ref;
+    }
+
+    /** web 块里的键名，逗号分隔，用于报错定位。 */
+    private static String orderKeys(JSONObject obj) {
+        if (obj == null || obj.length() == 0) return "（空）";
+        StringBuilder sb = new StringBuilder();
+        java.util.Iterator<String> it = obj.keys();
+        while (it.hasNext()) {
+            String key = it.next();
+            if (sb.length() > 0) sb.append(", ");
+            sb.append(key);
+        }
+        return sb.toString();
+    }
+
+    private static String refOf(Object raw) {
+        if (raw == null) return "";
+        if (raw instanceof CharSequence) return raw.toString().trim();
+        if (raw instanceof JSONObject) {
+            JSONObject obj = (JSONObject) raw;
+            String url = obj.optString("url", "").trim();
+            if (url.length() > 0) return url;
+            return obj.optString("id", "").trim();
+        }
+        if (raw instanceof org.json.JSONArray) {
+            org.json.JSONArray arr = (org.json.JSONArray) raw;
+            return arr.length() > 0 ? refOf(arr.opt(0)) : "";
+        }
+        return "";
+    }
+
+    /**
      * 检查一份配置能不能用。返回 null 表示通过，否则返回给用户看的中文原因。
      *
      * 规则是照着 SiteProfile 构造函数的要求反推的 —— 那里缺什么会崩，
@@ -388,12 +433,17 @@ public final class UserSource {
         // 判据故意写成「有 spider 才免」，不做无条件放宽：既没 spider 也没
         // origin 的配置仍然掉进下面那套 REST 校验，缺什么报什么。否则「什么都
         // 不写」也会通过 —— 那是装完就白屏的配置，比报错难查得多。
-        boolean spiderSource = web.optString("spider", "").trim().length() > 0;
+        boolean spiderSource = spiderRef(config, web).length() > 0;
 
         JSONObject paths = web.optJSONObject("paths");
         String home = paths == null ? "" : paths.optString("home", "");
         if (!spiderSource) {
-            if (paths == null || paths.length() == 0) return "web.paths 为空（至少要有一条接口路径）";
+            if (paths == null || paths.length() == 0) {
+                // 把 web 里实际有哪些键带出来：多半是「spider 写在了别处」或者
+                // 「拉到的根本不是配置而是别的东西」，光说一句「paths 为空」查不动。
+                return "web.paths 为空（至少要有一条接口路径）"
+                        + "；web 里只有：" + orderKeys(web) + "，也没有可用的 spider";
+            }
             if (home.length() == 0) return "web.paths.home 缺失（首页拿不到数据）";
         }
 

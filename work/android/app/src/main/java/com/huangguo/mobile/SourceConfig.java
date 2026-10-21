@@ -209,10 +209,22 @@ final class SourceConfig {
         try {
             config = load(url);
         } catch (Exception e) {
-            return "拉取失败：" + e.getMessage();
+            String why = e.getMessage();
+            // load() 用固定串标记「这不是一份源，是源的清单」。
+            // 原样透出去用户只看到 MARKET_SOURCES，不知道下一步该干什么。
+            if ("MARKET_SOURCES".equals(why)) {
+                return "这个地址是一份源清单（里面是一串源），不是单个源 —— 去「源市场」里点其中一项";
+            }
+            return "拉取失败：" + why;
         }
         String problem = verify(context, config);
-        if (problem != null) return problem;
+        if (problem != null) {
+            // 带上地址一起记：源市场一次只加一个，但用户报「加不上」时，
+            // 光看一句话分不清是哪个条目、拉到的又是哪份东西。
+            UserSource.log("换源被拒 @" + url + "：" + problem
+                    + "｜顶层键：" + keysOf(config));
+            return problem;
+        }
         try {
             config.put("__url", url);
             save(context, config);
@@ -222,6 +234,17 @@ final class SourceConfig {
         writeCache(context, url, config);
         return null;
     }
+    private static String keysOf(org.json.JSONObject obj) {
+        if (obj == null) return "（空）";
+        StringBuilder sb = new StringBuilder();
+        java.util.Iterator<String> it = obj.keys();
+        while (it.hasNext()) {
+            if (sb.length() > 0) sb.append(", ");
+            sb.append(it.next());
+        }
+        return sb.toString();
+    }
+
     /** 校验 + 干跑。返回 null 表示这份配置能用。 */
     static String verify(Context context, JSONObject config) {
         String problem = UserSource.validate(config);
