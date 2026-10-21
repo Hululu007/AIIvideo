@@ -98,3 +98,8 @@ work/re/pie/__pycache__/
 
 # 发布件只走 GitHub Release，不进仓库（42MB）
 AIIvideo-v*.apk
+
+# ── 本机工具（2026-10-21）──────────────────────────────────────────────
+# 抓包/代理测试用的第三方 APK 和一份临时 clash 配置，都是「换台机器重新下一份」
+# 的东西，不该进仓库（那份 APK 47MB）。源码目录 work/android 里不带它们。
+work/tools/
