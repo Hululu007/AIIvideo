@@ -1132,11 +1132,27 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             // 视频输出就绪：这才是「画面能出来了」的时刻，把声音放开。
             unmute();
         } else if (type == MediaPlayer.Event.EncounteredError) {
-            showError("这个地址内置播放器也解不了。可能地址过期了，回上一页重新取一次。");
+            showError(playbackFailureText());
         }
     }
 
     /** 把当前视频轨的编码/分辨率写到副标题上 —— 排查「这台机器放不了」时最有用的一行。 */
+    /**
+     * 播放失败时该说的话。
+     *
+     * <p>中继知道上游回了什么，所以能分清两条完全不同的路：上游 404/403 是
+     * 源站这一集的地址没了（换一集就能看，重取多少次都一样）；其余才是
+     * 播放器解不了。真机实测：三国演义第 1 集三条备选全部指到一台整站 404 的
+     * CDN（连根路径都回 404），这时候再让人「回上一页重取」是白折腾。
+     */
+    private String playbackFailureText() {
+        int up = VlcRelay.recentUpstreamFailure();
+        if (up == 404) return "在源站已经不存在（上游 404），换一集或者换个源试试。";
+        if (up == 403) return "被源站 CDN 拒了（上游 403），换一集或者换个源试试。";
+        if (up >= 400) return "源站返回 " + up + "，换一集或者换个源试试。";
+        return "内置播放器也解不了，回上一页重新取一次。";
+    }
+
     private void describeTrack() {
         try {
             if (player == null) return;
@@ -1833,7 +1849,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             if (pv != null) {
                 pv.spin.setVisibility(View.GONE);
                 pv.error.setVisibility(View.VISIBLE);
-                pv.error.setText("第 " + eps[curPos] + " 集内置播放器也解不了，回上一页重新取一次");
+                pv.error.setText("第 " + eps[curPos] + " 集" + playbackFailureText());
             }
             return;
         }
