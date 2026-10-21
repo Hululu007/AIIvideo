@@ -176,5 +176,10 @@
         ]
       ]
     }
+  },
+  "net": {
+    "_why": "显式全直连（proxy 为空数组）。真机 7f8f5254 实测：开代理时 WebView 加载 www.dozagonza.com 直接 net::ERR_CONNECTION_CLOSED（连接被重置，不是盾），而同一台机器同一网络下用 Chrome 直连打开是正常的。也就是说这个站当前只能直连，走节点反而连不上。不改这一条，spider 的 net 会一直拿不到 body，界面只会显示「源站响应太慢」。",
+    "declared": true,
+    "proxy": []
   }
 }
