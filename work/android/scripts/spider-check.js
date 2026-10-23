@@ -83,6 +83,7 @@ const PROFILES = {
       detail: [
         ['标题对得上', r => String(r.title || '').indexOf('仙逆剧场版') >= 0],
         ['简介非空', r => String(r.description || '').length > 0],
+        // 两条线路（sid=1 三集、sid=2 四集）→ 取集数多的那条，所以是 4 条。
         ['剧集 3 条', r => (r.episodes || []).length === 3],
         ['第一集是 ep1', r => String((r.episodes || [])[0] && r.episodes[0].ref) === 'ep1'],
         ['第一集标题「第01集」', r => String((r.episodes || [])[0] && r.episodes[0].title) === '第01集'],
@@ -805,9 +806,13 @@ const PROFILES = {
           r => /^https:\/\/img\.dozagonza\.com\/upload\/vod\//.test(String(r.cover || ''))],
         ['简介取自 .summary-con（不是 meta description）',
           r => String(r.description || '').indexOf('超清无删减版') >= 0],
-        ['剧集 3 条', r => (r.episodes || []).length === 3],
-        ['第一集 ref 是「id:集号」',
-          r => String((((r.episodes || [])[0]) || {}).ref) === '275179106:1'],
+        // 两条线路（sid=1 三集、sid=2 四集）→ 取集数多的那条，所以是 4 条。
+        ['剧集取线路 2 的 4 条', r => (r.episodes || []).length === 4],
+        // 2026-10-23 起 ref 带线路：`id:sid:nid`。夹具那个站只有一条 sid=1 的线路，
+        // 但嫁金钗那种两条线路的站必须靠这个值才能请求对播放页（见 dozagonza 的
+        // episodesOf 注释）。
+        ['第一集 ref 是「id:线路:集号」',
+          r => String((((r.episodes || [])[0]) || {}).ref) === '275179106:2:1'],
         ['第一集标题第01集',
           r => String((((r.episodes || [])[0]) || {}).title) === '第01集'],
         ['第三集标题第03集',
@@ -838,7 +843,12 @@ const PROFILES = {
         ['地址是 m3u8 结尾', r => /\.m3u8$/.test(String(r.url || ''))],
         ['落在 play.hhuus.com', r => String(r.url || '').indexOf('play.hhuus.com') > 0],
         ['备选 1 条', r => (r.alts || []).length === 1],
-        ['集号对得上', r => Number(r.episodeNumber) === 1],
+        ['集号对得上', r => Number(r.episodeNumber) === 3],
+        // 这条是 2026-10-23 那次的回归点：play 必须按 ref 里的线路去请求，
+        // 不能再写死 /play/<id>/1/<nid>.html —— 站点对不存在的线路一律回第 1 集。
+        ['请求的是线路 2 的第 3 集',
+          (r, info) => (info.requested || []).some(req =>
+            /\/play\/275179106\/2\/3\.html/.test(String((req && req.url) || req)))],
         ['note 写明 AES-128 的相对密钥', r => String(r.note || '').indexOf('AES-128') >= 0],
       ],
     },
@@ -847,7 +857,7 @@ const PROFILES = {
       category: { slug: '1', page: 1 },
       search: { keyword: '嫁', page: 1 },
       detail: { ref: '275179106' },
-      play: { ref: '275179106', ep: 1 },
+      play: { ref: '275179106:2:3', ep: 3 },
     },
   },
 
@@ -1396,7 +1406,7 @@ async function runSpider(spiderPath, options) {
     for (const [label, predicate] of checks) {
       let ok = false;
       try {
-        ok = !!predicate(payload || {});
+        ok = !!predicate(payload || {}, { requested: entry.requested, missed: entry.missed });
       } catch (error) {
         ok = false;
       }
@@ -1646,7 +1656,7 @@ function runChild(spiderPath, cap) {
         for (const [label, predicate] of checks) {
           let ok = false;
           try {
-            ok = !!predicate(payload || {});
+            ok = !!predicate(payload || {}, { requested: resolver.requested.slice(), missed: resolver.missed.slice() });
           } catch (error) {
             ok = false;
           }

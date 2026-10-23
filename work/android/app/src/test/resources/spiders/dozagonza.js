@@ -266,41 +266,63 @@
    * 只收 `href="/play/<当前id>/…"` 的链接 —— 详情页底部还有一大堆推荐位的
    * `/video/…`，混进来会把剧集数量算错。
    *
-   * **只取 sid 最小的那一组**。电影页常常挂三条线路（sid 1/2/3），每组只有
-   * 一集，全收下来会得到三个都叫「第01集」的条目，而 play 里固定走 sid=1，
-   * 点第二集反而请求同一集。剧集类站点正常只有一个 sid，这条对它没影响。
+   * **按 sid 分组，取集数最多的那一条线路**（并列时取 sid 小的）。
+   *
+   * 2026-10-23 修：原来取的是 sid 最小的那组，而 play 里把 sid 写死成 1。
+   * 嫁金钗（275189709）有 sid=3 和 sid=8 两条线路、各 15 集，取到的 sid 是 3，
+   * 真正请求的却是 /play/<id>/1/<nid>.html —— 站点对不存在的线路一律回「第 1 集」
+   * 的播放页，症状就是「点第 15 集、播第 1 集」，而且每一集都这样。
    */
   function episodesOf(html, id) {
-    var all = [];
-    var seen = {};
+    var bySid = {};
+    var order = [];
     var re = new RegExp('/play/' + id + '/(\\d+)/(\\d+)\\.html', 'g');
     var m;
     while ((m = re.exec(html)) !== null) {
-      var key = m[1] + '_' + m[2];
-      if (seen[key]) continue;
-      seen[key] = true;
-      all.push({ sid: Number(m[1]), nid: Number(m[2]) });
+      var sid = Number(m[1]);
+      var nid = Number(m[2]);
+      if (!bySid[sid]) { bySid[sid] = []; order.push(sid); }
+      var arr = bySid[sid];
+      var dup = false;
+      for (var i = 0; i < arr.length; i++) if (arr[i].nid === nid) { dup = true; break; }
+      if (!dup) arr.push({ sid: sid, nid: nid });
     }
-    if (!all.length) return [];
+    if (!order.length) return [];
 
-    var minSid = all[0].sid;
-    for (var i = 1; i < all.length; i++) {
-      if (all[i].sid < minSid) minSid = all[i].sid;
+    var best = order[0];
+    for (var k = 1; k < order.length; k++) {
+      var cand = order[k];
+      if (bySid[cand].length > bySid[best].length
+          || (bySid[cand].length === bySid[best].length && cand < best)) {
+        best = cand;
+      }
     }
-    var out = [];
-    for (var j = 0; j < all.length; j++) {
-      if (all[j].sid === minSid) out.push(all[j]);
-    }
+    var out = bySid[best].slice();
     out.sort(function (a, b) { return a.nid - b.nid; });
     return out;
   }
 
-  /** ref 可能是 `<id>` 或 `<id>:ep<N>`：按最后一个冒号切。 */
-  function idOf(ref) {
-    var s = String(ref == null ? '' : ref).trim();
-    var cut = s.lastIndexOf(':');
-    return cut > 0 ? s.slice(0, cut) : s;
+  /**
+   * 拆 ref。三种形态都要认：
+   *   · `<id>`             —— 只有片子
+   *   · `<id>:<nid>`       —— 旧写法（2026-10-23 之前存的详情缓存）
+   *   · `<id>:<sid>:<nid>` —— 现在 detail 给的那一份，带线路
+   * 深链直接进播放器时会拿到 `<id>:ep<N>`，拆出来 sid/nid 都是 NaN，交给调用方兜底。
+   */
+  function refParts(ref) {
+    var raw = String(ref == null ? '' : ref).trim();
+    var p = raw.split(':');
+    var id = p[0] || '';
+    var sid = p.length >= 3 ? Number(p[1]) : 0;
+    var nid = p.length >= 3 ? Number(p[2]) : (p.length === 2 ? Number(p[1]) : 0);
+    return {
+      id: id,
+      sid: isFinite(sid) && sid > 0 ? sid : 0,
+      nid: isFinite(nid) && nid > 0 ? nid : 0
+    };
   }
+
+  function idOf(ref) { return refParts(ref).id; }
 
   function pageUrl(kind, key, page) {
     if (kind === 'category') {
@@ -381,7 +403,7 @@
       for (var i = 0; i < eps.length; i++) {
         episodes.push({
           no: eps[i].nid,
-          ref: id + ':' + eps[i].nid,
+          ref: id + ':' + eps[i].sid + ':' + eps[i].nid,
           // 单片（电影）只有一集，叫「正片」比「第01集」像人话。
           title: eps.length === 1
             ? '正片'
@@ -419,11 +441,28 @@
      */
     async play(ctx, args) {
       args = args || {};
-      var id = idOf(args.ref || args.id);
+      var r = refParts(args.ref || args.id);
+      var id = r.id;
       if (!id) throw new Error('星空影视 播放缺少 id');
-      var nid = Math.max(1, Number(args.ep) || 1);
+      // nid 优先取 ref 里的（那一份是详情页真实链接里的集号），退到 args.ep。
+      var nid = r.nid || Math.max(1, Number(args.ep) || 1);
+      // sid 同理：ref 里带就用，深链没有就猜 1 —— 猜错时站点会回第 1 集，
+      // 至少不是 404；要修就得让前端一直带着 detail 的 ref（现在是这样）。
+      var sid = r.sid;
+      if (!sid) {
+        // 旧缓存里的 ref 是 `<id>:<集号>`（2026-10-23 之前存的详情），没有线路号。
+        // 猜 1 在单线路的站上碰巧对，在多线路的站上必然回第 1 集（嫁金钗就是），
+        // 所以宁可多抓一次详情页，把线路找出来。
+        var page = await fetchHtml(ctx, BASE + '/video/' + enc(id) + '.html');
+        var eps = episodesOf(page, id);
+        for (var i = 0; i < eps.length; i++) {
+          if (eps[i].nid === nid) { sid = eps[i].sid; break; }
+        }
+        if (!sid && eps.length) sid = eps[0].sid;
+        sid = sid || 1;
+      }
 
-      var html = await fetchHtml(ctx, BASE + '/play/' + enc(id) + '/1/' + nid + '.html');
+      var html = await fetchHtml(ctx, BASE + '/play/' + enc(id) + '/' + sid + '/' + nid + '.html');
       var m = /player_aaaa\s*=\s*(\{[\s\S]*?\})\s*<\/script>/.exec(html);
       if (!m) {
         throw new Error('星空影视 播放页没有 player_aaaa（id=' + id + ' 第 ' + nid
