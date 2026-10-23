@@ -8,17 +8,17 @@
 
 ```bash
 cd work/android
-./gradlew :app:assembleRelease      # 出 app-arm64-v8a-release.apk（约 47 MB）
+./gradlew :app:assembleRelease      # 出 app-arm64-v8a-release.apk（2026-10-21 实测 42.9 MB）
 ./gradlew :app:assembleDebug        # debug 包
 ./gradlew :app:compileDebugJavaWithJavac   # 只验编译，秒级
-./gradlew :app:testDebugUnitTest           # 单元测试，242 个用例
+./gradlew :app:testDebugUnitTest           # 单元测试，236 个用例
 ```
 
 或者用脚本（推荐，日志更清楚）：
 
 ```bash
 ./scripts/build.sh check      # 编译 + 资源 + assets
-./scripts/build.sh test       # 242 个单元测试
+./scripts/build.sh test       # 236 个单元测试
 ./scripts/build.sh build      # 出 release APK
 ./scripts/build.sh install    # 构建 → 装真机 → 冷启动 → 截图
 ./scripts/build.sh verify     # 清空重建 + 测试 + 断言 APK 内容
@@ -48,6 +48,7 @@ work/android/
 ├── scripts/gen-web-config.py          site-default.json → site-web.js
 ├── publish-nodes.sh                   发布节点池：校验（+ 可选 commit/push）
 ├── keystore/                          本地签名（git 忽略）
+├── ui.js                             真机页面驱动（CDP，不截图认字）
 └── FIX_RULES.md                       反编译产物的修复规则（历史参考）
 ```
 
@@ -131,7 +132,7 @@ geosite，只能写显式域名），三个出口共用：
 - `XrayConfig.routing()` 把表生成 `domain: [...] → direct` 规则。
 
 **新接直连可用的源时，往 `DirectHosts.HOSTS` 加一行**，三个出口自动生效。
-背景与实测数据见 [`../docs/2026-10-18-代理分流与播放器修复.md`](../docs/2026-10-18-代理分流与播放器修复.md)。
+背景与实测数据见 [`../docs/history/2026-10-18-代理分流与播放器修复.md`](../../docs/history/2026-10-18-代理分流与播放器修复.md)。
 
 ## 桥指令注册表
 
@@ -181,14 +182,14 @@ curl -s http://127.0.0.1:9222/json   # 取 webSocketDebuggerUrl
 ```
 
 完整的配方（含 Python 客户端、`awaitPromise`、往页面里塞长文本的办法）在
-[`docs/2026-10-18-真机WebView调试.md`](../../docs/2026-10-18-真机WebView调试.md)。
+[`docs/真机WebView调试.md`](../../docs/真机WebView调试.md)。
 
 判定标准：logcat 里 `未知请求` 出现 **0 次** = 40 条全部被注册表接住。
 出现 `xxx failed` 是业务失败（没配源、没登录、参数不全），不是路由错误。
 
 ## 测试
 
-242 个 JUnit 用例（2026-10-18），全部在 JVM 上跑，不需要设备，秒级。
+236 个 JUnit 用例（2026-10-21，26 个测试类），全部在 JVM 上跑，不需要设备，秒级。
 其中 30 个默认跳过：联网用例要加 `-Dhg.live=1` 才跑，fixture 用例缺快照也跳过。
 
 | 测试类 | 用例 | 测什么 |

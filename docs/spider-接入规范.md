@@ -3,9 +3,10 @@
 给第三方开发者：写一个能在 AIIvideo 里跑起来的内容源。
 
 **适用版本**：App ≥ v1.0.32，spider ABI = `1`（`__spiderSite.requires` 写 `">=1"`）。
-**参考实现**：配置在 `docs/samples/spiders/*.json`（十份，覆盖接口站/HTML 站/盾后站/
+当前开发版本 2.0.19，ABI 仍是 `1`。
+**参考实现**：配置在 `docs/samples/spiders/*.json`（15 份，覆盖接口站/HTML 站/盾后站/
 网盘站四种形态），对应的源码在 `work/android/app/src/test/resources/spiders/*.js`；
-那批源都跑过离线回归（`node scripts/spider-check.js`），照着改比从零写快。
+那批源都跑过离线回归（`node scripts/spider-all-check.js`，当前 14 个源全过），照着改比从零写快。
 
 ---
 
@@ -73,7 +74,7 @@ Referer 或登录才能下的地址装不上。同 id 再装一次是覆盖，�
 
 | 字段 | 类型 | 规则 |
 |---|---|---|
-| `origin` | string | **HTTPS + 裸域名**。带路径、query、userinfo、http 一律拒装 |
+| `origin` | string | **HTTPS + 裸域名**。带路径、query、userinfo、http 一律拒装。**spider 源可以留空**——它一条路径都不拼；留空时也就不用管 `web.paths.home` 那套绝对地址前提 |
 | `cover.allowedHosts` | string[] | 非空，每项只能含 `[a-zA-Z0-9.-]` —— 这是封面图床的白名单，也是防 SSRF 的闸 |
 | `web.spider` | string | 源码地址，或纯 id |
 
@@ -81,7 +82,7 @@ Referer 或登录才能下的地址装不上。同 id 再装一次是覆盖，�
 
 | 字段 | 作用 | 不填的后果 |
 |---|---|---|
-| `headers` | App 侧（封面、播放取流）发的请求头，`{origin}` 会被替换成源域名 | 用默认 UA，有的站会 403 |
+| `headers` | App 侧（封面、播放取流）发的请求头，`{origin}` 会被替换成源域名。两条通道共用 `Outbound.applyHeaders` 这一个实现 | 用默认 UA，有的站会 403 |
 | `cover.mode` | `plain` / `aes-cbc` / `auto` | 默认 `plain` |
 | `cover.transformation` | `AES/CBC/NoPadding` / `AES/CBC/PKCS5Padding` | 加密封面必须填 |
 | `cover.key` / `cover.iv` / `cover.keyEncoding` | AES 密钥（16/24/32 字节）与 IV（16 字节），编码 `text`/`base64`/`hex` | 同上 |
@@ -95,6 +96,12 @@ Referer 或登录才能下的地址装不上。同 id 再装一次是覆盖，�
 | `hosts` | DNS 钉 IP `{ "域名": ["1.2.3.4"] }`，只在**直连**时生效 | 域名被污染时连不上 |
 | `doh` | DoH 配置，见 `huangguo.json` | — |
 | `http.hosts` | 播放层允许访问的主机（m3u8/分片在别的域时必须声明） | 播放直接报「这个源没有声明 http.hosts」 |
+
+> **`headers` 覆盖的是全部出站请求，不只是接口。** 2026-10-21 之前播放取流那条路
+> （`VlcRelay`）没接这份模板，表现是「列表能拿到、分片全 403」—— Pornhub 的
+> `phncdn` 只认站点 Referer，m3u8 放行、ts 一律拒。现在两条通道都走
+> `Outbound.applyHeaders`，加新通道时也必须走它，别各自抄一份。
+> 详见[出站请求的两条通道](出站请求的两条通道.md)。
 
 ### 2.3 `spiderArgs`：源怎么拿到自己的配置
 
@@ -497,6 +504,41 @@ adb shell ls /data/data/com.huangguo.mobile/files/site-dump/   # 需要 root 或
 
 拿到原文直接对着你的正则跑一遍，比反复猜「是不是站点改版了」快得多。
 
+### 10.4 市场文件：三层引用一次走完
+
+`market-spider.json` 是三层引用的最外层：
+
+```
+市场 {sources:[{url}]}
+  → 源配置 {web:{spider: '<js 地址>'}}
+    → js 源码
+```
+
+**任何一层写错，症状都是「用户点了，然后什么都没有」**，而三层里每一层单独看都是
+合法 JSON。2026-10-19 就同时踩过两个：市场里写 `/admin/...`（后台界面，401）、配置里
+`web.spider` 是纯 id（靠同目录猜）。
+
+```bash
+cd work/android
+node scripts/market-check.js https://<你的服务器>/market-spider.json
+```
+
+它把三层全走一遍：市场能解析、`sources` 非空、每条有 name 和 https url、不是 `/admin/`
+路径；源配置能 200 拿到、`web.spider` 是完整 https 地址；源码能下载、沙箱里能加载、
+导出 `__spiderSite`、id 与文件名一致、`hosts` 非空、五个能力都在。
+
+改完服务器上任何一份文件都跑一次，比在手机上点八遍快，而且能查出「点进去才知道」
+的那种错。另外三个回归配合着用：
+
+```bash
+node scripts/spider-all-check.js   # 全部源离线回归（有夹具的才断言）
+node scripts/spider-id-check.js    # web.spider 两种写法 → id
+node scripts/model-check.js        # spider 输出 → 前端形状
+```
+
+市场里的 `desc` 是给人看的，错了一样误导人：2026-10-19 有一条写「播放地址加密（播不了）」，
+而修完 `.jpg` 伪装之后已经能跑到解码器。**desc 跟着能力走，不跟印象走。**
+
 ---
 
 ## 11. 提交前检查清单
@@ -507,7 +549,7 @@ adb shell ls /data/data/com.huangguo.mobile/files/site-dump/   # 需要 root 或
 - [ ] `cover.allowedHosts` 覆盖了所有封面域名
 - [ ] `web.spider` 指向的 js 能下载、大小 < 2MB
 - [ ] 需要站点参数的源写了 `web.spiderArgs`，且配置里真有那些键
-- [ ] 国内站写了 `net.declared: true`
+- [ ] 路由要写死的源才写 `net.declared: true`（不写就跟随 App 的全局代理开关）
 
 源码：
 
@@ -528,6 +570,14 @@ adb shell ls /data/data/com.huangguo.mobile/files/site-dump/   # 需要 root 或
 - [ ] 详情页有选集，点播放能起播
 - [ ] 翻到最后一页 `hasMore: false`，不会无限翻
 - [ ] 断网/站点 5xx 时报错信息能看懂
+
+上线（**做源和上市场是同一次动作**，缺这步用户看不到你的源）：
+
+- [ ] 配置和 js 都传到 `/srv/cfg/spiders/`，旧文件先备份
+- [ ] 市场清单里加了这条：后台
+      `https://149.104.21.177.sslip.io/admin/sources/market-spider.json/edit`
+- [ ] `node scripts/market-check.js https://149.104.21.177.sslip.io/market-spider.json` 全过
+- [ ] 真机贴市场地址，勾上这条，能出首页
 
 ---
 
@@ -673,7 +723,7 @@ node work/android/scripts/spider-check.js path/to/hello.js --dump home
 ## 14. 还有问题
 
 - 契约的底层细节（宿主页 CSP、bridge 编码为什么只有一层、ABI 门禁）见
-  `docs/2026-10-19-spider阶段0契约.md`；
+  `docs/history/2026-10-19-spider阶段0契约.md`；
 - 运行时为什么这么设计（进程隔离、看门狗、为什么不给 DOM）见
-  `docs/2026-10-19-spider运行时设计.md`；
+  `docs/history/2026-10-19-spider运行时设计.md`；
 - 站点配置的通用字段（不限于 spider 源）见 `docs/站点配置参考.md`。

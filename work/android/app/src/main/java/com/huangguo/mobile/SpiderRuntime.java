@@ -39,7 +39,7 @@ import java.util.concurrent.TimeUnit;
  * 没有缓存、没有页面复用、没有 crypto（设计文档 §4 里那个 op 留到后面）。
  *
  * <p>══ 为什么是隐藏 WebView，不是 JS 引擎 ══
- * 见 {@code 2026-10-19-spider运行时设计.md} §二：TVBox 生态的 spider 全部是按「有 DOM、
+ * 见 {@code docs/history/2026-10-19-spider运行时设计.md} §二：TVBox 生态的 spider 全部是按「有 DOM、
  * 有 Promise、有真实内核」写的，换 Rhino/QuickJS 得先补一层假 DOM，补出来的行为差异
  * 比换语言的收益大。宿主页那条 CSP（设计 §三）把它的能力削到只剩一个 bridge 调用，
  * 安全性由「不暴露」而不是「不执行」来保证。

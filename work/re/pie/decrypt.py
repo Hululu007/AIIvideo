@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from Crypto.Cipher import AES
 
-# 2026-10-20 从运行中的进程内存里扫出来的（见 docs/2026-10-20-水果派pie逆向与适配.md）
+# 2026-10-20 从运行中的进程内存里扫出来的（见 docs/history/2026-10-20-水果派pie逆向与适配.md）
 KEY = b"saIZXc4yMvq0Iz56"
 UA = "okhttp/4.12.0"
 

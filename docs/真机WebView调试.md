@@ -146,3 +146,41 @@ okhttp 里 403 —— 于是取流改走 WebView（见 missav 那份文档第四
 **回包大就把 `awaitPromise` 关掉。** 一次 evaluate 里串好几个网络请求，
 只要有一个挂住，整条 CDP 调用就一起超时。稳定的写法是「先写
 `window.__r=null` 启动异步任务，再用短表达式轮询 `window.__r`」。
+
+---
+
+## 脚本：`work/android/scripts/ui.js`
+
+上面那套手搓 CDP 的流程包成了一个脚本。**WebView 里的页面一律用它，不要再截图认字点坐标**
+—— `uiautomator dump` 在这个 App 上只会返回 5 个节点、0 个带文字，DOM 在 Chromium 进程里，
+View 树看不见（2026-10-23 实测）。
+
+```bash
+cd work/android
+node scripts/ui.js targets                        # 列页面，确认连上了
+node scripts/ui.js text "#content"                # 读某块的内文
+node scripts/ui.js click "#search-input"          # 按选择器点，没命中直接退出 1
+node scripts/ui.js eval "document.title"
+node scripts/ui.js assert "#content .card" --count 12
+node scripts/ui.js assert "#content" --text "本周焦点"
+node scripts/ui.js wait "#content .card" --timeout 8000
+```
+
+它每次运行自己解析 pid 并重做 `adb forward`（进程重启后 forward 会指到死 socket，这个坑
+脚本替你绕了）。多台设备用 `HG_SERIAL` 指定，包名默认 `com.huangguo.mobile`。
+
+`assert` 的退出码就是断言结果，可以串进 shell：
+
+```bash
+node scripts/ui.js click "#header-settings" && \
+node scripts/ui.js assert "#content" --text "内容源"
+```
+
+分工：
+
+| 界面 | 用什么 |
+|---|---|
+| WebView 里的页面（首页、详情、设置、源管理） | 这个脚本 |
+| 原生播放器控件（返回、锁屏、倍速） | `uiautomator` + `contentDescription`（`VlcControlsView` 里都设了） |
+| 系统弹窗（装包、权限、文件选择） | `uiautomator` |
+| 数据层（详情、播放地址、收藏） | 直接 `bridgeCall`，不碰界面 |

@@ -42,9 +42,15 @@
 
 <p align="center"><img src="docs/screenshots/library.jpg" alt="我的：收藏与观看历史"></p>
 
+## 搜索历史
+
+点搜索框、还没输入的时候浮出一块「搜索历史」：胶囊点一下拿那个词重搜，右上角
+「清空」要确认。上限 20 条、最近在前、去重不分大小写；面板宽度跟搜索框现量对齐。
+关键词存在本机，不进内容缓存 —— 换源之后这些词还在，「恢复出厂设置」会一起清掉。
+
 ## 安装
 
-前往 [Releases](https://github.com/zhaoruizhe81/AIIvideo/releases/latest) 下载 APK（约 47 MB，Android 8.0 及以上）。装完填一个源配置地址就能用。
+前往 [Releases](https://github.com/zhaoruizhe81/AIIvideo/releases/latest) 下载 APK（2026-10-21 的包 42.9 MB，Android 8.0 及以上）。装完填一个源配置地址就能用。
 
 配置从哪来：自己写一份，或者用别人分享的。格式看 [站点配置参考](docs/站点配置参考.md) —— 完整字段表、响应形状、三道校验的报错对照，以及一份能直接抄的最小配置。
 
@@ -52,7 +58,7 @@
 
 设置里的「恢复出厂设置」会退出登录、清掉片单/缓存/内容源/代理，重启落回「设置源」那一屏。账号和云端片单不动，重新登录就回来。
 
-> **仓库里不放 APK。** 二进制不进 git 历史（每发一版多 47 MB，删不掉），而且安装包里带着账号服务器的实际地址 —— 放 Releases 至少是个显式动作，不是「clone 一下就有了」。
+> **仓库里不放 APK。** 二进制不进 git 历史（每发一版多 40 多 MB，删不掉），而且安装包里带着账号服务器的实际地址 —— 放 Releases 至少是个显式动作，不是「clone 一下就有了」。
 
 ## 许可与致谢
 
@@ -66,7 +72,7 @@
 
 ```bash
 cd work/android
-./scripts/build.sh verify    # 清空重建 + 242 个单测 + 断言 APK
+./scripts/build.sh verify    # 清空重建 + 236 个单测 + 断言 APK
 ./scripts/build.sh install   # 构建 → 装真机 → 冷启动 → 截图
 ```
 
@@ -76,6 +82,10 @@ cd work/android
 架构说明、桥指令清单、测试与踩过的坑见 [`work/android/README.md`](work/android/README.md)；
 业务与协议层面（账号后端、播放器、热更通道、发版流程）见 [开发说明](docs/开发说明.md)；
 热更怎么发见 [热更新说明](docs/热更新说明.md)；
-源市场清单是什么、为什么它不算一个源，见 [源市场清单](docs/2026-10-18-源市场清单.md)；
+源市场清单是什么、为什么它不算一个源，见 [源市场清单](docs/源市场清单.md)；
 真机上接 Chrome DevTools 调页面（能直接调桥，不用重新打包）见
-[真机 WebView 调试](docs/2026-10-18-真机WebView调试.md)。
+[真机 WebView 调试](docs/真机WebView调试.md)；新加出站请求（取流通道、字幕、密钥）之前
+先看 [出站请求的两条通道](docs/出站请求的两条通道.md)。
+
+文档怎么分现行与历史、哪篇已经过时、删掉的四篇原来讲什么，见
+[文档索引](docs/README.md)。

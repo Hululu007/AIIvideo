@@ -15,7 +15,7 @@ import android.util.Log;
  * Android WebView 的所有实例共享<b>同一个渲染进程主线程</b>。之前 spider 宿主页
  * 挂在主进程里，yhdm 这类源一次抓取+解析要占住那条线程 1.7~2.4 秒，主页面的
  * rAF 在同一时刻整段断流 —— 用户看到的就是「点卡片、动画冻住、然后直接变大」。
- * 实测证据链在 {@code docs/2026-10-19-卡片动画卡顿排查.md}：spider detail 调用
+ * 实测证据链在 {@code docs/history/2026-10-19-卡片动画卡顿排查.md}：spider detail 调用
  * 1781ms，主页面 rAF 断流 62→1730ms，完全重合，且渲染进程 JS 零长任务。
  *
  * <p>独立进程 = 独立渲染进程。spider 再怎么占线程，主 UI 的 WebView 有自己的

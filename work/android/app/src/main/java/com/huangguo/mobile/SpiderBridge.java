@@ -12,7 +12,7 @@ import org.json.JSONObject;
  * 事 —— op 分发和 JSON 编解码。分开的理由很实际：这个类的方法会被 WebView 在多条
  * 线程上调，协议层一旦同时兼职状态层，出错时就分不清是「页面还活着」还是「Java 没清」。
  *
- * <p>op 的形状见 {@code docs/2026-10-19-spider阶段0契约.md} §三：
+ * <p>op 的形状见 {@code docs/history/2026-10-19-spider阶段0契约.md} §三：
  * {@code net} / {@code netAll} / {@code log} / {@code done}。
  *
  * <p><b>编码只有一层</b>：宿主页的 {@code __spider.call(op, args)} 负责把 args

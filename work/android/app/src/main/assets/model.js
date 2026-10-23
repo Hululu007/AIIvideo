@@ -141,7 +141,7 @@
   //
   // nextPage 是给 adapters.js 的 nextPageOf 那套老调用点的兼容键：列表页判
   // 「还有没有下一页」读的是 nextPage === null，不是 hasMore。等列表页改读
-  // hasMore，这个键一并删（见 docs/2026-10-19-spider模型与转换.md 第 4 节）。
+  // hasMore，这个键一并删（见 docs/history/2026-10-19-spider模型与转换.md 第 4 节）。
   function paged(payload) {
     var data = payload || {};
     var page = num(data.page) || 1;
@@ -207,7 +207,7 @@
     // 万一以后有源既给 reason、alts 里又真有一条 https 直链、url 还留空，
     // 现在的输出是 declined + 一条列在 lines 里但不会被自动播的线路。
     // 那天要改成「url 空时优先从 lines 里挑第一条 http(s) 扶正，reason 降级成附注」，
-    // 同时确认 agedm 那种全加密的仍判 declined。见 docs/2026-10-19-spider模型与转换.md。
+    // 同时确认 agedm 那种全加密的仍判 declined。见 docs/history/2026-10-19-spider模型与转换.md。
     if (!url && !reason && list.length > 0) url = list[0].url;
     if (list.length === 0 && !reason) {
       list = [{ line: 'default', name: '默认线路', url: url }];
