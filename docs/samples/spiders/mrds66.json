@@ -159,6 +159,7 @@
     "iv": "97b60394abc2fbe1",
     "keyEncoding": "text",
     "allowedHosts": [
+      "pic.sugfew.cn",
       "pic.jtzatly.cn"
     ],
     "hostRewrites": {}
