@@ -405,6 +405,13 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    protected void onPause() {
+        super.onPause();
+        // 用户很可能这一下就再也没回来 —— 手上这批先发出去
+        Report.flushNow();
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         applySystemBars();
@@ -741,8 +748,27 @@ public final class MainActivity extends Activity {
         if (command == null) {
             throw new IllegalArgumentException("未知请求");
         }
-        return command.run(jSONObject);
+        long startedAt = System.currentTimeMillis();
+        try {
+            return command.run(jSONObject);
+        } catch (Exception error) {
+            // 桥指令失败的统一出口。以前这些异常要么被前端的 catch 吞掉、要么
+            // 变成一句「播放失败」；现在至少知道是哪个 stage、什么异常、花了多久。
+            // 少数常态失败的指令不报，见 QUIET_COMMANDS。
+            if (!QUIET_COMMANDS.contains(str)) {
+                Report.bridgeFailure(str, error, System.currentTimeMillis() - startedAt);
+            }
+            throw error;
+        }
     }
+
+    /**
+     * 这些指令失败是常态：没缓存、老前端瞎问一句、内容状态固定应答。
+     * 上报它们只会把真正的问题淹掉。
+     */
+    private static final java.util.Set<String> QUIET_COMMANDS =
+            new java.util.HashSet<String>(java.util.Arrays.asList(
+                    "app-version", "content-status", "hot-ready", "cached"));
 
     /** 一条桥指令：拿到 JSON 参数，返回 JSONObject / String / boolean / Number，或者抛异常。 */
     private interface Command {
@@ -785,6 +811,30 @@ public final class MainActivity extends Activity {
             return true;
         });
         this.commands.put("cached", jSONObject -> services().store.cached(jSONObject.optString("key")));
+        // 前端上报：播放阶段（取详情 / 取播放地址 / 解密 / 起播 / 首帧）和 JS 异常。
+        // 参数就是一条事件 {kind,name,source,props}，见 Report.fromFrontend。
+        this.commands.put("report", jSONObject -> {
+            Report.fromFrontend(jSONObject);
+            return true;
+        });
+        // 设置页那个开关：读状态、改状态。带 optOut 就是改。
+        this.commands.put("report-config", jSONObject -> {
+            if (jSONObject.has("optOut")) {
+                Report.setOptOut(this, jSONObject.optBoolean("optOut"));
+            }
+            return Report.state();
+        });
+        // 自检口子：mode=crash 时在主线程抛一个，走真正的 UncaughtExceptionHandler。
+        // 不这么留一个入口，崩溃上报这条链路就只能靠「等真用户崩一次」来验证。
+        this.commands.put("diag", jSONObject -> {
+            if ("crash".equals(jSONObject.optString("mode"))) {
+                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                    throw new IllegalStateException("diag: 手动触发的崩溃（验证上报链路，不是 bug）");
+                });
+                return new JSONObject().put("ok", true).put("note", "主线程即将崩溃");
+            }
+            return Report.state();
+        });
         this.commands.put("detail", jSONObject -> {
             Services s = services();
             String strOptString = jSONObject.optString(Text.ATTR_ID);

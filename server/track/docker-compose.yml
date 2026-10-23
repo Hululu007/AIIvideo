@@ -1,0 +1,54 @@
+# 埋点/崩溃上报。App 侧 ReportQueue 批量 POST /t/events，Caddy 剥掉 /t 前缀转进来。
+#
+#   docker compose up -d --build
+#   docker compose logs -f web
+#   docker compose exec web python -m app.jobs 2026-10-22    # 补某天的聚合
+#
+# 和 admin 那套的区别：这里**不需要 host 网络**。web 只跟自己的 db 说话，
+# 对外用 ports 把 8092 发布到宿主机回环上，Caddy（host 网络）照样够得着，
+# 而 db 一步都不出 compose 网络。
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: track
+      POSTGRES_USER: track
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 没设，先 cp .env.example .env}
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U track -d track"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # 机器只有 2G，account-db 已经占了一份。这个库一天几万行，64MB 缓存够得很。
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - max_connections=30
+
+  web:
+    build: ./web
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # 口令是 openssl rand -hex 32 出来的，没有需要 URL 转义的字符；
+      # 换成自己的口令时注意 @ : / 这几个字符要百分号编码。
+      DATABASE_URL: postgresql://track:${POSTGRES_PASSWORD}@db:5432/track
+      TRACK_SECRET: ${TRACK_SECRET:?TRACK_SECRET 没设，App 侧签名会对不上}
+      RETENTION_DAYS: ${RETENTION_DAYS:-90}
+      AGG_TZ: ${AGG_TZ:-Asia/Shanghai}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-60}
+      MAX_EVENTS: ${MAX_EVENTS:-200}
+    ports:
+      - "127.0.0.1:8092:8092"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8092/healthz')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5

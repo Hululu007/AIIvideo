@@ -14,9 +14,16 @@ android {
     namespace = "com.huangguo.mobile"
     compileSdk = 36
 
+    // 声明 NDK 版本，AGP 才会跑 stripDebugSymbols（用 NDK 里那个 llvm-strip）。
+    // 不写这一行、本机又没有 NDK 时，strip 任务静默跳过 —— 表现就是
+    // libc++_shared.so 带着 7.1MB 的 .debug_info 被打进包里，而构建日志一句不吭。
+    ndkVersion = "27.0.12077973"
+
     // spider 宿主的跨进程通道（ISpiderChannel.aidl）。AGP 8 起 aidl 默认关。
+    // buildConfig：埋点密钥从本地 properties 注入，别写进源码 —— 仓库是公开的。
     buildFeatures {
         aidl = true
+        buildConfig = true
     }
 
     defaultConfig {
@@ -66,16 +73,23 @@ android {
         }
     }
 
+    // 埋点密钥：只在本地 keystore.properties 里有（不进 git）。
+    // 没有就留空串 —— 空密钥的请求服务端一律 401，等于这条链静默关掉，
+    // 不影响任何用户路径，也免得把「开发机没配密钥」变成构建失败。
+    val trackSecret = keystoreProps.getProperty("trackSecret") ?: ""
+
     buildTypes {
         release {
             if (keystoreProps.isNotEmpty()) {
                 signingConfig = signingConfigs.getByName("release")
             }
             isMinifyEnabled = false
+            buildConfigField("String", "TRACK_SECRET", "\"" + trackSecret + "\"")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
         debug {
             isMinifyEnabled = false
+            buildConfigField("String", "TRACK_SECRET", "\"" + trackSecret + "\"")
         }
     }
 

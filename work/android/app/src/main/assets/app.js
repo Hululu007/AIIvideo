@@ -35,6 +35,20 @@ const coverImageUrl = raw => window.HGCover.resolveUrl(raw);
 // 桥的等待上限。订阅下载实测 TTFB 能到 10 秒、加上重试就 20 秒往上，
 // 30 秒会把「正在拉」变成「请求超时」。放宽到 45 秒，仍然有上限。
 const BRIDGE_TIMEOUT_MS = 45000;
+/**
+ * 上报一条事件。fire-and-forget —— 任何失败都不往上冒，调用点不用 try/catch。
+ *
+ * 走桥的 report 指令，Java 侧负责落盘、攒批、发送（见 Report / ReportQueue）。
+ * 这里不 await：上报慢一秒不该让用户多等一秒，播放路径上尤其不能。
+ *
+ * kind 是粗分类（play / app / js），name 是具体事件，props 里放 stage、错误码、耗时。
+ */
+function track(kind, name, props) {
+  try {
+    bridgeCall('report', { kind: kind, name: name, props: props || {} }).catch(() => {});
+  } catch (ignored) {}
+}
+
 function bridgeCall(action, args = {}) {
   return new Promise((resolve, reject) => {
     const id = bridgeInstance + ':' + (++requestNumber);
@@ -796,6 +810,7 @@ const icon = name => {
     // 设置页每一行左边那个「这是哪一类」的符号。全部 1.9 描边、圆角端点，
     // 和 dock 那排同一种手感 —— 混用粗细会让分组看起来像两个人画的。
     account: '<circle cx="12" cy="8" r="3.6"/><path d="M4.8 20.4c.6-4 3.2-6 7.2-6s6.6 2 7.2 6"/>',
+    shield: '<path d="M12 3.6 19 6.3v5.3c0 4.2-2.9 7.3-7 8.8-4.1-1.5-7-4.6-7-8.8V6.3z"/>',
     source: '<path d="M10.5 13.5a4 4 0 0 0 5.7 0l2.6-2.6a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M13.5 10.5a4 4 0 0 0-5.7 0l-2.6 2.6a4 4 0 0 0 5.7 5.7l1-1"/>',
     proxy: '<path d="M12 3.2 5 6v6c0 4.2 2.9 7.4 7 8.8 4.1-1.4 7-4.6 7-8.8V6z"/><path d="m9.2 12 2 2 3.6-3.8"/>',
     player: '<circle cx="12" cy="12" r="8.6"/><path d="m10.2 8.6 5.4 3.4-5.4 3.4z" fill="currentColor" stroke="none"/>',
@@ -1688,6 +1703,17 @@ function updateTailMarkup() {
 }
 
 function renderSettings() {
+  // 上报开关的状态在 Java 侧（它还要管已落盘的那批事件），读一次缓存起来。
+  // 首帧先按「开着」画，读回来再重画 —— 这个延迟只有几十毫秒，比让整页等它强。
+  if (!state.track) {
+    state.track = { optOut: false, pending: 0, loaded: false };
+    api('report-config')
+      .then(value => {
+        state.track = { optOut: !!value.optOut, pending: Number(value.pending) || 0, loaded: true };
+        if (state.route === 'settings') renderSettingsKeepScroll();
+      })
+      .catch(() => { state.track.loaded = true; });
+  }
   const account = state.account;
   const net = proxyChip();
   const player = playerChip();
@@ -1711,6 +1737,22 @@ function renderSettings() {
     </section>
 
     ${appearanceSection()}
+
+    <section class="settings-card" aria-label="隐私">
+      <div class="settings-row is-static">
+        <span class="settings-icon">${icon('shield')}</span>
+        <span class="settings-body"><strong>使用统计</strong><small>机型、版本、源 id、卡在哪一步${state.track && state.track.pending ? ' · 还有 ' + state.track.pending + ' 条没发出去' : ''}</small></span>
+        <span class="settings-tail">
+          <button type="button" class="settings-mini" role="switch"
+                  aria-checked="${state.track && !state.track.optOut ? 'true' : 'false'}"
+                  data-track="1">${state.track && !state.track.optOut ? '已开启' : '已关闭'}</button>
+        </span>
+      </div>
+      <div class="settings-row is-static">
+        <span class="settings-icon"></span>
+        <span class="settings-body"><small>关掉之后不再上报使用数据，也不发已经攒下的。崩溃还会上报 —— 不然崩了查不出原因。</small></span>
+      </div>
+    </section>
 
     <section class="settings-card" aria-label="账号">
       ${settingsRow('data-account-management="1"', 'account', '账号',
@@ -2883,6 +2925,22 @@ document.addEventListener('click', async event => {
   const reset = event.target.closest('[data-factory-reset]');
   if (reset) {
     if (!reset.disabled) runFactoryReset(reset);
+    return;
+  }
+  const trackSwitch = event.target.closest('[data-track]');
+  if (trackSwitch) {
+    trackSwitch.disabled = true;
+    try {
+      // 现在「开着」= 没被关掉。点一下就是关掉，所以传的是「关不关」而不是取反。
+      const currentlyOn = !(state.track && state.track.optOut);
+      const value = await api('report-config', { optOut: currentlyOn });
+      state.track = { optOut: !!value.optOut, pending: Number(value.pending) || 0, loaded: true };
+      toast(state.track.optOut ? '已关掉使用统计' : '已开启使用统计');
+    } catch (error) {
+      toast(error.message || '改不了这个开关', true);
+    } finally {
+      renderSettingsKeepScroll();
+    }
     return;
   }
   const clear = event.target.closest('[data-clear]');

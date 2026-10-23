@@ -1,0 +1,7 @@
+# 本机跑测试库时用的东西，不进仓库
+.env
+pgdata/
+__pycache__/
+*.pyc
+venv/
+.venv/

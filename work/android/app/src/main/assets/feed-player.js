@@ -514,6 +514,7 @@
             return;
           }
           const why = MEDIA_ERROR[code] || (code ? '未知错误' : '原因不明');
+          trackPlayError('decode', null, { code: code, why: why, ep: Number(page.dataset.ep) || 0 });
           urlForget(page.dataset.videoId, Number(page.dataset.ep));
           // 把这一集的地址钉在页面上。<video> 上的 src 会在 release()、重挂、
           // 以及某些 WebView 的致命错误路径里被清掉，那时错误框里的按钮就
@@ -789,6 +790,24 @@
       return Boolean(failMap()[String(id) + ':' + Number(ep || 1)]);
     }
 
+    /**
+     * 播放失败统一上报。stage 决定「死在哪一环」：resolve 是拿不到/解不开播放地址，
+     * start 是地址有了但起不来，native 是交给 VLC 时失败，decode 是浏览器不认这个流。
+     *
+     * 以前这些分支各写各的文案，用户看到一句「播放失败」，事后也只能猜。
+     */
+    function trackPlayError(stage, error, extra) {
+      try {
+        const props = {
+          stage: stage,
+          code: (error && error.name) || 'error',
+          msg: String((error && error.message) || error || '').slice(0, 200)
+        };
+        if (extra) Object.assign(props, extra);
+        track('play', 'play_error', props);
+      } catch (ignored) {}
+    }
+
     function playerPrefs() {
       const read = window.HG_PLAYER && window.HG_PLAYER.prefs;
       return (read && read()) || { core: 'web', decode: 'auto', cache: 1500, autoFallback: true };
@@ -840,6 +859,7 @@
         await window.HG_PLAYER.command('native?payload=' + encodeURIComponent(JSON.stringify(payload)));
         if (reason === 'auto') toast('这台设备解不了这个编码，已切到内置播放器');
       } catch (error) {
+        trackPlayError('native', error, { ep: Number(page.dataset.ep) || 0, reason: reason });
         toast(error.message || '内置播放器打不开', true);
       }
     }
@@ -951,6 +971,11 @@
         // 而预热一集只是为了切过去时不用等，不是为了让面板提前准备好。
         loadQuality(page, video.getAttribute('src') || '');
       } catch (error) {
+        // ready 还是空 = attach 那一步就挂了（取详情 / 取播放地址 / 解密）；
+        // 否则是地址拿到了、<video> 起不来。
+        trackPlayError(video.dataset.ready === '1' ? 'start' : 'resolve', error, {
+          ep: Number(page.dataset.ep) || 0
+        });
         page.querySelector('.feed-spinner')?.classList.add('hidden');
         const box = page.querySelector('.feed-error');
         if (box) {

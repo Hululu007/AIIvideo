@@ -10,6 +10,218 @@
 > 历史。看的时候注意每段的日期。哪份文档是现行口径、哪份只剩历史价值，
 > 看 [`docs/README.md`](docs/README.md)。
 
+## 2026-10-23：可观测性 —— 崩溃、源健康、埋点（商业化地基）
+
+**这是下一轮的主线。** 现在对线上发生的事一无所知：没有崩溃上报、没有播放失败记录、
+没有页面行为。用户报「播不了」，能查的只有 adb logcat；商业化要回答的问题（谁在用、
+看什么、在哪一步走）一个都答不上。
+
+三件事共用一条管道：**App → 批量上报 → 服务端入表 → 后台一页看板**。先建管道，再往上加。
+埋点的口径按商业化问题倒推，不是「有啥记啥」—— 见下面三个假设。
+
+### 落地进度（2026-10-23 晚）
+
+| 批次 | 状态 | 落点 |
+|---|---|---|
+| B 管道 | **已实现并部署** | `server/track/`（FastAPI + 自带 pg，`:8092`，Caddy `handle_path /t/*`）；App 侧 `Report.java` / `ReportQueue.java` |
+| C 崩溃 / 播放失败 | **已接入** | `HuangGuoApp.installCrashReporter()`；`dispatch()` 统一出口报 `bridge/command_error`；前端 `trackPlayError()` 三个 stage |
+| D 行为埋点 | 只落了 `app_open` | 其余 11 个事件按需接 |
+| E 源 smoke | 未动 | |
+| F 后台数据页 | 未动 | |
+| A 包体 | 卡在「本机没装 NDK」 | 见下 |
+
+**A 已解决（2026-10-23）**：根因是本机没有 NDK —— AGP 的 `stripDebugSymbols` 找不到
+`llvm-strip` 就静默跳过，把带 `.debug_info` 的 so 原样打了进去，构建日志一句不吭。
+
+做法是装 NDK + 在 `android {}` 里声明 `ndkVersion = "27.0.12077973"`。声明这一行是关键：
+没有它，即使 NDK 装了 AGP 也不会把 strip 任务挂上去。
+
+```bash
+yes | sdkmanager --sdk_root=$HOME/Library/Android/sdk "ndk;27.0.12077973"
+```
+
+结果：`libc++_shared.so` 8.9 MB → **1.3 MB**，APK 42.89 MB → **39.07 MB**（-3.82 MB）。
+`llvm-readelf` 复核：`.dynsym` 2502 个符号、`.dynstr`、`.text` 都在，`.debug_*` 没了，
+所以只是删调试信息，动态链接不受影响；模拟器上装完启动、上报都正常。
+
+剩下两项没动：assets 里 `geosite.dat` + `ip-country.bin` 那 3.6MB 要改成首次进代理设置时
+下载（缺了没有 routing 规则，得分支处理，不是删文件那么简单）；R8 等有 instrumentation
+测试之后再开。
+
+**密钥怎么放**：`TRACK_SECRET` 不进源码。服务器在 `/srv/track/.env`，本机在
+`keystore.properties` 的 `trackSecret`（已 gitignore），经 `buildConfigField` 注入
+`BuildConfig.TRACK_SECRET`。留空等于关掉上报，构建不报错。
+
+**两端对齐的验收**（已跑过）：
+
+| 场景 | 结果 |
+|---|---|
+| 正确签名 + 2 条事件（gzip，签未压缩体） | 200 `{"ok":true,"accepted":2}` |
+| 错签名 | 401 `签名不对：X-Sig 不是…` |
+| 同一 `event_id` 发两次 | 第二次 `accepted:0`，库里 1 行 |
+| 模拟器冷启动 | `app_open` 入库，device_id 是 UUID、os 33、model `sdk_gphone64_arm64` |
+| 飞行模式冷启动 | 本地 `files/reports/*.jsonl` 有 1 行，库里 0 行 |
+| 恢复网络 | 约 1 分钟后补发成功，库里出现，本地文件删除 |
+
+### 三条补完（2026-10-23 深夜，真机验证）
+
+1. **设置页有了开关**：设置 → 隐私 →「使用统计」，右上是 `.settings-mini` 按钮显示「已开启 /
+   已关闭」。点一下走桥的 `report-config`，Java 侧 `setOptOut` 写盘 + 清队列。同一行下面写明
+   边界「关掉之后不再上报使用数据，也不发已经攒下的。崩溃还会上报 —— 不然崩了查不出原因」。
+2. **关掉时清队列**：`ReportQueue.clearBehaviorEvents()` 重写 jsonl，只留 `kind=crash` 的那些。
+   真机实测日志 `关掉使用统计，清掉 N 条待发行为事件（崩溃仍会上报）`。
+3. **崩溃可触发**：桥命令 `diag`，`mode=crash` 时在主线程 post 一个必抛的 Runnable，
+   逃出 Looper 走真正的 `UncaughtExceptionHandler`。
+
+真机验证（7f8f5254 / 23113RKC6C / Android 16）：
+
+```
+22:27:07 FATAL EXCEPTION  java.lang.IllegalStateException: diag: 手动触发的崩溃（验证上报链路，不是 bug）
+22:27:44 库里查到 kind=crash name=uncaught code=IllegalStateException
+         msg=「diag: 手动触发的崩溃（验证上报链路，不是 bug）」
+         trace=com.huangguo.mobile.HuangGuoApp.lambda$onCreate$0(HuangGuoApp.java:35)…
+```
+
+注意这条是在**开关已经关掉**的状态下报上来的 —— 符合设计。中文也不再是乱码，说明
+`readLines` 的编码修复在真机上同样成立。
+
+**两个踩了很久的坑，记下来：**
+
+- **改了 assets 必须 `--rerun-tasks`。** `./gradlew :app:assembleRelease` 在增量状态下会把
+  `mergeReleaseAssets` 判成 UP-TO-DATE，打进包里的还是上一次的 app.css / app.js。我改了四遍
+  CSS、装了四遍包、每次都看到旧的渲染，就是这个原因。判断方法：`unzip -p app.apk assets/app.css
+  | grep 你刚写的类名`。
+- **自绘开关在这个 WebView 里渲染不出来。** `<button>` + `::after` 圆点 / `span` 圆点 /
+  `aria-checked` 属性选择器 / `.is-on` 类 / 内联宽高，五种写法都试过，胶囊在真机上始终是
+  「灰色关态」且圆点看不见，而写死 `is-on` 类也不生效 —— 说明问题在渲染而不是 JS 状态
+  （Java 日志打出 `optOut=false`）。最后换成同页其它按钮在用的 `.settings-mini` 纯文字按钮，
+  一次就对了。那个胶囊的 CSS 已经删掉，别再加回来。
+
+真机验证抓到两个只有真机才暴露的 bug：
+
+1. **事件永远发不出去。** `enqueue()` 只写文件，没有任何东西踢它；`install()` 里那次
+   `maybeFlush(true)` 跑在队列还空的时候。表现是「日志看着一切正常，库里永远空」。
+   修法：入队后调一次 `maybeFlush(false)`，再把发送窗口从 60 秒压到 3 秒（这个量级
+   不需要攒批），另起一个 15 秒的兜底节拍器。
+2. **节拍器把发送线程占死了。** 第一版把 `while(true) + sleep` 丢进单线程 executor，
+   后面的 flush 任务永远排不上。改成独立 daemon 线程。
+
+**还有一个更隐蔽的：中文在落盘那一刻就烂了。** `readLines()` 用的是
+`RandomAccessFile.readLine()` —— 它按字节逐 char 读（等于 ISO-8859-1），「中」的
+E4B8AD 读回来变成 `ä¸­` 三个字符，再按 UTF-8 写出去就是 C3A4 C2B8 C2AD。ASCII 部分完全
+正常，所以现象是「只有中文乱码」。自己加的探针打了一遍字符级 hex 才定位到：String 对
+（char0=4e2d、utf8=e4b8ad）、JSON 对、字节对 —— 坏在**读回队列文件**那一步。改成
+`BufferedReader(new InputStreamReader(..., UTF_8))` 之后往返正确。
+
+这个 bug 顺带说明一件事：App 里所有 Java 侧的中文异常消息以前都是这种形态，只是没有
+任何地方把它们发出来看过。
+
+还有两处问题。`device_id` 一开始全落成 `unknown`：App 把 `device` 写在每条事件里，
+服务端只读 `X-Device` 头和请求体顶层。两边各补一半 —— App 在 payload 顶层也带一份，
+服务端优先级改成「事件的 device → X-Device → 顶层」，谁先谁后都不再落空。
+
+`:spider` 是独立进程，Application 会在两个进程各跑一次 `onCreate`，`app_open` 上报了两条，
+两个队列还会抢同一批文件。现在按 `/proc/self/cmdline` 判主进程：主进程完整跑（队列 +
+节拍器 + 发送），`:spider` 只写不发（`ReportQueue.canFlush`），它的崩溃由主进程顺路带走。
+
+### B 上报管道（先做，其余都挂在它上面）
+
+**服务端** `server/track/`：FastAPI + Docker，绑 `127.0.0.1:8092`，Caddy 挂 `handle_path /t/*`。
+
+- `POST /t/events`：批量，gzip 请求体，单次 ≤ 200 条、单条 ≤ 4KB
+- 鉴权：`X-Sig: hmac_sha256(app_secret, body)` + 单 IP 60 次/分钟。公网无账号，少这两道
+  就一定被刷满
+- 表 `events(id, device_id, session_id, at, kind, name, props jsonb, app_version,
+  patch, os, model)`；`kind` 里常用字段（source_id / stage / error_code / ms）落库前
+  抽成列，不然查不动
+- 明细留 90 天，每天凌晨聚合进 `events_daily` 永久保留
+- 量级：189 个用户 × 每天 200 条 ≈ 4 万/天，Postgres 毫无压力，不需要采样
+
+**App 端** `Report.java` + `ReportQueue.java`
+
+- 事件先进内存队列，写 `files/reports/<date>.jsonl`；满 30 条 / 60 秒 / 切后台时发一次，
+  发成功删文件。杀进程不丢
+- **独立通道**：不走 `AiiHttp`、不走代理、不复用 `Outbound.applyHeaders`。源和代理挂了，
+  上报必须还活着 —— 这条是整条链的立足点，别图省事合并
+- 失败退避 3 次（1 / 5 / 30 分钟），仍失败留到下个会话
+- `device_id` 安装时生成 UUID 存 SharedPreferences；不采账号、不采手机号
+- 设置页给一个「不发送使用统计」，关掉之后只上报崩溃
+
+### C 崩溃与播放失败（复用管道，一天内能落地）
+
+- `Thread.setDefaultUncaughtExceptionHandler` → 写 `crash` 事件（堆栈前 40 行、机型、
+  版本、当前源 id、当前阶段），再交回系统默认处理。该崩还是崩，但留下证据
+- WebView 侧 `window.onerror` / `unhandledrejection` 经桥转成 `js_error`
+- `play()` 的每个失败出口收敛成一个 `play_error`，带 `stage`：装源 / 取详情 / 取播放地址 /
+  解密 / 起播 / 首帧。现在各写各的文案，用户只看到「播放失败」，你也一样
+
+**验收**：真机上人为断网、把某个源 js 改成抛错、播一集再退出，后台能看到对应的三条记录。
+
+### D 行为埋点
+
+| 事件 | 关键字段 | 回答什么 |
+|---|---|---|
+| `app_open` | cold/warm、首屏 ms | 启动是不是变慢了 |
+| `source_install` / `remove` / `switch` | source_id、来源（市场/手贴） | 装源这道坎有多高 |
+| `home_view` | source_id、条目数、耗时 | 首屏出得来吗 |
+| `card_click` | source_id、content_id、位置 | 用户看不看得到内容 |
+| `search` | 关键词哈希、结果数、是否点开 | 站内搜有没有用 |
+| `detail_view` | source_id、content_id、集数 | 内容偏好 |
+| `play_start` / `play_first_frame` | source_id、content_id、ep、首帧 ms | 播放成功率、哪个源慢 |
+| `play_error` | stage、error_code | 坏在哪一环 |
+| `play_exit` | 时长 s、进度 %、是否播完 | 内容留不留人 |
+| `episode_switch` | from / to | 追剧行为 |
+| `favorite_add` / `history_view` | content_id | 账号体系值不值 |
+| `proxy_enable` / `proxy_result` | 协议、成功与否 | 代理是不是最大的坎 |
+
+切片维度只留三个：`app_version`、`source_id`、日期。多一个都要解释为什么。
+
+### E 源健康 smoke
+
+后台「源」页点「验证」，服务端按序打三枪：配置 JSON 200 → 首页/分类有条目 → 详情能取到
+播放地址。结果写 `checks` 表（source_id / at / stage / ok / ms / 错误），灯带从「静态
+可解析」升级成「最近一次验证的结果」。
+
+之后可选：每天定点跑一遍，坏了发邮件。**这是把「用户先发现」改成「你先发现」的唯一办法。**
+
+### A 包体（顺手，独立于上面）
+
+- `libc++_shared.so` 换 strip 过的：8.9MB → 1.1MB（里面 7.1MB 是 `.debug_info`）
+- assets 的 `geosite.dat` + `ip-country.bin`（3.6MB）改成首次进代理设置时下载
+- R8 等 E 落地、有 instrumentation 测试之后再动，现在开会让 JS 桥全线白屏
+
+### 这批数据要回答的三个商业假设
+
+写死在这里，到时候拿数据判，别拍脑袋：
+
+1. **多数人卡在「配代理」** —— 若 `source_install` → `play_start` 的转化低于 30%，
+   且 `proxy_enable` 失败率高，付费点就是「内置中转 + 开箱即用」。判定阈值：漏斗第 3 步
+   流失 > 50% 即成立。
+2. **内容集中在少数源** —— 若 Top 2 源吃掉 60% 以上播放，谈白标/接口比撒网式接源值钱；
+   若长尾源合计不到 10%，直接砍掉，省维护。
+3. **留存靠片单** —— 若收藏用户的次留是非收藏用户的 1.5 倍以上，账号和跨端同步值得投入；
+   否则账号只是登录负担，别为它做付费墙。
+
+### 不做的
+
+- 不接第三方统计 SDK（体积、隐私政策、国内合规都划不来）
+- 不自建 BI，后台一页表格够用
+- 不上报内容标题全文，只存 `content_id` + 源 + 分类。要标题时按 id 回源查，避免把站点
+  内容抄进自己的库
+
+### 工时
+
+| 批次 | 内容 | 估 |
+|---|---|---|
+| B | 上报管道（服务端 + App 端） | 2 天 |
+| C | 崩溃 / 播放失败接入 | 0.5 天 |
+| D | 行为埋点（12 个事件） | 1 天 |
+| E | 源 smoke + 灯带升级 | 1.5 天 |
+| F | 后台「数据」页（漏斗 / 源榜 / 错误榜） | 1 天 |
+| A | 包体三项 | 0.5 天 |
+
+顺序：B → C → D → F。E 独立可并行。A 随时插队。
+
 ## 2026-10-21：中继取流与环境装配 —— 已完成（真机验证）
 
 一天三个「看不了」，两个是同一个结构缺陷、一个是配置漂移。全文见
