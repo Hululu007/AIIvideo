@@ -27,8 +27,26 @@ final class SiteProfile {
      * 的 Context，而这份逻辑最该被守住。
      */
     SiteProfile(Context context, JSONObject jSONObject) throws Exception {
-        this(new JSONObject(new String(Assets.read(context.getAssets().open("site-default.json"), 131072), StandardCharsets.UTF_8)),
-                SourceConfig.has(context) ? SourceConfig.read(context) : jSONObject);
+        this(template(context), SourceConfig.has(context) ? SourceConfig.read(context) : jSONObject);
+    }
+
+    /** 内置模板。校验收到的配置时要用它做底，不能拿盘上那份当底。 */
+    static JSONObject template(Context context) throws Exception {
+        return new JSONObject(new String(
+                Assets.read(context.getAssets().open("site-default.json"), 131072), StandardCharsets.UTF_8));
+    }
+
+    /**
+     * 拿一份**还没落盘**的配置建 profile，用来校验「装上去会不会起不来」。
+     *
+     * <p>2026-10-23 修：原来 {@code verify()} 走的是上面那个 (Context, JSONObject) 构造，
+     * 而它在盘上有配置时会**忽略传进来的那份**、改读盘上的 —— 于是校验永远是「旧的
+     * 那份还能不能用」，新配置怎么写都过。实测后果：把 cover.transformation 写成
+     * 一个不支持的值照样装进去，下次启动 SiteProfile 抛异常、App 退回内置模板，
+     * 用户看到的是「源还在，但封面域名不对」。
+     */
+    static SiteProfile candidate(Context context, JSONObject config) throws Exception {
+        return new SiteProfile(template(context), config);
     }
 
     /**

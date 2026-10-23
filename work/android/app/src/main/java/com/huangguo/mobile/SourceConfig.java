@@ -298,7 +298,7 @@ final class SourceConfig {
         String problem = UserSource.validate(config);
         if (problem != null) return problem;
         try {
-            new SiteProfile(context, config);
+            SiteProfile.candidate(context, config);
         } catch (Throwable e) {
             String why = e.getMessage();
             if (e.getCause() != null && e.getCause().getMessage() != null) why = e.getCause().getMessage();
