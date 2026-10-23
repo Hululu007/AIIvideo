@@ -136,6 +136,16 @@
   <script src="app-update.js"></script>
   <script src="source-market.js"></script>
   <script src="proxy-panel.js"></script>
+  <!-- 2026-10-23 从 app.js 拆出的七块（只含顶层函数声明，靠提升生效）。
+       必须排在 app.js 之前：app.js 的加载期语句会直接调它们。 -->
+  <script src="app-search.js"></script>
+  <script src="app-render.js"></script>
+  <script src="app-route.js"></script>
+  <script src="app-nav.js"></script>
+  <script src="app-detail.js"></script>
+  <script src="app-list.js"></script>
+  <script src="app-data.js"></script>
   <script src="app.js"></script>
+
 </body>
 </html>

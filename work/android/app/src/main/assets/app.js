@@ -1964,20 +1964,6 @@ const searchHistoryClear = document.getElementById('search-history-clear');
 // 「我的」那一栏的搜索框搜的是本机片单，不该往搜索历史里塞。
 const LIBRARY_ROUTES = ['library', 'settings', 'account-management'];
 
-function readSearchHistory() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(SEARCH_HISTORY_KEY) || '[]');
-    return Array.isArray(parsed) ? parsed.filter(word => typeof word === 'string' && word) : [];
-  } catch (error) { return []; }
-}
-
-function paintSearchHistory() {
-  const words = readSearchHistory();
-  // 用 data-* 带回原词，不放 textContent 里 —— 词里可能有引号或 & ，esc 转义之后
-  // 读回来还是原文。按钮的可见文字也走 esc，长词由 CSS 截断加省略号。
-  searchHistoryTags.innerHTML = words.map(word => `<button type="button" data-history-word="${esc(word)}">${esc(word)}</button>`).join('');
-  return words.length;
-}
 
 // 面板跟搜索框**一样长**：左边从搜索框左边缘起，右边到搜索框右边缘，
 // 顶在搜索框下面 8px。
@@ -1988,182 +1974,28 @@ function paintSearchHistory() {
 //     整块比搜索框宽出一个头像的身位。
 //   · 状态栏高度、dp、屏宽各家机器都不一样，量出来最省事。
 // 换台机器、转屏、系统字体变化都不用再调这行数。
-function alignSearchHistory() {
-  const rect = searchForm.getBoundingClientRect();
-  searchHistoryPanel.style.left = rect.left + 'px';
-  searchHistoryPanel.style.width = rect.width + 'px';
-  searchHistoryPanel.style.right = 'auto';   // 有 width 了，right 得让位
-  searchHistoryPanel.style.top = (rect.bottom + 8) + 'px';
-}
 
-function showSearchHistory() {
-  if (LIBRARY_ROUTES.includes(state.route)) return;
-  if (searchInput.value.trim()) return;
-  if (!paintSearchHistory()) { searchHistoryPanel.hidden = true; return; }
-  alignSearchHistory();
-  searchHistoryPanel.hidden = false;
-}
-
-function hideSearchHistory() {
-  if (!searchHistoryPanel.hidden) searchHistoryPanel.hidden = true;
-}
 
 // 面板开着就跟着数据一起变；关着就别自作主张把它弹出来。
-function refreshSearchHistory() {
-  if (searchHistoryPanel.hidden) return;
-  if (!paintSearchHistory()) hideSearchHistory();
-}
 
-function recordSearchHistory(query) {
-  const word = String(query || '').trim();
-  if (!word) return;
-  const rest = readSearchHistory().filter(one => one.toLowerCase() !== word.toLowerCase());
-  rest.unshift(word);
-  try { localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(rest.slice(0, SEARCH_HISTORY_LIMIT))); } catch (error) {}
-  refreshSearchHistory();
-}
 
 // 输入框里出现字了就收起面板，清空之后（光标还在框里）再放出来。
-function syncSearchHistory() {
-  if (searchInput.value.trim()) { hideSearchHistory(); return; }
-  if (document.activeElement === searchInput) showSearchHistory();
-}
 
-function renderSearch() {
-  // 搜索结果就是搜索结果，**不带分类胶囊**。
-  //
-  // 这里原来有一排写死的过滤条：黄果源那套「成人短剧 / 成人漫剧 / AI换脸 / AI魔改」，
-  // 别的源换成「短剧 / 漫剧」。两个问题：
-  //
-  //   ① 它跟搜索词毫无关系。搜「爱」也照样挂在标题下面，看起来像「你搜的结果被
-  //      这几类分好了」。
-  //   ② 那个过滤是拿标题猜的 —— `/AI\s*换脸/.test(标题)`、`/漫剧/.test(标题)`。
-  //      猜错的结果是「少了几个结果」，不报错；用户只会觉得「搜索不全」。
-  //      而用户自带的 spider 源每家分类都不一样，写死一份必然对不上。
-  //
-  // 要按分类找东西有「全部类型」，那里列的是源自己的分类。搜索只负责搜索。
-  const items = asArray(state.search?.items);
-  content.innerHTML = `<div class="search-page"><h1>搜索结果</h1><p>${esc(state.query)} · ${items.length} 部作品</p>${searchFeedback()}
-    ${items.length ? `<div class="search-grid">${items.map(itemCard).join('')}</div>` : '<div class="empty-state">没有找到匹配的影片</div>'}</div>`;
-  cover.hydrate();
-}
 
-function listingFooter() {
-  const listing = state.listing;
-  if (listing.error) return '<button type="button" data-retry-listing="1">加载失败，点击重试</button>';
-  if (listing.loading) return '<span role="status">正在加载更多…</span>';
-  if (listing.refreshing) return '<span role="status">正在更新列表…</span>';
-  if (listing.nextPage) return listing.kind === 'tag-list' ? '<span class="listing-sentinel" aria-hidden="true"></span>' : '<span class="listing-sentinel">继续下滑加载更多</span>';
-  return '<span>已经到底了</span>';
-}
-
-function observeListingEnd() {
-  listingObserver?.disconnect();
-  if (state.route !== 'listing' || !state.listing?.nextPage || state.listing.loading ||
-      state.listing.refreshing || state.listing.error) return;
-  const sentinel = content.querySelector('.listing-sentinel');
-  if (!sentinel) return;
-  if (!listingObserver) {
-    listingObserver = new IntersectionObserver(entries => {
-      if (entries.some(entry => entry.isIntersecting)) loadMoreListing();
-    }, { root: scroll, rootMargin: '0px 0px 320px 0px' });
-  }
-  listingObserver.observe(sentinel);
-}
-
-function updateListingFooter() {
-  const footer = content.querySelector('.listing-footer');
-  if (!footer) return;
-  footer.innerHTML = listingFooter();
-  observeListingEnd();
-}
-
-function renderListing() {
-  const listing = state.listing;
-  if (!listing?.items.length && listing?.refreshing) { renderSkeleton(); return; }
-  const tagName = String(listing.label || listing.slug).replace(/^#+/, '');
-  // 标签页标题就是标签本身。原来在公开态会拼成「短剧 · XXX」，那是内置源
-  // 按短剧/漫剧分标签的写法，别的源套上就是错的。
-  const tagTitle = `#${tagName}`;
-  const title = listing.kind === 'tag-list' ? tagTitle : listing.kind === 'recommend' ? '精选推荐' : '最新上架';
-  const backLabel = listing.kind === 'tag-list' && state.listingReturn?.route === 'tags' ? '返回全部类型' : '返回首页';
-  content.innerHTML = `<div class="listing-page"><button class="listing-back" type="button" data-back="1">${icon('back')} ${backLabel}</button>
-    <h1>${esc(title)}</h1><p>已显示 ${listing.items.length} 部作品</p>
-    ${listing.items.length ? `<div class="search-grid listing-grid">${listing.items.map(itemCard).join('')}</div>` : '<div class="empty-state">这个标签下暂无作品</div>'}
-    <div class="listing-footer">${listingFooter()}</div></div>`;
-  cover.hydrate();
-  observeListingEnd();
-}
-
-function renderDetail() {
-  const data = state.detail;
-  if (!data) { renderSkeleton(); return; }
-  const loading = state.detailLoading;
-  window.AndroidHost?.setDetailMode?.(true);
-  const episodes = asArray(data.episodes);
-  content.innerHTML = `<div class="detail-page"><button class="detail-back" type="button" data-back="1">${icon('back')} 返回</button>
-    <div class="detail-art"><img data-cover="${esc(data.cover)}" alt=""></div><div class="detail-copy"><h1>${esc(data.title)}</h1><p>${loading ? '正在获取内容…' : `${esc(data.score)} ${esc(data.episodeLabel)}`}</p><p class="detail-description">${esc(data.description || '')}</p>
-    <div class="detail-buttons"><button class="detail-play" type="button" data-play="1" ${loading ? 'disabled' : ''}>${loading ? '正在加载…' : '立即播放'}</button><button class="bookmark-button" type="button" data-bookmark="1" aria-label="${state.bookmarked ? '取消收藏' : '收藏'}" ${loading ? 'disabled' : ''}>${state.bookmarked ? '★' : '☆'}</button></div>
-    ${loading ? '<div class="detail-loading" role="status">正在获取选集…</div>' : episodes.length ? `<h2>选集</h2><div class="episode-grid">${episodes.map((item, index) => `<button type="button" data-episode="${item.number}" class="${index === 0 ? 'active' : ''}">${item.number}</button>`).join('')}</div>` : ''}</div></div>`;
-  cover.hydrate();
-}
-
-function searchFeedback() {
-  if (state.searchPending) return '<div class="search-feedback" role="status" aria-live="polite"><span class="search-spinner" aria-hidden="true"></span><span>正在更新搜索结果…</span></div>';
-  if (state.searchError) return `<div class="search-feedback search-feedback--error" role="status"><span>更新失败，当前显示缓存结果</span><button type="button" data-retry="search">重试</button></div>`;
-  return '';
-}
-function renderSearchLoading() {
-  content.innerHTML = `<section class="search-loading" role="status" aria-live="polite" aria-busy="true"><span class="search-spinner search-spinner--large" aria-hidden="true"></span><h1>正在搜索…</h1><p>${esc(state.query)}</p></section>`;
-}
 /**
  * 网格位上的骨架卡。分类页 / 标签页 / 搜索页加载时都用这个。
  *
  * 首页那块整套 skeleton-home 是「大图 + 一行卡」，而这三处是纯网格 —— 用首页那套
  * 会画出一个不属于这里的横幅位。
  */
-function skeletonCards(count = 6) {
-  let out = '';
-  for (let i = 0; i < count; i += 1) {
-    out += '<div class="skeleton-card" aria-hidden="true"><div class="skeleton skeleton-poster"></div><div class="skeleton skeleton-card-title"></div></div>';
-  }
-  return out;
-}
 
-function renderSkeleton() {
-  content.innerHTML = '<div class="skeleton-home" role="status" aria-label="正在加载内容"><div class="skeleton skeleton-hero"></div><div class="skeleton skeleton-title"></div><div class="skeleton-row"><div class="skeleton skeleton-poster"></div><div class="skeleton skeleton-poster"></div><div class="skeleton skeleton-poster"></div></div><div class="skeleton skeleton-line"></div></div>';
-}
 // 重试的统一入口：错误页按钮和自动重试都走这里，保证语义一致。
-function performRetry(retry) {
-  if (retry === 'home') goHome();
-  else if (retry === 'category') goCategory(state.tab);
-  else if (retry === 'library') goLibrary();
-  else if (retry === 'search') goSearch(state.query);
-  else if (retry === 'listing') openListing(state.listing.kind);
-  else if (retry === 'tags') goTags();
-  else if (retry === 'tag-list') goTag(state.listing.slug, state.listing.label);
-  else if (retry === 'detail') goDetail(state.sourceItem.id);
-}
 
 // 网络类错误的判定和展示是两件事，分开。
 const NETWORK_ERROR_RE = /站点连接失败|站点请求失败|failed to connect|unable to resolve host|unknownhost|connectexception|sockettimeoutexception|timed? out|network is unreachable|connection reset|connection refused|网络|连接失败|无法连接/i;
 
 // 把桥上抛上来的原始错误翻译成人话。原文太技术（「接口响应缺少 data」「HTTP 404」），
 // 直接糊用户一脸没有信息量；原文收进小字里，排查时还有得看。
-function friendlyError(error) {
-  const raw = (error?.message || '').trim();
-  const m = raw.toLowerCase();
-  if (/404|not found|不存在|查不到/.test(m)) {
-    return { icon: 'gone', title: '内容不见了', detail: '这条内容可能已下架，或当前源没有收录它。', raw };
-  }
-  if (/超时|timeout|timed out/.test(m)) {
-    return { icon: 'slow', title: '源站响应太慢', detail: '等的时间有点长，可以稍后再试，或者到设置里换一个源。', raw };
-  }
-  if (/为空|缺少|no data|invalid|格式|parse|json/.test(m)) {
-    return { icon: 'gone', title: '源站返回了看不懂的数据', detail: '多半是源站接口变了或这条内容是空的，可以重试或换个源。', raw };
-  }
-  return { icon: 'alert', title: '加载失败', detail: '出了点小问题，重试一次；总不行就到设置里换个源。', raw };
-}
 
 const ERROR_ICONS = {
   network: '<svg class="error-icon" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="24" cy="24" r="21"/><path d="m12 24 6-5 6 5 6-5 6 5"/></svg>',
@@ -2175,106 +2007,7 @@ const ERROR_ICONS = {
 // 真的会跳的自动重试。原错误页写着「正在自动重试…」其实什么都没重试 —— 用户干等。
 // 只对安全页面（首页/分类/标签这类）补刀；详情和搜索有自己的重试节奏，不掺和。
 const errorAutoRetry = { timer: 0 };
-function renderError(error, retry) {
-  if (state.route === 'detail') window.AndroidHost?.setDetailMode?.(false);
-  // 详情页出错时**必须**留条退路。正常详情页顶部有个「返回」按钮，可出错时整屏
-  // 被换成只有「重试」的错误页 —— 那个按钮跟着没了，用户就卡在一屏什么都做不了
-  // 的界面上。最典型的触发：换了内容源之后点观看历史里上一个源的条目，那个 id
-  // 在新源里查不到，详情必失败。
-  const escape = retry === 'detail' ? '<button type="button" data-back="1">返回</button>' : '';
-  clearTimeout(errorAutoRetry.timer);
-  const isNetwork = NETWORK_ERROR_RE.test(error?.message || '');
-  const routeAtRender = state.route;
-  if (isNetwork) {
-    content.innerHTML = `<div class="error-state error-state--network" role="alert">
-      <div class="error-main">
-        ${ERROR_ICONS.network}
-        <h1>网络走丢了</h1>
-      </div>
-      <div class="error-footer"><p>几秒后会自动重试，也可以现在手动来。</p>${escape}<button type="button" data-retry="${esc(retry)}">重新尝试</button></div>
-    </div>`;
-    if (['home', 'category', 'listing', 'tags', 'tag-list', 'library'].includes(retry)) {
-      errorAutoRetry.timer = setTimeout(() => {
-        // 用户已经离开这一页、或错误页已被别的内容换掉，就不再补刀。
-        if (state.route !== routeAtRender || !content.querySelector(`[data-retry="${retry}"]`)) return;
-        performRetry(retry);
-      }, 5000);
-    }
-    return;
-  }
-  const info = friendlyError(error);
-  const hint = retry === 'detail' ? '<p>这条内容可能已下架，或当前源没有收录。</p>' : '';
-  content.innerHTML = `<div class="error-state error-state--network" role="alert">
-    <div class="error-main">
-      ${ERROR_ICONS[info.icon]}
-      <h1>${esc(info.title)}</h1>
-    </div>
-    <div class="error-footer">
-      ${hint}<p>${esc(info.detail)}</p>
-      ${info.raw ? `<p class="error-raw">${esc(info.raw)}</p>` : ''}
-      ${escape}<button type="button" data-retry="${esc(retry)}">重试</button>
-    </div>
-  </div>`;
-}
 
-function rememberScreen() {
-  if (state.route === 'detail') return;
-  const previewContent = content.cloneNode(true);
-  previewContent.removeAttribute('id');
-  screenSnapshots[state.route] = {
-    content: previewContent, scrollTop: scroll.scrollTop,
-    horizontalScroll: [...content.querySelectorAll('.film-row,.filter-row,.home-tag-scroll')].map(row => row.scrollLeft)
-  };
-}
-function captureScreen() {
-  rememberScreen();
-  return {
-    route: state.route, tab: state.tab, pageNode: content.firstElementChild,
-    scrollTop: scroll.scrollTop, searchValue: searchInput.value,
-    listing: state.route === 'listing' ? state.listing : null,
-    listingReturn: state.listingReturn, tagsReturn: state.tagsReturn,
-    compactHeld: state.compactHeld,
-    horizontalScroll: [...content.querySelectorAll('.film-row,.filter-row,.home-tag-scroll')].map(row => row.scrollLeft)
-  };
-}
-function restoreScreen(snapshot) {
-  if (!snapshot?.pageNode) { goHome(); return; }
-  ++routeToken;
-  listingObserver?.disconnect();
-  categoryObserver?.disconnect();
-  setRoute(snapshot.route);
-  state.tab = snapshot.tab;
-  state.compactHeld = snapshot.compactHeld;
-  if (snapshot.listing) state.listing = snapshot.listing;
-  state.listingReturn = snapshot.listingReturn;
-  state.tagsReturn = snapshot.tagsReturn;
-  content.replaceChildren(snapshot.pageNode);
-  if (snapshot.route === 'home') refreshHomeHistory();
-  if (snapshot.route === 'library') renderLibrary();
-  if (snapshot.route === 'settings') renderSettings();
-  searchInput.value = snapshot.searchValue || '';
-  document.querySelectorAll('#dock [data-nav]').forEach(button => button.classList.toggle('active', button.dataset.nav === state.tab));
-  scroll.scrollTop = snapshot.scrollTop || 0;
-  content.querySelectorAll('.film-row,.filter-row,.home-tag-scroll').forEach((row, index) => {
-    row.scrollLeft = snapshot.horizontalScroll?.[index] || 0;
-  });
-  cover.hydrate();
-  if (isBannerRoute()) { restoreBannerIndex(); scheduleBannerAuto(); }
-  if (snapshot.route === 'category') { compact.innerHTML = compactMarkup(); updateCompact(); observeCategoryEnd(); }
-  if (snapshot.route === 'listing') observeListingEnd();
-}
-
-function updateBackEnabled() {
-  // 兜底：不管哪条路径把路由切走了，都不能把全屏播放层留在屏幕上。
-  // feedClose() 会先清掉 .feed 再回调这里，所以不会递归。
-  if (state.route !== 'feed' && document.querySelector('.feed')) feedClose();
-  // 设置页也算进来。它不是普通弹窗 —— 没配源时它是唯一的一屏，而
-  // setBackEnabled(false) 会让 Java 把返回回调整个注销掉，之后按返回就是
-  // 系统默认行为（退到后台），连 window.hgBack() 都不会被调用。
-  const modalOpen = [unlockOverlay, authOverlay, confirmOverlay, document.getElementById('setup-overlay')]
-    .some(overlay => overlay && !overlay.hidden);
-  window.AndroidHost?.setBackEnabled(modalOpen || !isRootColumn());
-}
 
 let viewEnterTimer;
 /**
@@ -2292,61 +2025,10 @@ let viewEnterTimer;
  *
  * <p>切页要的是「立刻到位」。淡入留给详情页那种真正的转场（card-transition 管）。
  */
-function playViewEnter(route) {
-  const app = document.getElementById('app');
-  if (app.classList.contains('view-enter')) app.classList.remove('view-enter');
-}
 
-function setRoute(route) {
-  stopBannerAuto();
-  // 换页就收起历史面板。留着的话从搜索结果退回来它还悬在半空，
-  // 而且底下的页面已经换了 —— 一眼看去像是搜索框卡住了。
-  hideSearchHistory();
-  const changed = state.route !== route;
-  if (state.route === 'detail' && route !== 'detail') { detailCard?.dispose(); detailCard = null; }
-  const libraryArea = ['library', 'settings', 'account-management'].includes(route);
-  if (state.route === 'library' && route !== 'library') searchInput.value = '';
-  state.route = route;
-  const app = document.getElementById('app');
-  app.dataset.route = route;
-  app.classList.toggle('route-detail', route === 'detail');
-  window.AndroidHost?.setDetailMode?.(route === 'detail');
-  headerSettings.hidden = route !== 'library';
-  searchInput.placeholder = libraryArea ? '搜索观看历史和收藏' : '搜索剧名或 #标签';
-  searchInput.setAttribute('aria-label', libraryArea ? '搜索观看历史和收藏' : '搜索剧名或标签');
-  if (route === 'library') searchInput.value = state.libraryQuery;
-  updateBackEnabled();
-  if (changed) playViewEnter(route);
-}
 
 function isRootColumn() { return ['home', 'category', 'library'].includes(state.route); }
 
-function backDestination() {
-  if (isRootColumn()) return null;
-  if (state.route === 'campaign') return state.campaignReturn?.route || 'home';
-  if (state.route === 'detail') return state.previous?.route || 'home';
-  if (state.route === 'account-management') return state.accountReturn?.route || 'settings';
-  if (state.route === 'proxy-settings') return state.proxyReturn?.route || 'settings';
-  if (state.route === 'source-settings') return state.sourceReturn?.route || 'settings';
-  if (state.route === 'market') return state.marketReturn?.route || 'settings';
-  if (state.route === 'settings') return state.settingsReturn?.route || 'library';
-  if (state.route === 'tags') return state.tagsReturn?.route || 'home';
-  if (state.route === 'listing' && state.listing?.kind === 'tag-list') return state.listingReturn?.route || 'home';
-  return state.route === 'home' ? null : 'home';
-}
-
-function clearPredictivePreview() {
-  clearTimeout(predictiveTimer);
-  if (predictiveFrame) cancelAnimationFrame(predictiveFrame);
-  predictiveFrame = null;
-  if (predictiveSourceNode && predictivePreview?.contains(predictiveSourceNode)) predictiveSourceNode.remove();
-  predictiveSourceNode = null;
-  predictivePreview?.remove();
-  predictivePreview = null;
-  document.getElementById('app').classList.remove('predictive-active');
-  scroll.style.removeProperty('transition');
-  scroll.style.removeProperty('transform');
-}
 
 window.hgPredictiveBackStart = fromRight => {
   clearPredictivePreview();
@@ -2468,15 +2150,6 @@ window.hgPredictiveBackCommit = () => {
  * 直接用缓存渲染，不再发请求，也不再重试。用户这时换源或开代理，下一次正常。
  */
 const NET_COOLDOWN_MS = 60000;
-function netCoolingDown() {
-  return Date.now() - (state.netFailAt || 0) < NET_COOLDOWN_MS;
-}
-function noteNetFailure() {
-  state.netFailAt = Date.now();
-}
-function noteNetSuccess() {
-  state.netFailAt = 0;
-}
 
 /**
  * 分类页的静默预热。
@@ -2499,34 +2172,6 @@ function noteNetSuccess() {
 let warmupTimer = 0;
 let warming = false;
 
-function scheduleCategoryWarmup() {
-  clearTimeout(warmupTimer);
-  warmupTimer = setTimeout(runCategoryWarmup, 2500);
-}
-
-async function runCategoryWarmup() {
-  if (warming || state.route !== 'category') return;
-  warming = true;
-  const tab = state.tab;
-  try {
-    const ids = (siteUi().categoryIds || {})[tab] || [];
-    for (let i = 0; i < ids.length; i++) {
-      if (state.route !== 'category' || state.tab !== tab) return;
-      const cacheKey = `category:${ids[i]}:1`;
-      const cached = readCache(cacheKey);
-      if (cached?.data && Date.now() - (cached.at || 0) < 120000) continue;
-      try {
-        const data = await api('category', { id: ids[i], page: 1 });
-        if (data) writeCache(cacheKey, data);
-      } catch (error) {
-        // 预取失败不打扰用户：他真点进去时那条路自己会报错。
-      }
-      await new Promise(resolve => setTimeout(resolve, 400));
-    }
-  } finally {
-    warming = false;
-  }
-}
 
 /**
  * 把「当前选中哪个子分类」立刻画到界面上。
@@ -2540,41 +2185,7 @@ async function runCategoryWarmup() {
  *
  * <p>所以选中态必须跟手：切换时同步改 class，与数据到不到无关。
  */
-function applySubSelection(sub) {
-  const page = content.querySelector('.category-page');
-  const hosts = [page, compact].filter(Boolean);
-  hosts.forEach(host => {
-    host.querySelectorAll('[data-sub]').forEach(button => {
-      const on = Number(button.dataset.sub) === sub;
-      button.classList.toggle('selected', on);
-      button.setAttribute('aria-selected', String(on));
-    });
-  });
-  // 区块标题（「搞笑作品」→「运动作品」）也是同一件事：它描述的是「你要看什么」，
-  // 不是「已经拿到了什么」。
-  const heading = page?.querySelector('.category-section .section-heading h2');
-  if (heading) {
-    const tabs = categoryTabs();
-    if (tabs[sub]) heading.textContent = tabs[sub] + '作品';
-  }
-  // 旧卡片还挂在那儿，明确标成「这条不是你要的」，免得标题和内容对不上。
-  page?.querySelector('.category-grid')?.classList.add('is-stale');
-}
 
-function clearStaleCards() {
-  content.querySelector('.category-grid')?.classList.remove('is-stale');
-}
-
-function setNav(tab, keepState = false) {
-  listingObserver?.disconnect();
-  categoryObserver?.disconnect();
-  document.querySelectorAll('#dock [data-nav]').forEach(button => button.classList.toggle('active', button.dataset.nav === tab));
-  if (keepState) return;
-  compact.classList.remove('visible');
-  compact.inert = true;
-  state.compactHeld = false;
-  scroll.scrollTop = 0;
-}
 
 /**
  * 分类切换时的顶栏进度条。
@@ -2583,22 +2194,6 @@ function setNav(tab, keepState = false) {
  * 这比「把整屏清成骨架屏」好一个量级 —— 后者在 1.5 秒里什么都点不了，
  * 用户对「卡」的全部感受就来自那一段。
  */
-function setCategoryBusy(on) {
-  const app = document.getElementById('app');
-  if (!app) return;
-  let bar = document.getElementById('category-busy');
-  if (on) {
-    if (!bar) {
-      bar = document.createElement('i');
-      bar.id = 'category-busy';
-      bar.className = 'busy-bar';
-      app.appendChild(bar);
-    }
-    bar.classList.add('visible');
-    return;
-  }
-  if (bar) bar.classList.remove('visible');
-}
 
 /**
  * 手指一落下就把底部高亮换过去。
@@ -2612,571 +2207,13 @@ function setCategoryBusy(on) {
  * 不进任何网络/渲染路径。真正切页仍然由后面的 click → tapDock → goXxx 完成，
  * 所以按下划走也不会误导航 —— 最多留下一格高亮，下一次导航自己会纠正。
  */
-function bindDockPressFeedback() {
-  const dock = document.getElementById('dock');
-  if (!dock) return;
-  dock.addEventListener('pointerdown', event => {
-    const button = event.target.closest('[data-nav]');
-    if (!button) return;
-    dock.querySelectorAll('[data-nav]').forEach(other =>
-      other.classList.toggle('active', other.dataset.nav === button.dataset.nav));
-  }, { passive: true });
-}
 
-async function goHome() {
-  const token = ++routeToken;
-  stopBannerAuto();
-  setRoute('home'); state.tab = 'home'; setNav('home');
-  // 三级兜底，顺序不能反：内存 → localStorage → 骨架屏。
-  // localStorage 是同步读的，冷启动第一帧就有内容，不用等网络也不用等桥。
-  let cachedHome = null;
-  if (!state.home) {
-    cachedHome = readCache('home');
-    if (cachedHome?.data) {
-      state.home = cachedHome.data;
-      state.homeAt = cachedHome.at || 0;
-    }
-  }
-  if (state.home) renderHome(); else renderSkeleton();
-  // 首屏 DOM 建完再钉一次高亮：上面那次 setNav 的样式变更可能和这批 DOM
-  // 落在同一帧里被合并，表现就是「页面换了、按钮还停在上一格」。
-  // 这里只改高亮不动滚动（keepState），重复调用没有副作用。
-  setNav('home', true);
-  // 首页和分类用同一套新鲜度判断：两分钟内不再打网络。
-  //
-  // 原来首页每次进都发一次请求（1.4~1.6 秒），期间屏幕上一直是上一次的内容 ——
-  // 用户点「首页」看到的是「没反应」，过一会儿内容自己跳一下。分类早就有这个
-  // 窗口了，首页漏了。
-  const HOME_FRESH_MS = 120000;
-  if (state.home && state.homeAt && Date.now() - state.homeAt < HOME_FRESH_MS) {
-    // 两分钟内不再打网络，但**已经拿到手的真值还是要套一遍**。
-    // writeCache 存的是网格页原样（未校正），所以「跳过刷新」如果连
-    // reconcileCards 也一起跳过，第二次进首页看到的就是旧标题 —— 而校正结果
-    // 明明已经在 localStorage 里。这一句只花内存查找；真的缺 id 才会发请求，
-    // 那也是后台的，不挡首屏。
-    reconcileCards(homeItems(state.home), () => renderHome());
-    return;
-  }
-  const refreshing = api('home');
-  // 先挂一个空 catch。这个 promise 可能在下面 await 之前就 reject ——
-  // spider 那条世代机制会把被取代的调用判死，而 V8 在微任务清空时发现
-  // 没有 handler 就会打一条 Uncaught (in promise)，把控制台刷红。
-  // 错误本身由下面的 await 处理，这里只挡噪音。
-  refreshing.catch(() => {});
-  const library = await api('library').catch(() => null);
-  if (token !== routeToken) return;
-  state.library = library;
-  let fresh;
-  try {
-    fresh = await refreshing;
-  } catch (error) {
-    // 接口挂了但手上有缓存：留着旧内容，只提示一下。把已经画好的首页换成
-    // 错误页是最糟的选择——用户看到的是一片空白，而内容其实就在本地。
-    if (token !== routeToken) return;
-    noteNetFailure();
-    if (!state.home) renderError(error, 'home');
-    else toast('源暂时连不上，稍后自动重试', true);
-    // 这条线路是间歇性的（实测同一个域名三次里有一次能通），所以失败后
-    // 自动退避重试，而不是把「重新尝试」丢给用户点 —— 也不分有没有缓存。
-    scheduleHomeRetry(token);
-    return;
-  }
-  if (token !== routeToken) return;
-  try {
-    const changed = state.home && homeSignature(state.home) !== homeSignature(fresh);
-    const firstLoad = !state.home;
-    state.home = fresh;
-    state.homeAt = Date.now();
-    noteNetSuccess();
-    writeCache('home', fresh);
-    if (firstLoad || changed) renderHome();
-    else refreshMissingImages([...asArray(fresh.featured), ...asArray(fresh.recommend?.items), ...asArray(fresh.newest?.items)]);
-    // 先把网格页的图画出来，再拿详情页把标题/封面盖成真值（见 reconcileCards）。
-    reconcileCards(homeItems(fresh), () => {
-      if (token !== routeToken || state.route !== 'home') return;
-      writeCache('home', state.home);
-      renderHome();
-    });
-  } catch (error) {
-    // ⚠️ 渲染和网络必须分开 catch。以前这两段在同一个 try 里，后面几句抛出来，
-    // 用户看到的也是「内容更新失败，正在显示缓存」—— 实测日志是
-    //   [api] /api/home ok 2076ms
-    //   [toast] 内容更新失败，正在显示缓存      ← 成功之后 3ms
-    // 真实原因（refreshMissingImages 里变量遮蔽）跟网络毫无关系，却害人顺着
-    // 「接口不稳」查了半天。拿到了数据就说明接口是好的 —— 只打日志，不弹提示。
-    console.log('[home] 渲染失败（接口是好的）：' + ((error && error.stack) || error));
-    state.home = fresh;   // 数据是好的，先认下来，别因为一次渲染失败丢掉它
-  }
-}
 
-async function goTags() {
-  const token = ++routeToken;
-  if (state.route !== 'tags') state.tagsReturn = captureScreen();
-  setRoute('tags'); state.tab = 'home'; setNav('home');
-  const refreshing = api('tags');
-  refreshing.catch(() => {});
-  const cached = readCache('tags');
-  if (token !== routeToken) return;
-  state.tags = cached?.data || state.tags;
-  if (state.tags) renderTags(); else renderSkeleton();
-  try {
-    const fresh = await refreshing;
-    if (token !== routeToken) return;
-    const changed = JSON.stringify(state.tags?.items) !== JSON.stringify(fresh.items);
-    const previousScroll = scroll.scrollTop;
-    state.tags = fresh;
-    writeCache('tags', fresh);
-    if (changed) { renderTags(); scroll.scrollTop = previousScroll; }
-  } catch (error) {
-    if (token !== routeToken) return;
-    if (!state.tags) renderError(error, 'tags');
-    else toast('标签更新失败，正在显示缓存', true);
-  }
-}
-
-async function goTag(slug, label) {
-  const token = ++routeToken;
-  if (state.route !== 'listing' || state.listing?.kind !== 'tag-list' || state.listing?.slug !== slug) state.listingReturn = captureScreen();
-  setRoute('listing'); state.tab = 'home'; setNav('home');
-  // 「短剧·/漫剧·」这个前缀只在源真的按短剧/漫剧分标签时才有意义。别的源
-  // （比如 老源，它的标签就是分类栏）套上会变成「#短剧·高清版」，纯噪音。
-  const dramaTagged = (siteUi().tagGroups || []).some(([id]) => id === 'short' || id === 'comic');
-  const prefix = dramaTagged ? (slug.startsWith('comic:') ? '漫剧·' : '短剧·') : '';
-  searchInput.value = `#${prefix}${String(label).replace(/^#+/, '')}`;
-  const refreshing = api('tag-list', { slug, label, page: 1 });
-  refreshing.catch(() => {});
-  const cached = readCache(`tag:${slug}:1`);
-  if (token !== routeToken) return;
-  const firstLoad = !cached?.data;
-  state.listing = cached?.data ? { ...cached.data, kind: 'tag-list', slug, label, refreshing: true, loading: false, error: false } :
-    { items: [], nextPage: null, kind: 'tag-list', slug, label, refreshing: true, loading: false, error: false };
-  renderListing();
-  try {
-    const fresh = await refreshing;
-    if (token !== routeToken) return;
-    const changed = listSignature(state.listing) !== listSignature(fresh) || state.listing.nextPage !== fresh.nextPage;
-    const previousScroll = scroll.scrollTop;
-    state.listing = { ...fresh, kind: 'tag-list', slug, label, refreshing: false, loading: false, error: false };
-    writeCache(`tag:${slug}:1`, fresh);
-    if (firstLoad || changed) { renderListing(); scroll.scrollTop = previousScroll; }
-    else updateListingFooter();
-    reconcileCards(state.listing.items, () => {
-      if (token !== routeToken || state.route !== 'listing') return;
-      const top = scroll.scrollTop;
-      renderListing();
-      scroll.scrollTop = top;
-    });
-  } catch (error) {
-    if (token !== routeToken) return;
-    if (!state.listing.items.length) renderError(error, 'tag-list');
-    else { state.listing.refreshing = false; updateListingFooter(); toast('列表更新失败，已显示缓存内容', true); }
-  }
-}
-
-async function goTagQuery(query) {
-  const name = query.replace(/^[#＃]\s*/, '').trim();
-  if (!name) { goTags(); return; }
-  let tags = asArray(state.tags?.items);
-  if (!tags.length) {
-    const cached = readCache('tags');
-    tags = asArray(cached?.data?.items);
-  }
-  if (!tags.length) {
-    try { const fresh = await api('tags'); state.tags = fresh; writeCache('tags', fresh); tags = asArray(fresh.items); }
-    catch { toast('标签暂时无法加载，请重试', true); return; }
-  }
-  const normalize = value => String(value || '').replace(/^#+/, '').trim().toLocaleLowerCase();
-  const matches = item => normalize(item.name) === normalize(name)
-    || normalize(`${item.group === 'comic' ? '漫剧' : '短剧'}·${item.name}`) === normalize(name);
-  let tag = tags.find(matches);
-  if (!tag) {
-    try { const fresh = await api('tags'); state.tags = fresh; tag = asArray(fresh.items).find(matches); }
-    catch { /* 已有清单仍可用于搜索 */ }
-  }
-  if (tag) goTag(tag.slug, tag.name);
-  else toast('没有找到这个标签', true);
-}
-
-async function openListing(kind) {
-  if (kind !== 'recommend' && kind !== 'newest') return;
-  const token = ++routeToken;
-  rememberScreen();
-  listingObserver?.disconnect();
-  setRoute('listing'); state.tab = 'home';
-  setNav('home');
-  const initial = state.home?.[kind];
-  state.listing = {
-    kind, items: [...asArray(initial?.items)], nextPage: initial?.nextPage || null,
-    refreshing: true, loading: false, error: false
-  };
-  renderListing();
-  try {
-    const fresh = await api(kind, { page: 1 });
-    if (token !== routeToken) return;
-    state.listing.items = asArray(fresh.items);
-    state.listing.nextPage = fresh.nextPage;
-    state.listing.refreshing = false;
-    const previousScroll = scroll.scrollTop;
-    renderListing();
-    scroll.scrollTop = previousScroll;
-    reconcileCards(state.listing.items, () => {
-      if (token !== routeToken || state.route !== 'listing') return;
-      const top = scroll.scrollTop;
-      renderListing();
-      scroll.scrollTop = top;
-    });
-  } catch (error) {
-    if (token !== routeToken) return;
-    state.listing.refreshing = false;
-    if (!state.listing.items.length) renderError(error, 'listing');
-    else { updateListingFooter(); toast('列表更新失败，已显示缓存内容', true); }
-  }
-}
-
-async function loadMoreListing() {
-  const listing = state.listing;
-  if (state.route !== 'listing' || !listing?.nextPage || listing.refreshing || listing.loading || listing.error) return;
-  const token = routeToken;
-  const pageNumber = listing.nextPage;
-  listing.loading = true;
-  updateListingFooter();
-  try {
-    const page = await api(listing.kind, { page: pageNumber, slug: listing.slug, label: listing.label });
-    if (token !== routeToken || state.listing !== listing || state.route !== 'listing') return;
-    const known = new Set(listing.items.map(item => String(item.id)));
-    const added = asArray(page.items).filter(item => {
-      const id = String(item.id);
-      if (known.has(id)) return false;
-      known.add(id);
-      return true;
-    });
-    listing.items.push(...added);
-    listing.nextPage = page.items?.length && page.nextPage > pageNumber ? page.nextPage : null;
-    const grid = content.querySelector('.listing-grid');
-    if (grid && added.length) {
-      grid.insertAdjacentHTML('beforeend', added.map(itemCard).join(''));
-      const images = [...grid.querySelectorAll('img[data-cover]')].slice(-added.length);
-      cover.hydrateList(images, 8);
-    }
-    const count = content.querySelector('.listing-page > p');
-    if (count) count.textContent = `已显示 ${listing.items.length} 部作品`;
-    reconcileCards(added, () => {
-      if (state.route !== 'listing' || state.listing !== listing) return;
-      const top = scroll.scrollTop;
-      renderListing();
-      scroll.scrollTop = top;
-    });
-  } catch (error) {
-    if (token === routeToken && state.listing === listing && state.route === 'listing') listing.error = true;
-  } finally {
-    listing.loading = false;
-    if (state.listing === listing && state.route === 'listing') updateListingFooter();
-  }
-}
-
-async function goCategory(tab, sub = subIndex(tab), keepCompact = false) {
-  const token = ++routeToken;
-  categoryObserver?.disconnect();
-  if (state.route === 'home') rememberScreen();
-  setRoute('category'); state.tab = tab; state.sub[tab] = sub; state.category = null; state.categoryBanner = 0;
-  setNav(tab, keepCompact);
-  // 选中态先跟手，再谈数据。见 applySubSelection 的注释。
-  applySubSelection(sub);
-  // 先读缓存再决定画什么。
-  //
-  // 原来是 renderSkeleton() → 发请求 → readCache() → 有缓存再 renderCategory()。
-  // 那中间有一次多余的骨架屏：缓存明明在手，用户还是要先看见一屏闪白，再被内容
-  // 替换掉。`readCache` 是同步读 localStorage，几十微秒的事，放在骨架屏之前没有代价。
-  const id = categoryId();
-  const cached = readCache(`category:${id}:1`);
-  if (token !== routeToken) return;
-  // 缓存够新就直接用，不发请求。
-  //
-  // 原来无论缓存多新都要走一趟 spider：网络 1.4~1.6 秒，而用户只是从「运动」
-  // 切回「搞笑」看一眼。那 1.5 秒他什么也做不了，感觉就是卡。
-  // 两分钟这个窗口是权衡：列表页的内容两分钟内不会变，而用户来回切分类
-  // 基本都在这个尺度内。
-  const CACHE_FRESH_MS = 120000;
-  const cacheAge = cached?.at ? Date.now() - cached.at : Infinity;
-  const freshEnough = Boolean(cached?.data) && cacheAge < CACHE_FRESH_MS;
-  state.category = cached?.data
-    ? { ...cached.data, refreshing: !freshEnough, loading: false, error: false }
-    : null;
-  // 永远先把分类页的「壳」画出来，有没有数据都一样。
-  //
-  // 这一条是死规矩。原来的分支是「没缓存 → renderSkeleton()」，而骨架屏里
-  // **没有那一排子 tab**：用户点下去 closest('[data-sub]') 匹配不到任何东西，
-  // 事件直接被丢掉，goCategory 根本不执行 —— 界面一动不动。
-  //
-  // 实测日志（2026-10-19 真机，冷启动后第一次进分类页）：
-  //   [sub] sub=0 page=false btns=-1        ← page 是 null，一个可点的按钮都没有
-  // 这就是「连续点击很卡」的真正来源：不是慢，是那几下点击压根没被接收。
-  //
-  // renderCategory 对 state.category 为 null 是安全的：它把 items 当空数组，
-  // 画出来的就是「有标题、有子 tab、有区块标题、列表为空」的一屏，正好可以点。
-  renderCategory(keepCompact);
-  if (state.category) {
-    setCategoryBusy(false);
-    if (freshEnough) return;   // 缓存判定够新 —— 到此为止，不碰网络
-  } else {
-    setCategoryBusy(true);
-  }
-  setNav(tab, true);
-  const refreshing = api('category', { id, page: 1 });
-  refreshing.catch(() => {});
-  try {
-    const fresh = await refreshing;
-    if (token !== routeToken) return;
-    setCategoryBusy(false);
-    const changed = state.category && listSignature(state.category) !== listSignature(fresh);
-    const firstLoad = !state.category;
-    const previousScroll = scroll.scrollTop;
-    state.category = { ...fresh, refreshing: false, loading: false, error: false };
-    state.categoryItems = asArray(fresh.items);
-    noteNetSuccess();
-    writeCache(`category:${id}:1`, fresh);
-    if (firstLoad || changed) {
-      renderCategory(keepCompact || state.compactHeld);
-      if (!firstLoad) scroll.scrollTop = previousScroll;
-    } else {
-      refreshMissingImages(asArray(fresh.items));
-      updateCategoryFooter();
-    }
-    reconcileCards(state.categoryItems, () => {
-      if (token !== routeToken || state.route !== 'category' || categoryId() !== id) return;
-      const top = scroll.scrollTop;
-      writeCache(`category:${id}:1`, state.category);
-      renderCategory(state.compactHeld);
-      scroll.scrollTop = top;
-    });
-  } catch (error) {
-    if (token !== routeToken) return;
-    setCategoryBusy(false);
-    noteNetFailure();
-    if (!state.category) renderError(error, 'category');
-    else { state.category.refreshing = false; updateCategoryFooter(); toast('源暂时连不上，稍后自动重试', true); }
-    scheduleCategoryRetry(token, id);
-  }
-}
-
-async function goLibrary(tab = 'history') {
-  const token = ++routeToken;
-  if (state.route === 'home') rememberScreen();
-  state.libraryTab = tab;
-  setRoute('library'); state.tab = 'library'; setNav('library');
-  // 观看记录和收藏都是本地数据，手上已经有的先画出来。
-  // 桥调用统一排在 4 个线程的池子里，而真机上网络请求要 25 秒才超时 ——
-  // 池子被慢请求占满时这里就得排队，干等骨架屏就成了「点我的要加载很久」。
-  if (state.library) renderLibrary(); else renderSkeleton();
-  setNav('library', true);
-  try {
-    const library = await api('library');
-    if (token !== routeToken) return;
-    state.library = library;
-    renderLibrary();
-  } catch (error) {
-    if (token === routeToken && !state.library) renderError(error, 'library');
-  }
-}
-
-function goSettings() {
-  state.settingsReturn = captureScreen();
-  setRoute('settings'); state.tab = 'library'; setNav('library');
-  renderSettings();
-  // 设置页上那几个胶囊（已连接 / 硬解 / 已启用）是**读出来的事实**，不是偏好。
-  // 只靠启动时那一次，用户从代理页连上节点再退回来，胶囊还写着「未启动」。
-  // 这里补一次静默刷新：两个都不联网，几毫秒回来，回来才重画。
-  bootProxyCore(true).catch(() => {});
-  nativePlayerInfo().then(() => { if (state.route === 'settings') renderSettingsKeepScroll(); }).catch(() => {});
-  refreshSources().then(() => { if (state.route === 'settings') renderSettingsKeepScroll(); }).catch(() => {});
-}
-
-function goAccountManagement() {
-  if (state.route === 'account-management') return;
-  if (state.route !== 'settings') goSettings();
-  state.accountReturn = captureScreen();
-  setRoute('account-management');
-  renderAccountManagement();
-}
-
-async function goSearch(query) {
-  const token = ++routeToken;
-  if (state.route === 'home') rememberScreen();
-  state.previous = { route: state.route, tab: state.tab };
-  setRoute('search'); state.query = query.trim(); state.search = null;
-  // 记录放在这一层而不是 submit 事件里：历史、重试（goSearch(state.query)）、
-  // 以后的深链入口都会走到这儿，一处记全。重复的词由 recordSearchHistory 去重。
-  recordSearchHistory(state.query);
-  state.searchPending = true; state.searchError = '';
-  scroll.scrollTop = 0;
-  renderSearchLoading();
-  let timeout;
-  const refreshing = api('search', { query: state.query });
-  refreshing.catch(() => {});
-  // 同步读缓存：上一次搜同一个词的记录先顶上，不用等接口。
-  const cachedSearch = readCache(`search:${state.query}`);
-  if (cachedSearch?.data) { state.search = cachedSearch.data; renderSearch(); }
-  try {
-    const fresh = await Promise.race([refreshing, new Promise((_, reject) => {
-      timeout = setTimeout(() => reject(new Error('搜索连接超时，请重试')), 25000);
-    })]);
-    if (token !== routeToken) return;
-    state.searchPending = false; state.search = fresh;
-    writeCache(`search:${state.query}`, fresh);
-    renderSearch();
-    reconcileCards(state.search.items, () => {
-      if (token !== routeToken || state.route !== 'search') return;
-      writeCache(`search:${state.query}`, state.search);
-      renderSearch();
-    });
-  } catch (error) {
-    if (token !== routeToken) return;
-    state.searchPending = false;
-    if (state.search) { state.searchError = error.message || '搜索刷新失败'; renderSearch(); }
-    else renderError(error, 'search');
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-function sourceItem(id) {
-  const candidates = [state.listing?.items, state.home?.featured, state.home?.homepageRecommend, state.home?.homepageNewest, state.home?.recommend?.items, state.home?.newest?.items, state.category?.items, state.search?.items, state.library?.bookmarks, state.library?.progress].flatMap(asArray);
-  return candidates.find(item => item.id === id) || { id, title: `剧集 ${id}` };
-}
 // 详情请求的统一入口：同 id 在飞请求直接复用，成功后**无条件**落缓存 ——
 // 原来写缓存在「用户还停在详情页」的判断里，等不及退出来，这次抓取就白跑了，
 // 再进去还是从零等。预取（pointerdown）和 goDetail 都走这里。
 const detailInflight = new Map();
-function fetchDetail(id) {
-  const key = String(id);
-  if (!detailInflight.has(key)) {
-    const promise = api('detail', { id }).then(fresh => {
-      writeCache(`detail:${key}`, fresh);
-      detailInflight.delete(key);
-      return fresh;
-    }).catch(error => { detailInflight.delete(key); throw error; });
-    detailInflight.set(key, promise);
-  }
-  return detailInflight.get(key);
-}
 
-async function goDetail(id, trigger) {
-  if (state.route === 'detail' && state.sourceItem?.id === id) {
-    // Retry in place; preserve the original source card and return destination.
-    state.detailLoading = true; renderDetail();
-    const token = ++routeToken;
-    try { const fresh = await fetchDetail(id); if (token === routeToken) { state.detail = fresh; state.detailLoading = false; renderDetail(); } }
-    catch (error) { if (token === routeToken) { state.detailLoading = false; renderError(error, 'detail'); } }
-    return;
-  }
-  const token = ++routeToken;
-  // 卡片过渡动画的开关必须**先于** capture 生效：capture 里有两趟 cloneNode
-  // （页头 + 折叠面板），关着动画还照跑就是纯浪费；更严重的是它让 entrySource
-  // 恒为真，下面 `hasDetailData && !entrySource` 永远不成立 —— 明明有缓存，
-  // 从卡片进详情还是要白等一趟网络。2026-10-19 用户反馈动画消失 + 缓存失效，
-  // 根子都在这行没跟着开关走。动画重新打开（用户要求），capture 跟着开关走。
-  const CARD_TRANSITION_ENABLED = true;
-  const entrySource = !CARD_TRANSITION_ENABLED || (bannerChanging && trigger?.closest('.hero'))
-    ? null
-    : HGCardTransition.capture(trigger);
-  // 从播放器回来时 content 里可能还留着「正在打开播放器…」的 boot 占位页，
-  // 把它当返回目标存下来，返回时就会还原出那一屏残页。占位页不算页面。
-  const placeholder = state.route === 'feed' || content.firstElementChild?.classList?.contains('feed-boot');
-  if (placeholder) { content.replaceChildren(); state.route = 'detail'; }
-  rememberScreen();
-  state.previous = {
-    route: state.route, tab: state.tab, sub: subIndex(state.tab), query: state.query,
-    scrollTop: scroll.scrollTop, compactHeld: state.compactHeld,
-    horizontalScroll: [...content.querySelectorAll('.film-row,.filter-row,.home-tag-scroll')].map(row => row.scrollLeft),
-    pageNode: content.firstElementChild
-  };
-  if (state.route === 'listing' && state.listing) state.listing.refreshing = false;
-  listingObserver?.disconnect();
-  categoryObserver?.disconnect();
-  state.sourceItem = sourceItem(id);
-  state.sourceGroup = state.route === 'category' ? categoryId() : state.sourceItem.category || '';
-  const aiGroup = state.sourceGroup === 'ai-huanlian' || state.sourceGroup === 'ai-mogai';
-  const candidates = state.route === 'category' ? asArray(state.category?.items) : state.route === 'search' ? asArray(state.search?.items) : state.route === 'listing' ? asArray(state.listing?.items) :
-    [...asArray(state.home?.recommend?.items), ...asArray(state.home?.newest?.items)];
-  state.sourceQueue = aiGroup ? candidates.filter(item => item.category === state.sourceGroup) : [];
-  setRoute('detail'); state.detail = { ...state.sourceItem }; state.detailLoading = true; state.bookmarked = false;
-  scroll.scrollTop = 0;
-  updateCompact();
-  renderDetail();
-  // 开关和取舍说明在 entrySource 那一段（上面）。这里的旧注释已并入那边。
-  if (entrySource && CARD_TRANSITION_ENABLED) {
-    detailCard = new HGCardTransition({
-      app: document.getElementById('app'), scroll, content, source: entrySource, snapshot: state.previous,
-      isDetail: () => state.route === 'detail',
-      onClose: () => { returnFromDetail(); trigger?.focus({ preventScroll: true }); }
-    });
-    detailCard.open();
-  }
-  const refreshing = fetchDetail(id);
-  const cached = readCache(`detail:${id}`);
-  if (token !== routeToken) return;
-  // 「用动画盖加载」：放大动画进行中 #content 保持 prepare() 时克隆的那一屏，
-  // 任何要重建详情 DOM 的渲染都排到 onOpened（动画落定）之后 —— 动画中途的
-  // innerHTML 重建 + 封面 hydrate 就是「点一下直接变大」那个掉帧的来源。
-  // 没有过渡动画（重试、无卡片入口）时 detailCard 为空，渲染照旧立即执行。
-  const queueDetailRender = render => {
-    if (!detailCard || detailCard.phase === 'opened' || detailCard.phase === 'closed') { render(); return; }
-    const previous = detailCard.onOpened;
-    detailCard.onOpened = () => { if (typeof previous === 'function') previous(); render(); };
-  };
-  let hasDetailData = Boolean(cached?.data);
-  // 有缓存就先渲染缓存，不等网络 —— 即便这次点击带了过渡动画。
-  // 缓存渲染顶掉的只是首屏那一份列表数据，数据回来后「内容没变就不重建」
-  // 的判断会挡住第二次白做（见下面 changed）。
-  if (hasDetailData) { state.detail = cached.data; state.detailLoading = false; queueDetailRender(() => renderDetail()); }
-  api('bookmark-state', { id }).then(saved => { if (token === routeToken) { state.bookmarked = saved; if (state.detail) queueDetailRender(() => renderDetail()); } }).catch(() => {});
-  try {
-    const fresh = await refreshing;
-    if (token === routeToken) {
-      // 只有「内容真的变了」才重建整页 DOM。
-      //
-      // 卡片点进去时先用手上那份（列表里的 title/cover）渲染了一屏，数据回来后
-      // 原来无条件 renderDetail() —— 又是几十个节点的 innerHTML 重建 + 封面 hydrate，
-      // 正好落在动画结束那几百毫秒里。多数时候标题封面是一样的，这一次重建纯属白做。
-      const changed = !state.detail
-        || state.detail.title !== fresh.title
-        || state.detail.cover !== fresh.cover
-        || state.detail.description !== fresh.description
-        || asArray(state.detail.episodes).length !== asArray(fresh.episodes).length;
-      state.detail = fresh;
-      state.detailLoading = false;
-      if (changed) queueDetailRender(() => renderDetail());
-    }
-  } catch (error) {
-    if (!hasDetailData && token === routeToken) { state.detailLoading = false; renderError(error, 'detail'); }
-  }
-}
-
-function returnFromDetail() {
-  const previous = state.previous || { route: 'home', tab: 'home' };
-  if (!previous.pageNode) { goHome(); return; }
-  ++routeToken;
-  setRoute(previous.route);
-  state.tab = previous.tab;
-  if (previous.route === 'category') state.sub[previous.tab] = previous.sub;
-  state.query = previous.query || '';
-  state.compactHeld = previous.compactHeld;
-  content.replaceChildren(previous.pageNode);
-  state.previous = null;
-  content.querySelectorAll('.film-row,.filter-row,.home-tag-scroll').forEach((row, index) => {
-    row.scrollLeft = previous.horizontalScroll?.[index] || 0;
-  });
-  document.querySelectorAll('#dock [data-nav]').forEach(button =>
-    button.classList.toggle('active', button.dataset.nav === state.tab));
-  scroll.scrollTop = previous.scrollTop || 0;
-  if (previous.route === 'category') compact.innerHTML = compactMarkup();
-  updateCompact();
-  cover.hydrate();
-  if (previous.route === 'home') refreshHomeHistory();
-  if (previous.route === 'category') observeCategoryEnd();
-  if (previous.route === 'listing') observeListingEnd();
-  if (isBannerRoute()) { restoreBannerIndex(); scheduleBannerAuto(); }
-}
 
 window.hgBack = () => {
   // 源设置页挡在最前面。这里必须 return true（告诉 Java「我处理了」）而不是
@@ -3245,49 +2282,12 @@ const feedPlayer = window.HGFeedPlayer.create({
   playerCommand,
   renderDetail, goHome, updateBackEnabled
 });
-function feedCleanup() { feedPlayer.cleanup(); }
-function feedClose() { return feedPlayer.close(); }
-function feedFrom(videoId, episode) { feedPlayer.open(videoId, episode); }
 
 // openPlayer() 已删除（2026-10-16）。它是接原生 PlayerActivity 的入口，
 // 而那个类连同 59 个附属类一起摘掉了（63 个文件 660KB），播放走 feedFrom()。
 // 桥动作 open-player 在 Java 侧还留着编号（packed-switch 的索引不能动），
 // 但 body 已收成空返回，所以就算有人再调也不会启动任何 Activity。
 
-async function loadMoreCategory() {
-  const category = state.category;
-  if (state.route !== 'category' || !category?.nextPage || category.loading || category.refreshing || category.error) return;
-  const token = routeToken;
-  const next = category.nextPage;
-  const id = categoryId();
-  category.loading = true;
-  updateCategoryFooter();
-  try {
-    const page = await api('category', { id, page: next });
-    if (token !== routeToken || state.category !== category || state.route !== 'category' || categoryId() !== id) return;
-    const existing = new Set(asArray(category.items).map(item => String(item.id)));
-    const added = asArray(page.items).filter(item => {
-      const itemId = String(item.id);
-      if (existing.has(itemId)) return false;
-      existing.add(itemId);
-      return true;
-    });
-    category.items.push(...added);
-    category.nextPage = page.items?.length && page.nextPage > next ? page.nextPage : null;
-    const grid = content.querySelector('.category-grid');
-    if (grid && added.length) {
-      grid.insertAdjacentHTML('beforeend', added.map(itemCard).join(''));
-      cover.hydrateList([...grid.querySelectorAll('img[data-cover]')].slice(-added.length), 8);
-    }
-    const count = content.querySelector('.category-count');
-    if (count) count.textContent = `已显示 ${category.items.length} 部`;
-  } catch (error) {
-    if (token === routeToken && state.category === category && state.route === 'category') category.error = true;
-  } finally {
-    category.loading = false;
-    if (state.category === category && state.route === 'category') updateCategoryFooter();
-  }
-}
 
 document.getElementById('search-form').addEventListener('submit', event => {
   event.preventDefault();
@@ -3536,33 +2536,6 @@ document.addEventListener('submit', async event => {
   catch (failure) { error.textContent = failure.message || '修改失败，请稍后重试'; error.hidden = false; button.disabled = false; }
 });
 
-function navigateDock(tab) {
-  if (state.route === 'detail') state.previous = null;
-  if (tab === 'home') goHome();
-  else if (tab === 'library') goLibrary();
-  else goCategory(tab);
-}
-
-function tapDock(button) {
-  const tab = button.dataset.nav;
-  const now = performance.now();
-  if (lastDockTap.tab === tab && now - lastDockTap.at < 320) {
-    const alreadyNavigated = lastDockTap.navigated;
-    lastDockTap = { tab: '', at: 0, navigated: false };
-    const icon = button.querySelector('.nav-icon');
-    icon?.classList.remove('dock-bounce');
-    void icon?.offsetWidth;
-    icon?.classList.add('dock-bounce');
-    icon?.addEventListener('animationend', () => icon.classList.remove('dock-bounce'), { once: true });
-    scroll.scrollTop = 0;
-    if (!alreadyNavigated) navigateDock(tab);
-    return;
-  }
-  const route = tab === 'home' ? 'home' : tab === 'library' ? 'library' : 'category';
-  const navigated = state.route !== route || state.tab !== tab;
-  lastDockTap = { tab, at: now, navigated };
-  if (navigated) navigateDock(tab);
-}
 
 document.addEventListener('click', async event => {
   const campaignButton = event.target.closest('[data-open-campaign]');
@@ -3983,10 +2956,6 @@ api('app-version').then(version => {
 // 404 了，每次冷启动都白打一次外网。现在清单在 android-update.json，通道是活的，
 // 而且原生那边有 12 小时节流（manual:false），重启几次也只打一次网络。
 // 只有真的发现新版本才弹一句提示，同一个版本只弹一次。
-function startHome() {
-  goHome();
-  setTimeout(() => { if (typeof autoCheckUpdate === 'function') autoCheckUpdate(); }, 4000);
-}
 // 年龄门的两颗按钮跟着私密入口一起去掉了（那条命令 Java 侧也删了，
 // 留着监听只会在用户误触时拿到一句「未知请求」）。DOM 仍在 app.html 里，
 // 但 age-gate 没有任何打开路径，恒 hidden。
@@ -4017,7 +2986,6 @@ contentReady
   .catch(error => renderError(error, 'home'));
 
 
-
 let versionTapCount = 0, versionTapAt = 0;
 // 「连点版本号 5 次 → 输入密码 → 过年龄门 → 进私密库」这套入口删了。
 //
@@ -4025,34 +2993,12 @@ let versionTapCount = 0, versionTapAt = 0;
 // 「ssgnb」还是写死在前端的。它唯一的效果是把用户装的每个源都判成私密态、
 // 套上内置源的界面模板。入口一删，unlock-overlay / age-gate 两块 DOM 永远
 // hidden（留着是因为返回键那几处还在读它们的 hidden 状态，删了要连带改逻辑）。
-function closeUnlock() {
-  unlockOverlay.hidden = true;
-  updateBackEnabled();
-}
 
 // ---- 卡片铺满：数据不足一屏时撑开，避免右侧留白 ----
 // 布局是「固定 2 行 + 横向滚动、每列 106px」，412px 宽能排 3 列。
 // 「精选推荐」这类区块如果只返回 4 条，就只占 2 列，右边空掉一块。
 // 这里在「撑满后每格仍不小于原尺寸」时才加 is-fit 让它铺开；列数够多时保持原样滚动。
 let filmFitTimer = 0;
-function fitFilmRows() {
-  if (!content) return;
-  content.querySelectorAll('.film-row').forEach(row => {
-    const columns = Math.ceil(row.children.length / 2);
-    if (!columns) { row.classList.remove('is-fit'); return; }
-    const style = getComputedStyle(row);
-    const gap = parseFloat(style.columnGap) || 10;
-    const padding = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
-    const available = row.clientWidth - padding;
-    const minimum = 106;
-    const needed = columns * minimum + (columns - 1) * gap;
-    row.classList.toggle('is-fit', needed < available - 4);
-  });
-}
-function scheduleFilmFit() {
-  clearTimeout(filmFitTimer);
-  filmFitTimer = setTimeout(fitFilmRows, 60);
-}
 if (content) {
   // 只监听子节点增删，不监听属性，否则自身加的 class 会把回调再触发一遍
   new MutationObserver(scheduleFilmFit).observe(content, { childList: true, subtree: true });
@@ -4148,60 +3094,9 @@ function clearContentCache() {
 // 所以「失败就停在错误页」等于把偶发故障变成永久故障。这里按 2s / 5s / 12s 退避
 // 重试三次，任何一次成功页面就自动恢复；期间用户也能手动点「重新尝试」。
 const HOME_RETRY_DELAYS = [2000, 5000, 12000];
-function scheduleHomeRetry(token, attempt = 0) {
-  if (attempt >= HOME_RETRY_DELAYS.length) return;
-  clearTimeout(scheduleHomeRetry.timer);
-  scheduleHomeRetry.timer = setTimeout(async () => {
-    // 用户已经离开首页就别再打了。但**已经拿到缓存也要重试** —— 缓存不是「更新成功」，
-    // 只是「上次成功过」，而这次失败的内容用户正盯着看。
-    if (token !== routeToken || state.route !== 'home') return;
-    // 刚失败过就别在后台反复撞了。用户主动点还是照常响应（那条路不受冷却约束）——
-    // 区别在于：主动点是「用户要一次答案」，后台重试是「系统自己猜要不要再试」。
-    if (netCoolingDown()) return;
-    try {
-      const fresh = await api('home');
-      if (token !== routeToken || state.route !== 'home') return;
-      state.home = fresh;
-      writeCache('home', fresh);
-      renderHome();
-    } catch (error) {
-      if (token !== routeToken || state.route !== 'home') return;
-      scheduleHomeRetry(token, attempt + 1);
-    }
-  }, HOME_RETRY_DELAYS[attempt]);
-}
 
 // 分类页同理。它比首页更容易超时 —— 20 条列表 JSON 比首页大，而首屏已经
 // 降到 8 条，重试成功率明显更高。失败就自己退避重来，用户不用手点。
-function scheduleCategoryRetry(token, id, attempt = 0) {
-  if (attempt >= HOME_RETRY_DELAYS.length) return;
-  clearTimeout(scheduleCategoryRetry.timer);
-  scheduleCategoryRetry.timer = setTimeout(async () => {
-    if (token !== routeToken || state.route !== 'category' || categoryId() !== id) return;
-    if (netCoolingDown()) return;   // 同上：只拦后台重试
-    // 这里原来有一句 `if (state.category) return;` —— 有缓存就不重试。
-    // 结果是：网络抖一下（unexpected end of stream 在 5G 上很常见），界面停在旧内容，
-    // 只弹一句 toast 就完了。用户看到的就是「点了没反应、内容还是上一个分类」。
-    try {
-      const fresh = await api('category', { id, page: 1 });
-      if (token !== routeToken || state.route !== 'category' || categoryId() !== id) return;
-      state.category = { ...fresh, refreshing: false, loading: false, error: false };
-      state.categoryItems = asArray(fresh.items);
-      writeCache(`category:${id}:1`, fresh);
-      renderCategory(state.compactHeld);
-      reconcileCards(state.categoryItems, () => {
-        if (token !== routeToken || state.route !== 'category') return;
-        const top = scroll.scrollTop;
-        writeCache(`category:${id}:1`, state.category);
-        renderCategory(state.compactHeld);
-        scroll.scrollTop = top;
-      });
-    } catch (error) {
-      if (token !== routeToken || state.route !== 'category') return;
-      scheduleCategoryRetry(token, id, attempt + 1);
-    }
-  }, HOME_RETRY_DELAYS[attempt]);
-}
 
 // 内容缓存跟数据来源绑定：换接口版本时把整批旧缓存丢掉，避免旧结构渲染出错。
 const DATA_SOURCE_VERSION = 'api-v3';
@@ -4218,63 +3113,11 @@ try {
   }
 } catch (error) {}
 
-async function fetchApi(path) {
-  // WebView fetch 会附带 Origin: appassets.androidplatform.net；真机实测该头会让
-  // API 入口连接超时。借用现有 detail 桥传入受控 /api/ 路径，由 Java 原生请求。
-  const started = Date.now();
-  try {
-    const body = await bridgeCall('detail', { id: path });
-    const payload = typeof body === 'string' ? JSON.parse(body) : body;
-    if (payload && payload.status === 0) throw new Error(payload.msg || '接口返回错误');
-    // 信封名也是配置（web.shapes.envelope）。缺省 'data'；配成空串表示
-    // 「整份响应就是我要的那个对象」—— 有的站的接口是裸的，AGE动漫 就是。
-    const envelope = shape.envelopeKey();
-    if (!payload) throw new Error('接口响应为空');
-    const data = envelope ? payload[envelope] : payload;
-    if (data === undefined || data === null) {
-      throw new Error(envelope ? ('接口响应缺少 ' + envelope) : '接口响应为空');
-    }
-    // 成功也要留痕：只记失败的话，出问题时没法区分「接口通了」和「压根没调接口」。
-    console.log('[api] ' + path + ' ok ' + (Date.now() - started) + 'ms ' + (typeof body === 'string' ? body.length + 'B' : 'json'));
-    return data;
-  } catch (error) {
-    console.log('[api] ' + path + ' FAIL ' + (Date.now() - started) + 'ms ' + (error.message || error));
-    throw error;
-  }
-}
 
 // 接口字段 → 原渲染层认的字段
 
-async function callApi(action, args) {
-  const raw = await fetchApi(shape.apiPathFor(action, args));
-  if (action === 'home') return shape.adaptHome(raw);
-  if (action === 'detail') return shape.adaptDetail(raw);
-  if (action === 'episode') return shape.adaptEpisode(raw);
-  if (action === 'search') return shape.adaptSearch(raw);
-  if (action === 'category') return shape.adaptCategory(raw);
-  if (action === 'recommend' || action === 'newest') return shape.adaptCategory(raw);
-  if (action === 'tag-list') return shape.adaptTagList(raw);
-  if (action === 'tags') return shape.adaptTags(raw);
-  return raw;
-}
 
 // 接口挂了就在页面上留一行提示，方便真机上肉眼确认（不影响功能）
 // 接口失败的页面提示。默认静默 —— 失败已经由各页面自己处理（有缓存就继续显示、
 // 没有就出错误页并自动重试），再叠一条红条只会打扰用户。
 // 排查时在 WebView 控制台执行 localStorage.setItem('hgpref:apidebug','1') 打开。
-function noticeApiFailure(text) {
-  console.log('[api] notice: ' + text);
-  let debug = false;
-  try { debug = localStorage.getItem('hgpref:apidebug') === '1'; } catch (error) {}
-  if (!debug) return;
-  let box = document.getElementById('api-note');
-  if (!box) {
-    box = document.createElement('div');
-    box.id = 'api-note';
-    box.style.cssText = 'position:fixed;left:8px;right:8px;bottom:96px;z-index:99999;background:rgba(120,0,0,.85);color:#fff;font:11px/1.5 monospace;padding:6px 8px;border-radius:8px;pointer-events:none';
-    (document.getElementById('app') || document.body).appendChild(box);
-  }
-  box.textContent = '接口请求失败：' + text;
-  clearTimeout(noticeApiFailure.timer);
-  noticeApiFailure.timer = setTimeout(() => box.remove(), 6000);
-}

@@ -40,7 +40,7 @@ adb shell am start -n com.huangguo.mobile/.MainActivity
 work/android/
 ├── app/src/main/
 │   ├── java/com/huangguo/mobile/     36 个类
-│   ├── assets/                        前端（7000+ 行 JS，全部自有）
+│   ├── assets/                        前端（8600 行 JS，全部自有；app.js 按屏拆成 8 个文件）
 │   │   ├── free-nodes.json            内置免费节点池（可热更新，见 NodesFeed）
 │   │   └── hot-update-public.pem      热更验签公钥（私钥不入库）
 │   ├── res/                           只有自己的资源（图标、主题、CSP 配置）
