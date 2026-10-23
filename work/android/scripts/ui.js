@@ -24,7 +24,8 @@
  *   node scripts/ui.js wait "#content .card" --timeout 8000
  *
  * 设备与包名：`HG_SERIAL`（多台时必填）、`HG_PKG`（默认 com.huangguo.mobile）、
- * `HG_CDP_PORT`（默认 9333）。
+ * `HG_CDP_PORT`（默认 9333）、`HG_CDP_TIMEOUT`（单次 evaluate 超时，默认 8000ms；
+ * 走盾后站点的 spider 调用要调到 60000）。
  *
  * ## 一个坑
  *
@@ -39,7 +40,7 @@ const http = require('http');
 
 const PORT = Number(process.env.HG_CDP_PORT || 9333);
 const PKG = process.env.HG_PKG || 'com.huangguo.mobile';
-const TIMEOUT_MS = 8000;
+const TIMEOUT_MS = Number(process.env.HG_CDP_TIMEOUT || 8000);
 
 function die(message) {
   console.error(message);
