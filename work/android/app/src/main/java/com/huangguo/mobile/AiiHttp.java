@@ -68,18 +68,6 @@ public final class AiiHttp {
 
     private static final int CONNECT_TIMEOUT = 8;
     private static final int READ_TIMEOUT = 15;
-    private static final int DOH_TIMEOUT = 5;
-    private static final long TTL_OK = 10 * 60 * 1000L;
-    private static final long TTL_FAIL = 60 * 1000L;
-
-    /** 解析缓存：host → IP 列表 + 到期时刻。 */
-    private static final class Entry {
-        final List<String> ips;
-        final long expireAt;
-        Entry(List<String> ips, long expireAt) { this.ips = ips; this.expireAt = expireAt; }
-    }
-
-    private static final ConcurrentHashMap<String, Entry> CACHE = new ConcurrentHashMap<String, Entry>();
     private static volatile OkHttpClient client;
 
     private static volatile Context appContext;
@@ -202,62 +190,7 @@ public final class AiiHttp {
 
     // ── 预热（②） ─────────────────────────────────────────────────────
     //
-    // 解决的问题：冷启动第一屏要走「DoH 解析 → TLS 握手 → 首字节」这条链，
-    // 实测 TLS 单段就是 0.4~3.0 秒。而这几段跟我们自己的启动流程**没有依赖关系**，
-    // 完全可以重叠：读完配置就在后台开火，等 WebView 起来、源配置闸门过完、
-    // goHome() 真去要数据的时候，多半已经拿回来了。
-    //
-    // 只预热 /api/home 一条 —— 那是首屏唯一必须的。别的都不确定用户会不会点。
-    private static final String WARMUP_PATH = "/api/home";
-    private static final long PREFETCH_TTL = 60 * 1000L;
-
-    private static final class Prefetch {
-        final byte[] body;
-        final long at;
-        Prefetch(byte[] body) { this.body = body; this.at = System.currentTimeMillis(); }
-        boolean fresh() { return System.currentTimeMillis() - at < PREFETCH_TTL; }
-    }
-    private static final ConcurrentHashMap<String, Prefetch> PREFETCH = new ConcurrentHashMap<String, Prefetch>();
-
-    // 正在飞的那一次预热。前端来要同一条时**等它**，而不是另开一次请求。
-    //
-    // 第一版没这个，结果是两路并发：前端发一次真的、预热发一次，谁先回来用谁的。
-    // 实测前端的真请求在预热开始后约 300ms 就发出去了（闸门和 __source:web 那几步
-    // 很快），而预热要跑 1080ms —— 于是真请求先完成，预热白跑一趟，字节丢掉。
-    // 等它的话总共只发一次请求，拿到的还是最早开始的那次。
-    private static final class Warmup {
-        final java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
-        final long at = System.currentTimeMillis();
-        volatile byte[] body;
-        /** 跟 Prefetch 一个道理：这份字节只在 PREFETCH_TTL 内算数。 */
-        boolean fresh() { return System.currentTimeMillis() - at < PREFETCH_TTL; }
-    }
-    private static final ConcurrentHashMap<String, Warmup> WARMING = new ConcurrentHashMap<String, Warmup>();
-    private static final int WARMUP_WAIT_SECONDS = 12;
-
-    /**
-     * 换源计数器。预热线程开工时记下代次，回来对不上就把字节丢掉。
-     *
-     * 预热是后台线程，跑完的时候源可能已经换了（换源只重建 Activity，进程还活着）。
-     * 不做这一下的话，旧源那几百毫秒后落进 PREFETCH，新源的首页正好拿去用。
-     */
-    private static final java.util.concurrent.atomic.AtomicInteger GENERATION =
-            new java.util.concurrent.atomic.AtomicInteger(0);
-
-    // ── DoH 结果的磁盘缓存（③） ───────────────────────────────────────
-    //
-    // 内存里那份 TTL 十分钟，但**冷启动就没了**，每次都要重问一遍 DoH —— 而 DoH
-    // 在整条链的最前面，它慢 300ms 后面全跟着慢。落到 SharedPreferences 之后
-    // 冷启动直接拿上次的地址开连，同时把这次的结果写回去。
-    //
-    // TTL 给 30 分钟：Cloudflare 的 anycast 地址不会几分钟就换，但也不是永久 ——
-    // 域名换 CDN、运营商的就近路由变了都会让旧地址变差。过了期就重新问。
-    private static final String DNS_STORE = "aii-dns";
-    private static final long DISK_TTL = 30 * 60 * 1000L;
-    private static final String SEP = "\u0001";
-
-
-    private AiiHttp() {}
+    // 实现搬到 {@link AiiHttpCache}（2026-10-23）。这里只留两个入口：warmup / 换源重置。
 
     // ── 对外入口 ──────────────────────────────────────────────────────
 
@@ -273,34 +206,9 @@ public final class AiiHttp {
         // 每次请求都记下目标主机。SiteProfile 的 origin 到底有没有被用户配置换掉，
         // 看这一行比往 smali 里插探针可靠 —— 探针写错会把整个类搞成 VerifyError，
         // 而且探针本身没验证过，输出不能当证据。
-        // 有预热在飞就等它 —— 那一次比这次早开始，等它比另开一次快，而且总量上
-        // 只发一次请求。等不到（失败/超时）就照常自己发。
-        final String hotKey = prefetchKey(url);
-        Warmup inflight = WARMING.get(hotKey);
-        if (inflight != null) {
-            long waited = System.currentTimeMillis();
-            boolean settled = false;
-            try {
-                settled = inflight.done.await(WARMUP_WAIT_SECONDS, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-            if (settled && inflight.body != null && inflight.fresh()) {
-                log("等到预热结果 " + pathOfUrl(url) + " " + inflight.body.length + " 字节，等了 "
-                        + (System.currentTimeMillis() - waited) + "ms");
-                return inflight.body;
-            }
-            log("预热没等到（settled=" + settled + "），自己发一次");
-        }
-
-        Prefetch hot = PREFETCH.remove(hotKey);
-        if (hot != null) {
-            if (hot.fresh()) {
-                log("预热结果直接命中 " + pathOfUrl(url) + " " + hot.body.length + " 字节");
-                return hot.body;
-            }
-            log("预热结果已过期，照常请求 " + pathOfUrl(url));
-        }
+        // 预热有结果就直接用（等它、或取已经落下的那份），没有就自己发。
+        byte[] hot = AiiHttpCache.take(url);
+        if (hot != null) return hot;
         return fetchUncached(url, profile);
     }
 
@@ -463,6 +371,7 @@ public final class AiiHttp {
     public static void init(Context context) {
         if (context != null && appContext == null) {
             appContext = context.getApplicationContext();
+            AiiHttpDns.init(appContext);
             // 路由记忆的落盘位置。两个进程（主 + :spider）都各自 init 一遍，
             // 文件 + mtime 检查保证两边读到同一份。
             RouteMemory.init(new java.io.File(appContext.getFilesDir(), "route-memory.json"));
@@ -474,209 +383,27 @@ public final class AiiHttp {
     }
 
     /**
-     * 后台预热首屏。
-     *
-     * 在源配置刚读出来的时候调用（UserSource.handle 的 get 分支），这时 WebView
-     * 还在载入、设置页闸门还没过完、goHome() 还没发请求。等那一切就绪，这边
-     * 「DoH → TLS → 首字节」那条链多半已经跑完了。
-     *
-     * 拿到的字节留着，前端真来要 /api/home 时直接给（60 秒内有效）。
-     * 失败什么都不影响 —— 前端会照常发一次真请求。
+     * 后台预热首屏（实现与踩过的坑见 {@link AiiHttpCache}）。
      */
     public static void warmup(final SiteProfile profile) {
         if (profile == null || appContext == null) return;
-        final String path = warmPath(profile);
-        if (path == null) return;                                // 没有可预热的路径（spider 源）
-        final String hotKey = prefetchKey(path);
-        final int gen = GENERATION.get();
-        Prefetch cached = PREFETCH.get(hotKey);
-        if (cached != null && cached.fresh()) return;            // 刚预热过，别重复
-        Warmup previous = WARMING.get(hotKey);
-        if (previous != null) {
-            if (previous.fresh()) return;                        // 在飞的 / 刚完成的
-            WARMING.remove(hotKey, previous);                    // 过期的腾位子
-        }
-        final Warmup warm = new Warmup();
-        if (WARMING.putIfAbsent(hotKey, warm) != null) return;   // 已经有人在预热了
-        Thread worker = new Thread(new Runnable() {
-            @Override public void run() {
-                try {
-                    long started = System.currentTimeMillis();
-                    byte[] body = prefetchBody(profile);
-                    // 代次对不上 = 跑到一半换源了，这份字节属于上一个源，丢掉。
-                    // 不丢的话它几百毫秒后落进 PREFETCH，新源的首页正好拿去用。
-                    if (body != null && body.length > 0 && gen == GENERATION.get()) {
-                        warm.body = body;
-                        PREFETCH.put(hotKey, new Prefetch(body));
-                        log("预热完成 " + path + " " + body.length + " 字节 "
-                                + (System.currentTimeMillis() - started) + "ms");
-                    } else if (body != null && body.length > 0) {
-                        log("预热作废（期间换过源）" + body.length + " 字节");
-                    }
-                } catch (Throwable e) {
-                    log("预热失败（前端会照常发真请求）：" + e.getClass().getSimpleName() + " " + e.getMessage());
-                } finally {
-                    // 无论成败都要放行，否则等在这条上的人会一直等到超时。
-                    warm.done.countDown();
-                }
+        AiiHttpCache.warmup(profile, new AiiHttpCache.Fetcher() {
+            @Override public byte[] fetch(String url, SiteProfile p) throws Exception {
+                return fetchUncached(url, p);
             }
-        }, "aii-warmup");
-        worker.setDaemon(true);
-        worker.start();
+        });
     }
 
     /**
      * 换源之后必须调一次：把**绑在源上**的进程内状态全部作废。
      *
-     * 为什么必须有这一步：换源走的是 `MainActivity.recreate()` —— 只重建 Activity，
-     * **进程活着**。而 WARMING / PREFETCH / 连接池都是 static，于是新源会拿到旧源的东西。
-     * 实测症状：从 cms-xml 切回黄果，首页立刻弹「内容更新失败，正在显示缓存」，日志是
-     *
-     *     [http] 等到预热结果 /api/home 5164 字节，等了 0ms
-     *
-     * 那 5164 字节是上一个源的首页 —— WARMING 里躺着的、永远不过期的那一份。
-     * （WARMING 里放的是 Warmup 对象，本来只当「完成信号」用，但它带着 body，
-     *   而 get() 先查 WARMING 再查 PREFETCH —— 结果它事实上成了一层没有 TTL、
-     *   也不区分来源的缓存。）
-     *
-     * 连接池同理：client() 里 `new SmartDns(profile)` 把 profile 捕获进去了，
-     * 缓存下来的那个客户端是绑在旧源上的。
+     * <p>预热／在飞那两摊在 {@link AiiHttpCache#reset}，这里只负责连接池 —— 那个
+     * client 把 profile 捕获进去了（见 {@code client()}），不清就还连着旧源。
      */
     public static void resetForSourceChange() {
-        int wasWarming = WARMING.size();
-        int wasPrefetch = PREFETCH.size();
-        GENERATION.incrementAndGet();
-        WARMING.clear();
-        PREFETCH.clear();
+        int[] cleared = AiiHttpCache.reset();
         invalidateClients();
-        log("换源：清掉预热 " + wasPrefetch + " 条、在飞 " + wasWarming + " 条，连接池作废");
-    }
-
-    /**
-     * 预热的键 —— 把「完整 URL」和「内部路径」归一到同一个。
-     *
-     * 这一步踩过：预热存的是 /api/home（内部路径），而前端来要的是
-     * https://cab3f.nt17g20k.cc/api/home（SiteRepository 拼过 origin 的完整地址）。
-     * 两边键不一样，于是 WARMING.get() 永远返回 null，等预热的逻辑一次都没走到 ——
-     * 表现是两路并发，日志里两条 GET，预热白跑。
-     */
-    private static String prefetchKey(String url) {
-        if (url == null) return "";
-        if (url.startsWith("/api/")) return url;
-        int scheme = url.indexOf("://");
-        if (scheme < 0) return url;
-        int slash = url.indexOf('/', scheme + 3);
-        return slash < 0 ? url : url.substring(slash);
-    }
-
-    /**
-     * 预热要取的那一坨。
-     *
-     * 不能直接把 /api/home 丢给 fetchUncached —— 那是个**内部路径**，不是 URL，
-     * 所以这里拼成完整地址再取：
-     *   · rest：origin + 路径
-     *   · spider 源没有 origin，下面那条闸会直接拒（前端根本不走预热这条路）
-     */
-    private static byte[] prefetchBody(SiteProfile profile) throws Exception {
-        String path = warmPath(profile);
-        if (path == null) throw new IOException("这个源没有可预热的首页（spider 源）");
-        // ⚠️ **只预热首页。** 有些站的播放地址带一次性签名、会过期，预热出来的
-        //    地址等用户真去点的时候可能已经废了 —— 那种地址必须实时取。
-        //    首页没有这个问题（它只是元数据），预热是安全的。
-        // 绝对地址直接用，相对路径才拼 origin —— 和 SiteRepository.detail 那条规矩一致。
-        if (path.startsWith("https://")) return fetchUncached(path, profile);
-        String origin = profile == null ? null : profile.origin;
-        if (origin == null || origin.length() == 0) throw new IOException("配置里没有 origin，不预热");
-        return fetchUncached(origin + path, profile);
-    }
-
-    /**
-     * 预热哪一条：**配置里 paths.home 写的是什么，就预热什么**。
-     *
-     * 上一版这里写死 `/api/home`。对内置那套和黄果源凑巧是对的（两个源的
-     * paths.home 都叫 /api/home），但它押的是一个巧合 —— 配置里把 home 指到
-     * 别处（或者干脆是一条绝对地址），预热就会去敲一个不存在的地址，白打一次，
-     * 前端等不到预热结果还是得自己再发一次，预热等于没有。
-     *
-     * 键的归一化在 prefetchKey 里做，两边（预热存的、get() 来取的）走的是同一个
-     * 函数，所以路径写什么形式都对得上。
-     */
-    private static String warmPath(SiteProfile profile) {
-        try {
-            JSONObject web = profile == null ? null : profile.object("web");
-            JSONObject paths = web == null ? null : web.optJSONObject("paths");
-            String home = paths == null ? "" : paths.optString("home", "");
-            if (home.length() > 0) return home;
-            // spider 源没有 REST 首页。老代码在这里回落 /api/home，于是每次启动都朝
-            // spider 宿主白敲一条不存在的路径（dozagonza 实测
-            //   预热失败（前端会照常发真请求）：IOException HTTP 404
-            //   @ https://www.dozagonza.com/api/home
-            // ），白付一次 TLS + 一次 404，还往日志里塞噪音。没写 home 就当没有。
-            Object spider = web == null ? null : web.opt("spider");
-            boolean hasSpider = spider != null && spider != JSONObject.NULL
-                    && String.valueOf(spider).length() > 0;
-            if (hasSpider) return null;
-        } catch (Throwable ignored) {}
-        return WARMUP_PATH;
-    }
-
-    // ── DoH 结果的磁盘缓存 ────────────────────────────────────────────
-
-    private static SharedPreferences store() {
-        Context context = appContext;
-        return context == null ? null : context.getSharedPreferences(DNS_STORE, Context.MODE_PRIVATE);
-    }
-
-    private static void remember(String host, List<String> ips) {
-        SharedPreferences store = store();
-        if (store == null || ips == null || ips.isEmpty()) return;
-        try {
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < ips.size(); i++) {
-                if (sb.length() > 0) sb.append(';');
-                sb.append(ips.get(i));
-            }
-            store.edit().putString(host, System.currentTimeMillis() + ";" + sb).apply();
-        } catch (Throwable ignored) {}
-    }
-
-    private static List<String> recall(String host) {
-        SharedPreferences store = store();
-        if (store == null) return null;
-        try {
-            String raw = store.getString(host, null);
-            if (raw == null) return null;
-            String[] parts = raw.split(";");
-            if (parts.length < 2) return null;
-            if (System.currentTimeMillis() - Long.parseLong(parts[0]) > DISK_TTL) return null;
-            List<String> ips = new ArrayList<String>();
-            for (int i = 1; i < parts.length; i++) if (parts[i].length() > 0) ips.add(parts[i]);
-            return ips.isEmpty() ? null : ips;
-        } catch (Throwable e) {
-            return null;
-        }
-    }
-
-    /**
-     * 磁盘里那份直接拿来用，同时**后台重问一次**。
-     *
-     * 不这么做的话，一旦地址真的变了，用户会一直连到旧地址上失败 —— 磁盘这份
-     * 是「省一次 DoH」，不是「永远信它」。后台刷新保证下一次冷启动拿到的是新的。
-     */
-    private static void refreshInBackground(final String host, final SiteProfile profile) {
-        Thread worker = new Thread(new Runnable() {
-            @Override public void run() {
-                try {
-                    List<String> fresh = lookupDoh(host, profile);
-                    if (fresh.isEmpty()) return;
-                    CACHE.put(host, new Entry(fresh, System.currentTimeMillis() + TTL_OK));
-                    remember(host, fresh);
-                    log("DoH 后台刷新 " + host + " → " + fresh.size() + " 个地址");
-                } catch (Throwable ignored) {}
-            }
-        }, "aii-doh-refresh");
-        worker.setDaemon(true);
-        worker.start();
+        log("换源：清掉预热 " + cleared[1] + " 条、在飞 " + cleared[0] + " 条，连接池作废");
     }
 
     /**
@@ -807,7 +534,7 @@ public final class AiiHttp {
         return false;
     }
 
-    /** 把路由落到 client 上：direct 现拼无代理 client（保留 SmartDns），proxy 兜 proxiedClient。 */
+    /** 把路由落到 client 上：direct 现拼无代理 client（保留 AiiHttpDns），proxy 兜 proxiedClient。 */
     private static OkHttpClient clientFor(OkHttpClient http, String route, SiteProfile profile) {
         if (RouteMemory.ROUTE_DIRECT.equals(route)) {
             return new OkHttpClient.Builder()
@@ -905,7 +632,7 @@ public final class AiiHttp {
      * <ul>
      *   <li>{@code cookieOut} 收 {@code Set-Cookie}（见上一段）。</li>
      *   <li>{@code profile} <b>当前源配置</b>，只为一件事存在：路由兜底要拿它建
-     *       {@link SmartDns}。传 null 就等于「这次请求不知道源声明了什么」，
+     *       {@link AiiHttpDns}。传 null 就等于「这次请求不知道源声明了什么」，
      *       兜底会退回 {@code like.dns()} —— 见 {@link #dnsFor}。</li>
      * </ul>
      *
@@ -1117,7 +844,7 @@ public final class AiiHttp {
      * 表单体的朴素 POST，**带上当前源配置**（{@code profile}），外加 cookie 回传。
      *
      * <p>{@code profile} 只在一处起作用：请求命中「源声明要走代理」而手里的 client
-     * 没有代理时，兜底建 client 需要它才能挂上 {@link SmartDns}（DoH + 配置里钉死的
+     * 没有代理时，兜底建 client 需要它才能挂上 {@link AiiHttpDns}（DoH + 配置里钉死的
      * 地址）。传 null 不是错误，只是退回普通 DNS —— 但 spider 的 POST 全部在这条路上
      * （OpenList 三个接口都是 POST），所以源声明的东西必须能传进来。
      *
@@ -1278,17 +1005,17 @@ public final class AiiHttp {
         return built;
     }
 
-    /** 主客户端：带 SmartDns（DoH + 配置钉死的地址）。 */
+    /** 主客户端：带 AiiHttpDns（DoH + 配置钉死的地址）。 */
     private static OkHttpClient client(SiteProfile profile) {
-        return clientFor(false, CONNECT_TIMEOUT, READ_TIMEOUT, new SmartDns(profile), effectiveRoute());
+        return clientFor(false, CONNECT_TIMEOUT, READ_TIMEOUT, AiiHttpDns.dns(profile), effectiveRoute());
     }
 
     /** 主客户端的 HTTP/1.1 变体。 */
     private static OkHttpClient http1Client(SiteProfile profile) {
-        return clientFor(true, CONNECT_TIMEOUT, READ_TIMEOUT, new SmartDns(profile), effectiveRoute());
+        return clientFor(true, CONNECT_TIMEOUT, READ_TIMEOUT, AiiHttpDns.dns(profile), effectiveRoute());
     }
 
-    /** 朴素客户端：指定超时、不带 SmartDns。 */
+    /** 朴素客户端：指定超时、不带 AiiHttpDns。 */
     private static OkHttpClient plainClient(int timeoutSeconds) {
         return clientFor(false, timeoutSeconds, timeoutSeconds, null, effectiveRoute());
     }
@@ -1305,7 +1032,7 @@ public final class AiiHttp {
      * 这不是分流逻辑，是纠错：分流只该在 {@link NetRoute} 里判一次。
      */
     private static OkHttpClient proxiedClient(SiteProfile profile, OkHttpClient like) {
-        Dns dns = profile != null ? new SmartDns(profile) : like.dns();
+        Dns dns = profile != null ? AiiHttpDns.dns(profile) : like.dns();
         return clientFor(false,
                 (int) (like.connectTimeoutMillis() / 1000),
                 (int) (like.readTimeoutMillis() / 1000),
@@ -1397,19 +1124,19 @@ public final class AiiHttp {
      * 两种毛病：
      * <ul>
      *   <li>{@code rawWith} 无条件 {@code .dns(IPV4_FIRST)} —— 把传进来 client 的
-     *       {@link SmartDns}（DoH + 配置里钉死的地址）盖掉了。GET/POST 全族都走这条，
+     *       {@link AiiHttpDns}（DoH + 配置里钉死的地址）盖掉了。GET/POST 全族都走这条，
      *       所以「直连表里的域名突然解析不出配置钉死的那个 IP」随时可能发生，
      *       而症状是「这个站有时候能连有时候不能」，看起来像站点抽风。</li>
-     *   <li>{@code getWith} 只在 {@code instanceof SmartDns} 时才保留，否则连
+     *   <li>{@code getWith} 只在 {@code instanceof AiiHttpDns} 时才保留，否则连
      *       {@code IPV4_FIRST} 都不给，等于新 client 回到 OkHttp 默认 DNS。</li>
      * </ul>
      *
      * <p>决策就一条，按优先级：
      * <ol>
-     *   <li>手里的是 {@link SmartDns} → <b>原样保留</b>。它已经包含 DoH、配置钉死的
+     *   <li>手里的是 {@link AiiHttpDns} → <b>原样保留</b>。它已经包含 DoH、配置钉死的
      *       地址，比任何外层包装都更懂这个源。</li>
-     *   <li>手里传了 {@code profile} 而 client 身上却不是 SmartDns → 现建一个
-     *       {@link SmartDns}。这就是 POST 那条路上原来的洞：{@code plainClient} 的 DNS
+     *   <li>手里传了 {@code profile} 而 client 身上却不是 AiiHttpDns → 现建一个
+     *       {@link AiiHttpDns}。这就是 POST 那条路上原来的洞：{@code plainClient} 的 DNS
      *       是 OkHttp 默认的，源声明的钉死地址从来没生效过。</li>
      *   <li>其它情况 → {@link #IPV4_FIRST}。<b>不能省</b>：IPv6 单栈网络上 OkHttp 不会
      *       Happy Eyeballs 降级，拿到 AAAA 就一路连到超时（见 IPV4_FIRST 那段实测）。</li>
@@ -1419,7 +1146,7 @@ public final class AiiHttp {
      */
     static Dns dnsFor(OkHttpClient http, SiteProfile profile) {
         Dns current = http == null ? null : http.dns();
-        if (current instanceof SmartDns) return current;
+        if (AiiHttpDns.hasOwnDns(current)) return current;
         // profile 给了就按源的解析规则来 —— DoH 和 hosts 钉死都挂在这上面。
         if (profile != null) return smartDnsFor(profile);
         // 连 profile 都没有（老调用方 / 探针）才退回 IPv4 优先。不是默认值，是兜底。
@@ -1427,18 +1154,18 @@ public final class AiiHttp {
     }
 
     /**
-     * 造一个 {@link SmartDns}。**唯一目的是让包外能拿到这个类型的实例** ——
-     * {@code SmartDns} 是私有嵌套类，而 {@link #dnsFor} 的判据是
-     * {@code instanceof SmartDns}，单测不造一个真的就没法断言「保留」那条路径。
+     * 造一个 {@link AiiHttpDns}。**唯一目的是让包外能拿到这个类型的实例** ——
+     * {@code AiiHttpDns} 是私有嵌套类，而 {@link #dnsFor} 的判据是
+     * {@code instanceof AiiHttpDns}，单测不造一个真的就没法断言「保留」那条路径。
      *
-     * <p>不把 {@code SmartDns} 改成包级可见：它的 {@code lookup} 会走 DoH 和磁盘缓存，
+     * <p>不把 {@code AiiHttpDns} 改成包级可见：它的 {@code lookup} 会走 DoH 和磁盘缓存，
      * 是个有副作用的实现类，暴露出去等于邀请别处直接 new。一个工厂方法足够。
      *
      * <p>构造本身不碰网络也不碰 SharedPreferences —— profile 只是存着，
      * 真正的解析发生在 {@code lookup} 里。
      */
     static Dns smartDnsFor(SiteProfile profile) {
-        return new SmartDns(profile);
+        return AiiHttpDns.dns(profile);
     }
 
     // ── 代理的读写与解析 ──────────────────────────────────────────────
@@ -1557,263 +1284,6 @@ public final class AiiHttp {
     }
 
 
-    // ── DNS：系统解析 或 DoH ──────────────────────────────────────────
-
-    /**
-     * OkHttp 的解析钩子。返回**多个**地址时 OkHttp 会自己轮着试 ——
-     * 这是选 OkHttp 而不是 HttpURLConnection 的另一个理由：后者只试第一个。
-     */
-    private static final class SmartDns implements Dns {
-        private final SiteProfile profile;
-        SmartDns(SiteProfile profile) { this.profile = profile; }
-
-        @Override public List<InetAddress> lookup(String hostname) throws UnknownHostException {
-            // ── 配置里钉死的地址优先 ──────────────────────────────────────
-            // 有些入口域名，三条解析路径给出的都是不能用的答案：
-            //   · 运营商 DNS  → 一个证书已过期的 IP
-            //   · 阿里 DoH    → 0.0.0.0
-            //   · 腾讯 DoH    → 5 个真地址，但只有一两个偶尔能连上
-            // 这种时候任何「解析」都是碰运气，唯一能做的是把能用那个写死。
-            // 配置顶层写：  "hosts": { "例子.com": ["1.2.3.4", "5.6.7.8"] }
-            List<String> pinned = pinned(hostname, profile);
-            // 钉 IP 是「优先提示」不是「唯一答案」（2026-10-19 教训）：
-            // 之前 pinned 命中就直接 return —— 钉的 IP 哪天过期（站点换 CDN 是
-            // 常态），域名就安静地死掉，没有任何回落。现在解析出全部候选后把
-            // 钉住的地址排在**最前面**，OkHttp 按顺序试：钉 IP 活着就是最快路径，
-            // 死了自动落回 DoH/系统解析，慢一点但不会再死。
-            List<InetAddress> pinnedAddrs = new ArrayList<InetAddress>();
-            if (!pinned.isEmpty()) {
-                for (int i = 0; i < pinned.size(); i++) {
-                    try { pinnedAddrs.add(InetAddress.getByName(pinned.get(i))); } catch (Exception ignored) {}
-                }
-            }
-            if (pinnedAddrs.isEmpty()) {
-                // 没有可用钉 IP：走原有路径（DoH/系统）并原样返回。
-                List<InetAddress> plain = resolveFallback(hostname, profile);
-                if (plain != null) return plain;
-                return Dns.SYSTEM.lookup(hostname);
-            }
-            List<InetAddress> resolved = resolveFallback(hostname, profile);
-            if (resolved == null || resolved.isEmpty()) {
-                log("钉住 " + hostname + " → " + pinnedAddrs.size() + " 个地址（解析无结果，直接用钉 IP）");
-                return pinnedAddrs;
-            }
-            // 钉 IP 在前，解析结果在后；去重后交给 OkHttp 按序试。
-            List<InetAddress> out = new ArrayList<InetAddress>(pinnedAddrs.size() + resolved.size());
-            out.addAll(pinnedAddrs);
-            for (InetAddress addr : resolved) {
-                if (!out.contains(addr)) out.add(addr);
-            }
-            log("钉住 " + hostname + " → " + pinnedAddrs.size() + " 个优先 + 解析 "
-                    + resolved.size() + " 个候选");
-            return out;
-        }
-    }
-
-    /**
-     * DoH/系统解析的老路径，从 lookup 里拆出来给「钉 IP 优先 + 回落」复用。
-     * 返回 null 表示 DoH 没开（调用方走系统解析）；空表 = DoH 无结果（同样回落）。
-     */
-    private static List<InetAddress> resolveFallback(String hostname, SiteProfile profile) throws UnknownHostException {
-        if (!dohEnabled(profile)) return null;
-        List<String> ips = resolve(hostname, profile);
-        if (ips.isEmpty()) return null;
-        List<InetAddress> out = new ArrayList<InetAddress>(ips.size());
-        for (int i = 0; i < ips.size(); i++) {
-            try {
-                out.add(InetAddress.getByName(ips.get(i)));
-            } catch (Exception e) {
-                log("地址无法构造：" + ips.get(i));
-            }
-        }
-        return out;
-    }
-
-    /**
-     * 配置里有没有给这个域名钉死地址。
-     *
-     * 读的是顶层 `hosts`：`{ "域名": ["1.2.3.4", …] }`。空/没写都返回空表，
-     * 走原来的 DoH 那条路 —— 这是个例外通道，不该影响别的源。
-     */
-    private static List<String> pinned(String host, SiteProfile profile) {
-        List<String> out = new ArrayList<String>();
-        if (profile == null || host == null) return out;
-        try {
-            JSONObject hosts = profile.object("hosts");
-            if (hosts == null) return out;
-            JSONArray list = hosts.optJSONArray(host);
-            if (list == null) return out;
-            for (int i = 0; i < list.length(); i++) {
-                String ip = list.optString(i, "").trim();
-                if (ip.length() > 0 && usable(ip)) out.add(ip);
-            }
-        } catch (Throwable ignored) {}
-        return out;
-    }
-
-    static List<String> resolve(String host, SiteProfile profile) {
-        Entry cached = CACHE.get(host);
-        if (cached != null && System.currentTimeMillis() < cached.expireAt) return cached.ips;
-
-        // 内存里没有就翻磁盘。冷启动那一次 DoH 在整条链的最前面，
-        // 省掉它等于把首屏的起跑线往前挪 200~500ms。
-        List<String> fromDisk = recall(host);
-        if (fromDisk != null) {
-            CACHE.put(host, new Entry(fromDisk, System.currentTimeMillis() + TTL_OK));
-            log("DoH 磁盘命中 " + host + " → " + fromDisk.size() + " 个地址");
-            refreshInBackground(host, profile);
-            return fromDisk;
-        }
-
-        List<String> fromDoh = lookupDoh(host, profile);
-        long ttl = fromDoh.isEmpty() ? TTL_FAIL : TTL_OK;
-        CACHE.put(host, new Entry(fromDoh, System.currentTimeMillis() + ttl));
-        if (!fromDoh.isEmpty()) remember(host, fromDoh);
-        return fromDoh;
-    }
-
-    private static List<String> lookupDoh(String host, SiteProfile profile) {
-        JSONArray servers = dohServers(profile);
-        LinkedHashSet<String> merged = new LinkedHashSet<String>();
-        if (servers == null) return new ArrayList<String>(merged);
-
-        // 多问一家再合并：实测阿里和腾讯在同一时刻会给不同答案（就近路由），
-        // 只信一家的结果集可能不全，漏掉的那个恰好能用就亏了。
-        for (int i = 0; i < servers.length(); i++) {
-            JSONObject server = servers.optJSONObject(i);
-            if (server == null) continue;
-            try {
-                merged.addAll(queryOne(server, host, profile));
-            } catch (Exception e) {
-                log("DoH " + server.optString("name", "?") + " 失败：" + e);
-            }
-            if (merged.size() >= 3) break;
-        }
-        return new ArrayList<String>(merged);
-    }
-
-    /**
-     * 查一家 DoH。这里走的是**另一条 Dns**：把该服务商的域名钉死到配置里的 IP。
-     *
-     * 这正是 OkHttp 好用的地方 —— URL 写的是 https://dns.alidns.com/resolve，
-     * 域名还在，所以 SNI 和证书校验都是对的；只有「解析」被换成了配置里的地址。
-     * 换成 HttpURLConnection 就得自己拼 SNI，也就是之前失败的那条路。
-     */
-    private static List<String> queryOne(final JSONObject server, final String host, SiteProfile profile)
-            throws Exception {
-        String url = server.optString("url", "");
-        JSONArray ips = server.optJSONArray("ips");
-        if (url.length() == 0 || ips == null || ips.length() == 0) throw new IOException("DoH 配置不完整");
-
-        final List<InetAddress> pinned = new ArrayList<InetAddress>();
-        for (int i = 0; i < ips.length(); i++) {
-            String ip = ips.optString(i, "");
-            if (ip.length() == 0) continue;
-            try { pinned.add(InetAddress.getByName(ip)); } catch (Exception ignored) {}
-        }
-        if (pinned.isEmpty()) throw new IOException("DoH 的 ips 全是无效地址");
-
-        // 钉死的解析器：只认配置里的地址，不查系统。DoH 服务器必须先把 IP 写好，
-        // 否则「解析一个域名」的前提是「先解析 DoH 服务器的域名」，递归了。
-        Dns pinnedDns = new Dns() {
-            @Override public List<InetAddress> lookup(String hostname) {
-                return pinned;
-            }
-        };
-
-        OkHttpClient dohClient = new OkHttpClient.Builder()
-                .dns(pinnedDns)
-                .connectTimeout(DOH_TIMEOUT, TimeUnit.SECONDS)
-                .readTimeout(DOH_TIMEOUT, TimeUnit.SECONDS)
-                .build();
-
-        String endpoint = url + (url.indexOf('?') >= 0 ? "&" : "?") + "name=" + host + "&type=A";
-        Request request = new Request.Builder()
-                .url(endpoint)
-                .header("accept", "application/dns-json")
-                .build();
-
-        Response response = dohClient.newCall(request).execute();
-        try {
-            if (!response.isSuccessful()) throw new IOException("DoH HTTP " + response.code());
-            ResponseBody body = response.body();
-            if (body == null) return new ArrayList<String>();
-            return parseAnswers(body.string());
-        } finally {
-            response.close();
-        }
-    }
-
-    /** 解析 RFC 8484 的 JSON 应答：只看 Answer[] 里 type==1 的。 */
-    private static List<String> parseAnswers(String body) {
-        List<String> out = new ArrayList<String>();
-        try {
-            JSONArray answer = new JSONObject(body).optJSONArray("Answer");
-            if (answer == null) return out;
-            for (int i = 0; i < answer.length(); i++) {
-                JSONObject record = answer.optJSONObject(i);
-                if (record == null) continue;
-                if (record.optInt("type", 0) != 1) continue;
-                String data = record.optString("data", "");
-                // 只要 IPv4：这条链路上没通 v6，返回去反而让 OkHttp 白试一轮。
-                if (data.length() == 0 || data.indexOf(':') >= 0) continue;
-                if (!usable(data)) continue;
-                if (!out.contains(data)) out.add(data);
-            }
-        } catch (Exception e) {
-            log("DoH 应答解析失败：" + e);
-        }
-        return out;
-    }
-
-    /**
-     * 这个 A 记录能不能拿去连。
-     *
-     * ── 为什么必须筛 ────────────────────────────────────────────────────
-     * 实测阿里 DoH（dns.alidns.com）对 `cab3f.nt17g20k.cc` 的应答是
-     * **`0.0.0.0`** —— 那不是「没查到」，那是运营商的毒答案，把它当地址用
-     * 只会去连一个必然失败的地方。
-     *
-     * 而 lookupDoh 是「多问一家再合并」，阿里先回 0.0.0.0 会让它凑不满 3 个，
-     * 于是继续问腾讯、把腾讯那几个真地址也加进来 —— 结果列表变成
-     * `[0.0.0.0, 43.229.39.228, …]`，**毒答案排在第一个**，每次请求都先白试
-     * 一遍它。筛掉之后 OkHttp 才会从能用那个开始试。
-     */
-    private static boolean usable(String ip) {
-        if (ip == null) return false;
-        String s = ip.trim();
-        if (s.length() == 0) return false;
-        if ("0.0.0.0".equals(s) || "127.0.0.1".equals(s)) return false;
-        if (s.startsWith("0.") || s.startsWith("127.")) return false;
-        // 255.255.255.255 之类：首字节全 1 的广播地址
-        if (s.startsWith("255.")) return false;
-        return true;
-    }
-
-    private static JSONArray dohServers(SiteProfile profile) {
-        JSONObject doh = dohConfig(profile);
-        return doh == null ? null : doh.optJSONArray("servers");
-    }
-
-    private static JSONObject dohConfig(SiteProfile profile) {
-        if (profile == null) return null;
-        try {
-            return profile.object("doh");
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    /**
-     * DoH 默认关闭。当前 origin（cab3f.nt17g20k.cc）在手机系统解析上是干净的，
-     * 五个入口 IP 也全部可达，开着只是多一跳延迟。
-     * 什么时候该打开：origin 换成被污染的域名（比如 huangguoai.com）之后，
-     * 至少还能拿到完整的地址列表而不是系统给的那一个。
-     */
-    private static boolean dohEnabled(SiteProfile profile) {
-        JSONObject doh = dohConfig(profile);
-        return doh != null && doh.optBoolean("enabled", false);
-    }
 
     /**
      * 包内可见 —— 适配器也要往这条流里写（比如抓取失败、采集站匹配不上，

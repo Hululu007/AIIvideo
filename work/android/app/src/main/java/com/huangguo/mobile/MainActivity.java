@@ -598,16 +598,8 @@ public final class MainActivity extends Activity {
     }
 
     public float backTouchFraction(BackEvent backEvent) {
-        int i;
-        float touchX = backEvent.getTouchX();
-        int swipeEdge = backEvent.getSwipeEdge();
-        if (Float.isNaN(touchX) || swipeEdge == 2 || (i = this.backViewWidth) == 0) {
-            return backEvent.getProgress();
-        }
-        float f = i;
-        int i2 = this.backViewLeft;
-        float fMax = Math.max(0.0f, swipeEdge == 1 ? (i2 + f) - touchX : touchX - i2);
-        return Math.min(1.0f, (fMax + Math.min(this.backLeadPx, 0.35f * fMax)) / f);
+        return BackGesture.fraction(backEvent.getTouchX(), backEvent.getSwipeEdge(),
+                backEvent.getProgress(), this.backViewWidth, this.backViewLeft, this.backLeadPx);
     }
 
     public void sendLatestBackProgress() {
