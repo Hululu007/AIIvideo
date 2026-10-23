@@ -169,7 +169,7 @@ for (String str12 : (List<String>) linkedHashMap2.get(str9)) {
 
 **如果需要某个常量但本地类里没有**：原始 APK 和解包树都不在树里了
 （`cz_repack/` 和 `chengzi-v0.3.15.apk` 都已删，apktool 链路整体退役）。
-现在只有两条路：去 `patches/` 里找当时抄下来的值，或者从 Releases 下已发布的
+现在只有两条路：翻 git 历史里那段补丁集（`git log -- work/shells/patches`），或者从 Releases 下已发布的
 APK 反编译那一个类。**不要瞎猜值** —— 常量猜错的表现是运行时 403 或签名不对，
 和编译错误完全两种难查。
 
