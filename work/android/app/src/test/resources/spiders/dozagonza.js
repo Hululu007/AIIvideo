@@ -476,6 +476,28 @@
         throw new Error('星空影视 player_aaaa 不是合法 JSON（id=' + id + '）');
       }
 
+      // ── 「站点静默换集」守卫（2026-10-23）──────────────────────────
+      //
+      // 站点对不存在的线路/集号不报错，直接回第 1 集的播放页。嫁金钗那次就是
+      // 这样：点第 15 集、播第 1 集，十五集全是同一份。光靠请求地址发现不了，
+      // 但播放页里的 player_aaaa 会写自己到底是哪一集（sid / nid）—— 对不上就
+      // 说明拿到的不是你要的那一集，宁可报错也别让用户看错内容。
+      //
+      // 实测三种页面的字段：
+      //   /play/<id>/8/15.html（对的）  sid=8  nid=15
+      //   /play/<id>/1/15.html（回退）  sid=8  nid=1     ← 请求的 1 线路不存在
+      //   /play/<id>/3/15.html（另一条） sid=3  nid=15
+      var gotSid = Number(cfg.sid);
+      var gotNid = Number(cfg.nid);
+      if (isFinite(gotNid) && gotNid > 0 && gotNid !== nid) {
+        throw new Error('星空影视 把第 ' + nid + ' 集换成了第 ' + gotNid
+          + ' 集（线路 ' + sid + ' → ' + gotSid + '）：站点对这一集没有片源');
+      }
+      if (isFinite(gotSid) && gotSid > 0 && gotSid !== sid) {
+        throw new Error('星空影视 换线路了（请求 ' + sid + '，返回 ' + gotSid
+          + '，第 ' + nid + ' 集）：站点对这条线路没有片源');
+      }
+
       var url = String(cfg.url || '').trim();
       if (!url) {
         return { reason: 'no-source', note: '这一集没有解析到可播地址' };
