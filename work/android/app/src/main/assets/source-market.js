@@ -255,12 +255,29 @@ function sameSource(item) {
   return theirs === mine;
 }
 
+// 列表内容的指纹。重画一次整页的代价不只是掉帧 —— 用户可能已经往下滚了，
+// 也可能正在改某一条的备注，重画会把这两样都打回原形。数据没变就不重画。
+function sourceSignature(items) {
+  return asArray(items).map(item => [item.url, item.alias, item.active ? 1 : 0].join('\u0001')).join('\u0002');
+}
+
 function goSourceSettings() {
   if (state.route === 'source-settings') return;
   if (state.route !== 'settings') goSettings();
   state.sourceReturn = captureScreen();
+  const before = sourceSignature(state.sources);
   setRoute('source-settings');
   renderSourceSettings();
-  refreshSources().then(() => { if (state.route === 'source-settings') renderSourceSettings(); }).catch(() => {});
-  content.querySelector('#source-value')?.focus();
+  // 二级页一律从顶上开始。不写这一行的话，从「设置」滚到一半再点进来，
+  // 新页面会停在母页那个偏移上 —— 开头那几行直接看不到。
+  scroll.scrollTop = 0;
+  // 不 focus 底部那个输入框。它会把页面一路拽到底、顺带弹起键盘：
+  // 用户点「内容源」是想看自己的源，不是想加一个新的。
+  refreshSources().then(() => {
+    if (state.route !== 'source-settings') return;
+    if (sourceSignature(state.sources) === before) return;
+    const top = scroll.scrollTop;
+    renderSourceSettings();
+    scroll.scrollTop = top;
+  }).catch(() => {});
 }

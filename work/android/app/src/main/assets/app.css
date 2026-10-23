@@ -5166,8 +5166,10 @@ html[data-theme=dark] .settings-seg-item.selected .settings-seg-label {
     border-radius:50%;
     background:#007aff;
     animation:seg-check .26s cubic-bezier(.2,.9,.3,1.2) both;
-    background-image:url("data:image/svg+xml;
-    charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 12.6 4 4 8-9'/%3E%3C/svg%3E");
+    /* data URI 必须写在一行里。断成两行（换行落在引号内部）是 CSS 语法错误，
+       Chrome 会把这个字符串连同后面的一大片规则一起丢掉 —— 那天「备注」按钮
+       长成浏览器默认灰块、源列表 v2 那套样式全没生效，都是这一行造成的。 */
+    background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 12.6 4 4 8-9'/%3E%3C/svg%3E");
     background-size:11px 11px;
     background-position:center;
     background-repeat:no-repeat;
@@ -5589,6 +5591,95 @@ html[data-theme=dark] .settings-card .source-row.is-active .source-pick em {
 .settings-card .source-drop:active {
     background:rgba(255,59,48,.16);
     color:#ff3b30;
+}
+/* ── 就地改备注 ────────────────────────────────────────────────────
+   这一块之前一条样式都没有，点开就会看到浏览器的默认按钮（灰底、方角、
+   系统字），跟整页完全不是一套。做成一张「正在编辑的卡片」：占住原来那一行
+   的位置，标签在上、输入框在中间、三个动作在右下角。 */
+.settings-card .source-row.is-editing {
+    gap:0;
+}
+.settings-card .source-note-form {
+    flex:1;
+    min-width:0;
+    display:flex;
+    flex-direction:column;
+    gap:7px;
+    margin:0;
+    padding:10px 12px 11px;
+    border:1px solid rgba(0,122,255,.45);
+    border-radius:12px;
+    background:rgba(0,122,255,.07);
+}
+.settings-card .source-note-form label {
+    font-size:11px;
+    font-weight:600;
+    letter-spacing:.02em;
+    color:var(--muted);
+}
+.settings-card .source-note-form input {
+    width:100%;
+    min-height:34px;
+    padding:0 10px;
+    border:1px solid var(--line);
+    border-radius:9px;
+    background:rgba(118,118,128,.14);
+    color:var(--text);
+    font-size:13.5px;
+    -webkit-appearance:none;
+    appearance:none;
+}
+.settings-card .source-note-form input::placeholder {
+    color:var(--muted);
+    opacity:.7;
+}
+.settings-card .source-note-form input:focus {
+    outline:none;
+    border-color:#0a84ff;
+    background:rgba(118,118,128,.2);
+}
+.settings-card .source-note-actions {
+    display:flex;
+    justify-content:flex-end;
+    gap:7px;
+}
+.settings-card .source-note-actions button {
+    min-height:29px;
+    padding:0 13px;
+    border:1px solid var(--line);
+    border-radius:15px;
+    background:transparent;
+    color:var(--muted);
+    font-size:12.5px;
+    transition:transform .14s var(--ease-out,ease),background-color .16s ease,color .16s ease;
+}
+.settings-card .source-note-actions button[type=submit] {
+    border-color:transparent;
+    background:#007aff;
+    color:#fff;
+    font-weight:600;
+}
+.settings-card .source-note-actions button:active {
+    transform:scale(.95);
+    background:rgba(118,118,128,.22);
+    color:var(--text);
+}
+.settings-card .source-note-actions button[type=submit]:active {
+    background:#0068d6;
+    color:#fff;
+}
+.settings-card .source-note-actions button:disabled {
+    opacity:.4;
+}
+html[data-theme=dark] .settings-card .source-note-form {
+    border-color:rgba(10,132,255,.5);
+    background:rgba(10,132,255,.1);
+}
+html[data-theme=dark] .settings-card .source-note-form input {
+    background:rgba(118,118,128,.18);
+}
+html[data-theme=dark] .settings-card .source-note-form input:focus {
+    background:rgba(118,118,128,.26);
 }
 .settings-card .source-empty {
     padding:14px;

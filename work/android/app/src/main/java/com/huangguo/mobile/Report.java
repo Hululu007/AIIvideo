@@ -47,18 +47,24 @@ final class Report {
 
     private static final String PREFS = "report";
     private static final String KEY_DEVICE = "device_id";
-    private static final String KEY_OPT_OUT = "opt_out";
+    /** 早期版本设置页有「使用统计」开关，关掉会写这个键。现在开关撤了，读到就删。 */
+    private static final String KEY_OPT_OUT_LEGACY = "opt_out";
 
     private static ReportQueue queue;
     private static SharedPreferences prefs;
     private static String deviceId = "";
     private static String sessionId = "";
-    private static volatile boolean optOut = false;
 
     private Report() {
     }
 
-    /** 在 Application.onCreate 里调一次。 */
+    /**
+     * 在 Application.onCreate 里调一次。
+     *
+     * 上报没有开关 —— 设置页那一行已经撤掉，行为埋点常开。曾经点过关的那个键在
+     * 这里顺手删掉：不删的话，装过老版本的用户会永远停在「关」上，而界面上再也
+     * 找不到地方打开它。
+     */
     static void install(Context context, boolean canFlush) {
         Context app = context.getApplicationContext();
         prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
@@ -67,64 +73,39 @@ final class Report {
             deviceId = UUID.randomUUID().toString();
             prefs.edit().putString(KEY_DEVICE, deviceId).apply();
         }
-        optOut = prefs.getBoolean(KEY_OPT_OUT, false);
+        if (prefs.getBoolean(KEY_OPT_OUT_LEGACY, false)) {
+            prefs.edit().remove(KEY_OPT_OUT_LEGACY).apply();
+            Log.i(TAG, "清掉老版本的「关掉使用统计」标记，埋点恢复常开");
+        }
         sessionId = UUID.randomUUID().toString();
         queue = new ReportQueue(app, canFlush);
         // 上次没发出去的，开机补一发
         queue.maybeFlush(true);
     }
 
-    static void setOptOut(Context context, boolean value) {
-        optOut = value;
-        context.getApplicationContext()
-                .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .edit().putBoolean(KEY_OPT_OUT, value).apply();
-        if (value && queue != null) {
-            int dropped = queue.clearBehaviorEvents();
-            Log.i(TAG, "关掉使用统计，清掉 " + dropped + " 条待发行为事件（崩溃仍会上报）");
-        }
-    }
-
-    /** 设置页要的状态：开关在哪一边、还有多少条压在盘里。 */
+    /** 自检口子要看的：还有多少条压在盘里没发出去。 */
     static JSONObject state() {
         JSONObject info = new JSONObject();
         try {
-            info.put("optOut", optOut);
             info.put("pending", queue == null ? 0 : queue.pending());
         } catch (Exception ignored) {
         }
         return info;
     }
 
-    static boolean isOptOut(Context context) {
-        if (prefs == null) {
-            return context.getApplicationContext()
-                    .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                    .getBoolean(KEY_OPT_OUT, false);
-        }
-        return optOut;
-    }
-
     // ── 事件入口 ──────────────────────────────────────────────────────
 
-    /** 行为事件。用户关掉统计之后直接丢。 */
     static void event(String kind, String name, JSONObject props) {
-        if (optOut) {
-            return;
-        }
         enqueue(build(kind, name, "", props));
     }
 
     static void event(String kind, String name, String source, JSONObject props) {
-        if (optOut) {
-            return;
-        }
         enqueue(build(kind, name, source, props));
     }
 
     /**
-     * 崩溃。**不管 opt-out**，而且同步落盘不发送 —— 进程马上就要死了，
-     * 这时候发网络是给系统添乱，留着下次启动补发。
+     * 崩溃。同步落盘不发送 —— 进程马上就要死了，这时候发网络是给系统添乱，
+     * 留着下次启动补发。
      */
     static void crash(Throwable error, String where) {
         JSONObject props = new JSONObject();

@@ -10,6 +10,87 @@
 > 历史。看的时候注意每段的日期。哪份文档是现行口径、哪份只剩历史价值，
 > 看 [`docs/README.md`](docs/README.md)。
 
+## 2026-10-23 深夜：内容源页 —— 一个 CSS 语法错误吃掉 98 条规则
+
+用户发来两条反馈：备注那个按钮丑得不像这一页的东西，以及「点了一下莫名其妙变大」。
+第一条查下去，根因比想象的严重得多。
+
+### 断在一行 data URI 上
+
+`app.css` 第 5169 行：
+
+```css
+background-image:url("data:image/svg+xml;
+    charset=utf-8,%3Csvg …");
+```
+
+引号里的字符串跨了行 —— CSS 里这是语法错误。Chrome 的恢复策略是把出错位置之后的
+规则一起丢掉。实测 `document.styleSheets` 只解析出 **881 条**，而 5169 行之后还有
+**98 条**一条都没进去，包括：
+
+- 整个「设置页 v2 · 内容源列表」块（`.scripts-card .source-row/.source-pick/.source-note/.source-drop`）
+- `.press-host` / `.press-ripple`（按压涟漪）
+- `.settings-danger-button`、`.settings-row .settings-mini` 的收口
+- 外观那组「选中打勾」的 `:after`
+
+所以「备注」按钮压根没吃到任何 App 样式，用的是浏览器默认 `<button>`：
+`background: rgb(107,107,107)`、`border: 2px outset`、`border-radius: 0px`、`font: 16px`。
+旁边那个 × 用的是断点之前的旧规则，圆角 15px —— 一对方角一对方角，谁看都觉得别扭。
+
+改法就一个字：把 data URI 收回一行。规则数 881 → 994，`.settings-card .source-list`
+回到第 932 条，外观页的蓝色勾也回来了。
+
+```
+修复前  note: bg=rgb(107,107,107) radius=0px border=1.9px outset   ← 浏览器默认
+修复后  note: bg=rgba(118,118,128,.08) radius=12px border=1px        ← 设计里那个
+```
+
+### 备注改成一张「正在编辑的卡片」
+
+`.source-note-form` 之前**一条 CSS 都没有**（不只是被断点吃掉，全文就没有）。点开
+备注看到的是默认样式的 label + input + 三个系统按钮。
+
+补上：青蓝描边的卡片占住原来那一行的位置，标签在上、输入框铺满、保存（蓝色胶囊）/
+清空 / 取消在右下角，清空在没有备注时自动置灰。行高从 56 长到 114，量的就是输入框
+34 + 标签 15 + 间距。
+
+顺手把「备注」按钮本体也调成和 × 同一种安静按钮（44/46 × 56，12px 圆角，
+8% 灰底），一行的读法变成「一张卡片 + 两个次要动作」。
+
+端到端真机验证：填「测试备注」→ 保存 → `state.sources` 里第 2 项的 alias 变成它 →
+点开再清空 → 全部回到 `(无)`，没留测试数据。
+
+### 涟漪：改成内联定位
+
+`spawnRipple` 只把圆心和直径写成内联，定位靠 `.press-ripple{position:absolute}`。
+样式表一断，那个 span 就退回静态行内元素 —— 尺寸是 π×半径² 的直径，参与布局。
+现在 `position:absolute;pointer-events:none` 也写进内联，样式表再怎么断，它也只是
+浮在上面的一个圆。
+
+### 另外三处（同一轮里查出来的）
+
+1. **进页面就跳到底部**：`goSourceSettings()` 结尾 focus 了页面最底下那个输入框，
+   滚动位置从 0 被拽到 783，同时弹键盘，紧接着异步刷新又整页重画一次。删掉 focus，
+   二级页进来一律 `scrollTop = 0`（网络代理页同样有这毛病，325）。
+2. **键盘开着按返回，整页跟着退**：`handleBack()` 不看输入法状态。加 `hideImeIfShown()`，
+   两个判据都要试 —— `insets.isVisible(ime())` 在这台机器上恒为 false，而
+   `imm.isAcceptingText()` 收完键盘还是 true（WebView 里那个 input 还攥着焦点），
+   所以还得同时 `document.activeElement.blur()`。真机：back#1 收键盘停在原页，
+   back#2 才返回。
+3. **隐私说明被省略号截断**：「关掉之后不再上报…崩溃还会上报」用的是
+   `.settings-body small`（nowrap + ellipsis），真机上只剩「…崩溃…」。换成
+   `<small class="settings-note">`，两行铺满。
+
+### 两条教训
+
+- **样式表整体失效这种故障，症状是散装的。** 一个按钮丑、一页间距不对、打勾没了，
+  看着像三个 bug，其实是同一行。以后遇到「这一块完全不像设计稿」，先去控制台数
+  `document.styleSheets[0].cssRules.length`，比逐个比对像素快得多。
+- **用预览图上的坐标点真机一定点错。** 838 宽的预览和 1080 的屏幕差 1.29 倍，我按
+  0.596 的 y 去点「备注」，落到了下一行的「切换到这个源」上，把内容源从 mrds66 切成
+  了 hanime1（首页 tab 都变了）。之后要么用 `android_tap_element` 按元素点，要么先
+  换算成设备像素。
+
 ## 2026-10-23：可观测性 —— 崩溃、源健康、埋点（商业化地基）
 
 **这是下一轮的主线。** 现在对线上发生的事一无所知：没有崩溃上报、没有播放失败记录、
@@ -63,13 +144,45 @@ yes | sdkmanager --sdk_root=$HOME/Library/Android/sdk "ndk;27.0.12077973"
 | 飞行模式冷启动 | 本地 `files/reports/*.jsonl` 有 1 行，库里 0 行 |
 | 恢复网络 | 约 1 分钟后补发成功，库里出现，本地文件删除 |
 
+### 开关撤了：埋点常开（2026-10-23 23:20）
+
+上面第 1、2 条（「设置页有了开关」和「关掉时清队列」）已经被推翻 —— 那个开关的 UI 撤掉了，
+埋点一直开着。
+
+改动：`renderSettings()` 里那张「隐私」卡片整块删除，跟着删的还有 `data-track` 的点击处理、
+`state.track` 的懒加载、Java 侧 `Report.setOptOut` / `isOptOut` / `ReportQueue.clearBehaviorEvents`
+和桥命令 `report-config`。`Report.event()` 不再看 optOut，来了就入队。
+
+老用户那边要单独处理：装过带开关那版的机器，`SharedPreferences("report")` 里可能留着
+`opt_out=true`，而界面上已经没有地方能打开它 —— 那样这些设备会永远静默。
+所以 `install()` 里读到这个键就直接删掉，日志打一行「清掉老版本的「关掉使用统计」标记」。
+
+顺手确认的事：`diag` 的自检口子留着，返回的 `state()` 现在只有 `pending`。
+
+### 埋点上线两小时就抓到一条真 bug：pornhub 封面全挂
+
+删完开关顺手查了一眼库，`bridge/command_error` 在 2 秒里刷了 8 条：
+
+```
+stage=cover  code=IllegalArgumentException  msg=不支持的封面格式
+```
+
+`SiteRepository.coverData()` 拿路径最后一段当扩展名，不在 jpg/jpeg/png/webp/gif 里就抛。
+问题出在 `lastIndexOf('.')` 返回 -1 的情况：pornhub 那批缩略图是裸路径，压根没有扩展名
+（`/videos/202111/29/398816751/180P_225K_...`），于是每一张都判成「格式不支持」，整页灰块。
+
+改成「点在最后一段路径里才算有扩展名」，没有扩展名就放行 —— 真正的边界是 `allowedHosts`
+白名单加上拿回来之后必须解得开图片，有扩展名但不是图片类型才拒。报错文案也带上了
+扩展名和主机，下次再出这种问题不用猜。
+
+改完整页封面正常，同一时段的库里 `cover` 错误归零，只有一条 `app/app_open`。
+
+这条值得记：埋点不是为了报表，第一天就用来定位了一个没人报的 bug。
+
 ### 三条补完（2026-10-23 深夜，真机验证）
 
-1. **设置页有了开关**：设置 → 隐私 →「使用统计」，右上是 `.settings-mini` 按钮显示「已开启 /
-   已关闭」。点一下走桥的 `report-config`，Java 侧 `setOptOut` 写盘 + 清队列。同一行下面写明
-   边界「关掉之后不再上报使用数据，也不发已经攒下的。崩溃还会上报 —— 不然崩了查不出原因」。
-2. **关掉时清队列**：`ReportQueue.clearBehaviorEvents()` 重写 jsonl，只留 `kind=crash` 的那些。
-   真机实测日志 `关掉使用统计，清掉 N 条待发行为事件（崩溃仍会上报）`。
+1. ~~**设置页有了开关**~~：已撤销，见上面「开关撤了」。
+2. ~~**关掉时清队列**~~：`clearBehaviorEvents()` 已删除。
 3. **崩溃可触发**：桥命令 `diag`，`mode=crash` 时在主线程 post 一个必抛的 Runnable，
    逃出 Looper 走真正的 `UncaughtExceptionHandler`。
 
@@ -82,8 +195,7 @@ yes | sdkmanager --sdk_root=$HOME/Library/Android/sdk "ndk;27.0.12077973"
          trace=com.huangguo.mobile.HuangGuoApp.lambda$onCreate$0(HuangGuoApp.java:35)…
 ```
 
-注意这条是在**开关已经关掉**的状态下报上来的 —— 符合设计。中文也不再是乱码，说明
-`readLines` 的编码修复在真机上同样成立。
+中文不再是乱码，说明 `readLines` 的编码修复在真机上同样成立。
 
 **两个踩了很久的坑，记下来：**
 

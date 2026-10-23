@@ -464,6 +464,9 @@ function goProxySettings() {
   bootProxyCore(true);
   // 节点库那一行也要有值。这条路不联网，所以不等着 boot 的结果。
   loadNodesStatus();
-  // 只有「外部地址」模式下才有那个输入框 —— 别的模式下别抢焦点弹键盘。
-  content.querySelector('#proxy-value')?.focus();
+  // 只有「外部地址」模式下才有那个输入框 —— 别的模式下别抢焦点弹键盘，
+  // 并且要把偏移清掉：从母页滚到一半进来，页头那几行会被一起带出屏幕。
+  const field = content.querySelector('#proxy-value');
+  if (field) field.focus({ preventScroll: true });
+  else scroll.scrollTop = 0;
 }

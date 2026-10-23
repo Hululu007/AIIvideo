@@ -138,9 +138,19 @@ final class SiteRepository {
         String strCoverUrl = this.profile.coverUrl(str);
         URL url = new URL(strCoverUrl);
         String path = url.getPath();
-        String lowerCase = path.substring(path.lastIndexOf(46) + 1).toLowerCase(Locale.ROOT);
-        if (this.profile.object("cover").optBoolean("checkExtension", true) && !Arrays.asList("jpg", "jpeg", "png", "webp", "gif").contains(lowerCase)) {
-            throw new IllegalArgumentException("不支持的封面格式");
+        int dot = path.lastIndexOf(46);
+        // 只有「点在最后一段路径里」才算有扩展名。/covers/202401/abc.def/1 这种
+        // 目录里带点的路径不算。
+        boolean hasExtension = dot > path.lastIndexOf(47);
+        String lowerCase = hasExtension ? path.substring(dot + 1).toLowerCase(Locale.ROOT) : "";
+        // 没有扩展名的地址放过去 —— 图床用 /covers/12345/aBcDeF 这种裸路径很常见，
+        // pornhub 一批缩略图就是这样（埋点里那串「不支持的封面格式」全是它们）。
+        // 真正的边界是上面那道 allowedHosts 白名单，加上拿回来之后必须解得开图片；
+        // 有扩展名却不是图片类型，才说明这条地址可疑。
+        if (this.profile.object("cover").optBoolean("checkExtension", true)
+                && hasExtension
+                && !Arrays.asList("jpg", "jpeg", "png", "webp", "gif").contains(lowerCase)) {
+            throw new IllegalArgumentException("不支持的封面格式：" + lowerCase + " @" + url.getHost());
         }
         byte[] bArrDigest = MessageDigest.getInstance("SHA-256").digest((this.profile.fingerprint + ":" + url.getHost() + path).getBytes(StandardCharsets.UTF_8));
         StringBuilder sb = new StringBuilder();

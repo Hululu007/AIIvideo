@@ -865,7 +865,10 @@ function spawnRipple(target, event) {
   const radius = Math.hypot(Math.max(x, box.width - x), Math.max(y, box.height - y));
   const ripple = document.createElement('span');
   ripple.className = 'press-ripple';
-  ripple.style.cssText = `left:${x}px;top:${y}px;width:${radius * 2}px;height:${radius * 2}px`;
+  // 定位写成内联的。这几行原本只在样式表里，而样式表因为一个语法错误把整段
+  // 规则丢掉了 —— 那期间涟漪退化成一个静态 span，尺寸是 (2×半径) 那么大，
+  // 直接参与布局。内联之后不管样式表解析成什么样，它都只是浮在上面的一个圆。
+  ripple.style.cssText = `position:absolute;pointer-events:none;left:${x}px;top:${y}px;width:${radius * 2}px;height:${radius * 2}px`;
   target.classList.add('press-host');
   target.appendChild(ripple);
   ripple.addEventListener('animationend', () => ripple.remove(), { once: true });
@@ -1703,17 +1706,6 @@ function updateTailMarkup() {
 }
 
 function renderSettings() {
-  // 上报开关的状态在 Java 侧（它还要管已落盘的那批事件），读一次缓存起来。
-  // 首帧先按「开着」画，读回来再重画 —— 这个延迟只有几十毫秒，比让整页等它强。
-  if (!state.track) {
-    state.track = { optOut: false, pending: 0, loaded: false };
-    api('report-config')
-      .then(value => {
-        state.track = { optOut: !!value.optOut, pending: Number(value.pending) || 0, loaded: true };
-        if (state.route === 'settings') renderSettingsKeepScroll();
-      })
-      .catch(() => { state.track.loaded = true; });
-  }
   const account = state.account;
   const net = proxyChip();
   const player = playerChip();
@@ -1737,22 +1729,6 @@ function renderSettings() {
     </section>
 
     ${appearanceSection()}
-
-    <section class="settings-card" aria-label="隐私">
-      <div class="settings-row is-static">
-        <span class="settings-icon">${icon('shield')}</span>
-        <span class="settings-body"><strong>使用统计</strong><small>机型、版本、源 id、卡在哪一步${state.track && state.track.pending ? ' · 还有 ' + state.track.pending + ' 条没发出去' : ''}</small></span>
-        <span class="settings-tail">
-          <button type="button" class="settings-mini" role="switch"
-                  aria-checked="${state.track && !state.track.optOut ? 'true' : 'false'}"
-                  data-track="1">${state.track && !state.track.optOut ? '已开启' : '已关闭'}</button>
-        </span>
-      </div>
-      <div class="settings-row is-static">
-        <span class="settings-icon"></span>
-        <span class="settings-body"><small>关掉之后不再上报使用数据，也不发已经攒下的。崩溃还会上报 —— 不然崩了查不出原因。</small></span>
-      </div>
-    </section>
 
     <section class="settings-card" aria-label="账号">
       ${settingsRow('data-account-management="1"', 'account', '账号',
@@ -2925,22 +2901,6 @@ document.addEventListener('click', async event => {
   const reset = event.target.closest('[data-factory-reset]');
   if (reset) {
     if (!reset.disabled) runFactoryReset(reset);
-    return;
-  }
-  const trackSwitch = event.target.closest('[data-track]');
-  if (trackSwitch) {
-    trackSwitch.disabled = true;
-    try {
-      // 现在「开着」= 没被关掉。点一下就是关掉，所以传的是「关不关」而不是取反。
-      const currentlyOn = !(state.track && state.track.optOut);
-      const value = await api('report-config', { optOut: currentlyOn });
-      state.track = { optOut: !!value.optOut, pending: Number(value.pending) || 0, loaded: true };
-      toast(state.track.optOut ? '已关掉使用统计' : '已开启使用统计');
-    } catch (error) {
-      toast(error.message || '改不了这个开关', true);
-    } finally {
-      renderSettingsKeepScroll();
-    }
     return;
   }
   const clear = event.target.closest('[data-clear]');

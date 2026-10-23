@@ -354,61 +354,6 @@ final class ReportQueue {
         }
     }
 
-    /**
-     * 只删行为事件，crash 留着。
-     *
-     * 用户刚点「不发送使用统计」的那一刻，盘上可能还躺着几十条没发出去的行为事件 ——
-     * 不删的话下一次 ticker 就把它们发了，等于开关只对之后的生效，对已经发生的不算。
-     * 崩溃是例外：关掉统计之后还报崩溃，是因为「崩了都不知道崩在哪」比隐私更糟，
-     * 这一点在设置页的说明文字里写明。
-     */
-    int clearBehaviorEvents() {
-        int dropped = 0;
-        int kept = 0;
-        synchronized (this) {
-            File[] files = this.dir.listFiles();
-            if (files == null) {
-                return 0;
-            }
-            for (File file : files) {
-                if (!file.getName().endsWith(EXT)) {
-                    continue;
-                }
-                List<JSONObject> survivors = new ArrayList<JSONObject>();
-                for (JSONObject item : readLines(file)) {
-                    if ("crash".equals(item.optString("kind"))) {
-                        survivors.add(item);
-                    } else {
-                        dropped += 1;
-                    }
-                }
-                if (survivors.isEmpty()) {
-                    file.delete();
-                    continue;
-                }
-                FileOutputStream out = null;
-                try {
-                    out = new FileOutputStream(file, false);
-                    for (JSONObject item : survivors) {
-                        out.write((item.toString() + "\n").getBytes(StandardCharsets.UTF_8));
-                    }
-                } catch (IOException error) {
-                    Log.w(TAG, "清队列失败：" + error.getMessage());
-                } finally {
-                    if (out != null) {
-                        try {
-                            out.close();
-                        } catch (IOException ignored) {
-                        }
-                    }
-                }
-                kept += survivors.size();
-            }
-            this.backlog = kept;
-        }
-        return dropped;
-    }
-
     private void backoff() {
         this.failures = Math.min(this.failures + 1, 6);
         long delay = Math.min(BACKOFF_BASE_MS << (this.failures - 1), BACKOFF_MAX_MS);

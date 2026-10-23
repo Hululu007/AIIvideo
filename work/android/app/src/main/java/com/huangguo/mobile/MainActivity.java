@@ -24,6 +24,7 @@ import android.view.RoundedCorner;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowManager;
+import android.view.inputmethod.InputMethodManager;
 import android.webkit.ConsoleMessage;
 import android.webkit.JavascriptInterface;
 import android.webkit.JsResult;
@@ -637,7 +638,42 @@ public final class MainActivity extends Activity {
         sendLatestBackProgress();
     }
 
+    /**
+     * 键盘开着的时候，返回键只该收起键盘。
+     *
+     * 不判这一下的话，用户在输入框里按返回（最常见的「先收键盘」动作）会连带把
+     * 整页退掉 —— 内容源页点「备注」改一行字、按返回，回到的是设置首页，那行字
+     * 白改了。输入法自己抢不到这个键：OnBackInvokedCallback 注册在优先级 0，
+     * 系统先问的就是我们。
+     */
+    private boolean hideImeIfShown() {
+        View focus = getCurrentFocus();
+        InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        WindowInsets insets = getWindow().getDecorView().getRootWindowInsets();
+        boolean byInsets = Build.VERSION.SDK_INT >= 30 && insets != null && insets.isVisible(WindowInsets.Type.ime());
+        boolean byImm = imm != null && imm.isAcceptingText();
+        // 两条判据都要看：真机上 insets 有时不认输入法窗口（窗口本身没 fit system
+        // windows），isAcceptingText 才是「现在真的有输入框在收字」。
+        if (!byInsets && !byImm) {
+            return false;
+        }
+        View token = focus != null ? focus : this.webView;
+        if (imm != null && token != null) {
+            imm.hideSoftInputFromWindow(token.getWindowToken(), 0);
+        }
+        // 只收键盘不够。WebView 里那个 input 还攥着焦点，输入法连接一直挂着，
+        // isAcceptingText() 就永远为真 —— 第二次按返回还是被吞掉。焦点一起撤。
+        if (this.webView != null) {
+            this.webView.evaluateJavascript("(function(){var a=document.activeElement;a&&a.blur&&a.blur();return 1})()", null);
+        }
+        return true;
+    }
+
     public void handleBack(boolean z) {
+        if (hideImeIfShown()) {
+            resetBackProgress();
+            return;
+        }
         String str;
         WebView webView = this.webView;
         if (webView == null) {
@@ -816,13 +852,6 @@ public final class MainActivity extends Activity {
         this.commands.put("report", jSONObject -> {
             Report.fromFrontend(jSONObject);
             return true;
-        });
-        // 设置页那个开关：读状态、改状态。带 optOut 就是改。
-        this.commands.put("report-config", jSONObject -> {
-            if (jSONObject.has("optOut")) {
-                Report.setOptOut(this, jSONObject.optBoolean("optOut"));
-            }
-            return Report.state();
         });
         // 自检口子：mode=crash 时在主线程抛一个，走真正的 UncaughtExceptionHandler。
         // 不这么留一个入口，崩溃上报这条链路就只能靠「等真用户崩一次」来验证。
