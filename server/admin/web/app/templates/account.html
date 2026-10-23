@@ -1,13 +1,42 @@
 {% extends "base.html" %}
-{% block title %}我的账号 · AIIvideo 后台{% endblock %}
+{% block title %}账号 · 值班台{% endblock %}
 {% block body %}
-<h1>我的账号</h1>
-<p class="muted">当前登录：{{ session.username }}</p>
-<form class="stack" method="post" action="{{ mount }}/account/password">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label>原口令<input name="old" type="password" autocomplete="current-password"></label>
-  <label>新口令<input name="new" type="password" autocomplete="new-password"></label>
-  <label>再输一次<input name="repeat" type="password" autocomplete="new-password"></label>
-  <div class="row"><button type="submit">更新口令</button></div>
-</form>
+<div class="head">
+  <h1>账号</h1>
+  <div class="head__meta">只有你一个人用这块面板</div>
+</div>
+
+<div class="bay">
+  <div class="bay__label"><b>当前登录</b>{{ session.username }}</div>
+  <div class="bay__body">
+    <dl class="kv">
+      <dt>账号</dt><dd>{{ session.username }}</dd>
+      <dt>会话</dt><dd class="v">12 小时过期，关浏览器不作废</dd>
+      <dt>入口</dt><dd class="v">{{ public_base }}/admin/</dd>
+      <dt>前置</dt><dd>Caddy basicauth 一层，这里再一层</dd>
+    </dl>
+  </div>
+</div>
+
+<div class="bay">
+  <div class="bay__label"><b>改口令</b>至少 8 位</div>
+  <div class="bay__body">
+    <form method="post" action="{{ mount }}/account/password" style="max-width: 360px">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <div class="field">
+        <span><label for="old">原口令</label></span>
+        <input id="old" name="old" type="password" autocomplete="current-password">
+      </div>
+      <div class="field">
+        <span><label for="new">新口令</label></span>
+        <input id="new" name="new" type="password" autocomplete="new-password" placeholder="至少 8 位">
+      </div>
+      <div class="field">
+        <span><label for="repeat">再输一次</label></span>
+        <input id="repeat" name="repeat" type="password" autocomplete="new-password">
+      </div>
+      <div style="padding-left: 74px"><button class="btn" type="submit">更新口令</button></div>
+    </form>
+  </div>
+</div>
 {% endblock %}

@@ -1,48 +1,99 @@
 {% extends "base.html" %}
-{% block title %}{{ name }} · AIIvideo 后台{% endblock %}
+{% block title %}{{ name }} · 值班台{% endblock %}
 {% block body %}
-<h1>{{ name }}</h1>
-<p class="muted">保存前会做结构校验；语法错误会指出行列。每次保存自动留一份备份。</p>
-<form method="post" action="{{ mount }}/sources/{{ name }}/save">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <textarea name="text" spellcheck="false" rows="28" {% if readonly %}readonly{% endif %}>{{ text }}</textarea>
-  {% if not readonly %}
-  <div class="row">
-    <button type="submit">保存并生效</button>
-    <button type="button" class="ghost" onclick="formatJson(this)">格式化</button>
-    <a class="ghost link" href="{{ mount }}/sources">返回列表</a>
+<div class="head">
+  <h1>{{ name.rsplit('/', 1)[-1] }}</h1>
+  <div class="head__meta">
+    {% if readonly %}<span class="tag">只读</span>{% endif %}
+    {% if '/' in name %}<span class="v">{{ name.rsplit('/', 1)[0] }}/</span> ·{% endif %}
+    <span class="v">{{ (info.bytes / 1024) | round(1) }} KB</span> ·
+    <span class="v">{{ info.lines }}</span> 行 ·
+    <a href="{{ public }}" target="_blank" rel="noreferrer">看线上那份</a>
   </div>
-  {% endif %}
-</form>
-{% if backups %}
-<h2 class="section">备份（最近 {{ backups | length }} 份）</h2>
-<table>
-  <thead><tr><th>时间</th><th>大小</th><th></th></tr></thead>
-  <tbody>
-  {% for b in backups %}
-  <tr>
-    <td>{{ b.mtime }}</td>
-    <td class="muted">{{ (b.size / 1024) | round(1) }} KB</td>
-    <td class="right">
-      <form method="post" action="{{ mount }}/sources/{{ name }}/restore">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <input type="hidden" name="stamp" value="{{ b.stamp }}">
-        <button class="ghost" onclick="return confirm('回滚到 {{ b.mtime }} 这一版？')">回滚</button>
-      </form>
-    </td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
+</div>
+
+{% if readonly %}
+<p class="lede">这个文件由发布流程生成，后台只读。要改走 GitHub 那条通道。</p>
 {% endif %}
-<script>
-function formatJson(button) {
-  const area = button.closest('form').querySelector('textarea');
-  try {
-    area.value = JSON.stringify(JSON.parse(area.value), null, 2) + '\n';
-  } catch (error) {
-    alert('JSON 语法错误：' + error.message);
-  }
-}
-</script>
+
+<div class="editor mt">
+  <form method="post" action="{{ mount }}/sources/{{ name }}/save" data-editor>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="code">
+      <div class="code__gutter" data-gutter aria-hidden="true">1</div>
+      <textarea class="code__area" name="text" data-code wrap="off" spellcheck="false"
+                {% if readonly %}readonly{% endif %} aria-label="{{ name }} 的内容">{{ text }}</textarea>
+    </div>
+    {% if not readonly %}
+    <div class="actionbar">
+      <button class="btn" type="submit">保存并生效</button>
+      <button class="btn btn--quiet" type="button" data-format>{{ '格式化' if is_json else '整理缩进' }}</button>
+      <a class="btn btn--quiet" href="{{ mount }}/sources">放弃改动</a>
+      <span class="hint" data-diff>没有改动</span>
+      <span class="hint"><kbd>⌘ S</kbd></span>
+    </div>
+    {% endif %}
+  </form>
+
+  <div>
+    <div class="panel">
+      <h3>检查</h3>
+      {% if info.error %}
+      <p class="small" style="color: var(--dead); margin: 0 0 10px">{{ info.error }}</p>
+      {% endif %}
+      <dl class="kv">
+        {% for label, value in info.facts %}
+        <dt>{{ label }}</dt><dd class="v">{{ value }}</dd>
+        {% endfor %}
+      </dl>
+      {% if info.notes %}
+      <ul class="small muted" style="margin: 12px 0 0; padding-left: 16px">
+        {% for note in info.notes %}<li>{{ note }}</li>{% endfor %}
+      </ul>
+      {% endif %}
+    </div>
+
+    <div class="panel">
+      <h3>备份 {{ backups | length }} 份</h3>
+      {% if backups %}
+      <table class="table table--tight">
+        <tbody>
+        {% for backup in backups %}
+        <tr>
+          <td class="num nowrap">{{ backup.mtime }}</td>
+          <td class="num">{{ (backup.size / 1024) | round(1) }} KB</td>
+          <td class="acts">
+            {% if not readonly %}
+            <button class="linkish" type="button" data-restore data-stamp="{{ backup.stamp }}"
+                    data-time="{{ backup.mtime }}">回滚</button>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="small muted" style="margin: 0">还没有备份。第一次保存时会把现在这份留成备份。</p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% if not readonly %}
+<dialog id="restore" data-action="{{ mount }}/sources/{{ name }}/restore">
+  <form method="post">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="stamp" value="" data-restore-stamp>
+    <div class="dialog__body">
+      <h2 class="dialog__title">回滚到 <span class="v" data-restore-time></span>？</h2>
+      <p class="dialog__text">现在这一份会先被留成备份，回滚不是单向的。<br>
+        回滚之后 App 下一次刷新吃到旧版。</p>
+    </div>
+    <div class="dialog__foot">
+      <button class="btn btn--quiet" type="button" data-dialog-close>算了</button>
+      <button class="btn" type="submit">回滚</button>
+    </div>
+  </form>
+</dialog>
+{% endif %}
 {% endblock %}

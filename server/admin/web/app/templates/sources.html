@@ -1,34 +1,136 @@
 {% extends "base.html" %}
-{% block title %}源文件 · AIIvideo 后台{% endblock %}
+{% block title %}源 · 值班台{% endblock %}
 {% block body %}
-<h1>源文件</h1>
-<p class="muted">这里改的就是 App 直接读取的那份文件，保存即生效（用户下次刷新/切源时吃到）。</p>
-<table>
-  <thead><tr><th>文件</th><th>类型</th><th>来源</th><th>大小</th><th>修改</th><th></th></tr></thead>
-  <tbody>
-  {% for f in files %}
-  <tr>
-    <td><a href="{{ mount }}/sources/{{ f.name }}/edit">{{ f.name }}</a>
-      {% if f.readonly %}<em>只读</em>{% endif %}
-      {% if f.error %}<div class="bad-text">{{ f.error }}</div>{% endif %}</td>
-    <td>{{ '市场清单' if f.kind == 'market' else (f.adapter or '自定义') }}</td>
-    <td class="muted">{{ f.origin or f.api }}</td>
-    <td class="muted">{{ (f.size / 1024) | round(1) }} KB</td>
-    <td class="muted">{{ f.mtime }}</td>
-    <td class="right">
-      <form method="post" action="{{ mount }}/sources/{{ f.name }}/delete" onsubmit="return confirm('删除 {{ f.name }}？会留一份备份。')">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <button class="ghost danger" {% if f.readonly or f.kind == 'market' %}disabled{% endif %}>删除</button>
-      </form>
-    </td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
-<h2 class="section">新建源文件</h2>
-<form class="row" method="post" action="{{ mount }}/sources/new">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <input name="name" placeholder="例如 my-source.json" required pattern="[A-Za-z0-9._-]+\.json">
-  <button type="submit">新建</button>
+<div class="head">
+  <h1>源</h1>
+  <div class="head__meta">
+    spider <b>{{ inv.counts.spider }}</b> · 已发布 <b>{{ inv.counts.published }}</b> · 老一代 <b>{{ inv.counts.legacy }}</b>
+  </div>
+</div>
+
+<form class="row mt" method="get" action="{{ mount }}/sources">
+  <input class="search" type="search" name="q" value="{{ q }}" placeholder="名字、文件名、站点">
+  <button class="btn btn--quiet" type="submit">筛</button>
+  {% if only == 'todo' %}
+  <a class="btn btn--quiet" href="{{ mount }}/sources{{ '?q=' + q if q else '' }}">看全部</a>
+  {% else %}
+  <a class="btn btn--quiet" href="{{ mount }}/sources?only=todo{{ '&q=' + q if q else '' }}">只看要动手的</a>
+  {% endif %}
 </form>
+
+<div class="bay">
+  <div class="bay__label"><b>spider 源</b>spiders/ 下 {{ spider | length }} 个</div>
+  <div class="bay__body">
+    {% if spider %}
+    <div class="scrollx">
+    <table class="table">
+      <thead>
+        <tr>
+          <th class="rowlamp"><span class="sr">状态</span></th>
+          <th>源</th>
+          <th>站点</th>
+          <th class="num">分类</th>
+          <th class="num">js KB</th>
+          <th class="num">改于</th>
+          <th class="acts">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for item in spider %}
+      <tr>
+        <td class="rowlamp"><span class="lamp lamp--{{ item.lamp }}" title="{{ item.reason }}"></span></td>
+        <td class="name">
+          <a href="{{ mount }}/sources/{{ item.config }}/edit">{{ item.name }}</a>
+          {% for quirk in item.quirks %}<span class="tag">{{ quirk }}</span>{% endfor %}
+          <span class="sub sub--line" title="{{ item.desc }}">{{ item.desc }}</span>
+        </td>
+        <td class="dim host" title="{{ item.host }}">{{ item.host or '—' }}</td>
+        <td class="num">{{ item.categories or '—' }}</td>
+        <td class="num" title="{{ item.js or '没有对应的 js' }}">{{ (item.js_size / 1024) | round(1) if item.js_size else '缺' }}</td>
+        <td class="num">{{ item.mtime }}</td>
+        <td class="acts">
+          <a href="{{ mount }}/sources/{{ item.config }}/edit">编辑</a>
+          <button class="linkish linkish--danger" type="button" data-dialog="del"
+                  data-action="{{ mount }}/sources/{{ item.config }}/delete"
+                  data-target="「{{ item.name }}」"
+                  data-note="删的是 {{ item.config }}。删之前会留一份备份，时间戳记在审计里。对应的 js 不会跟着删。用户那边下次刷新就看不到这个源了。">删除</button>
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <div class="empty"><b>{{ '没有匹配的源' if q else 'spiders/ 是空的' }}</b>新装一个：下面「新建」里选 spider，先把配置建起来，js 再单独传。</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="bay">
+  <div class="bay__label"><b>老一代</b>顶层 {{ legacy | length }} 个</div>
+  <div class="bay__body">
+    {% if legacy %}
+    <div class="scrollx">
+    <table class="table">
+      <thead>
+        <tr><th class="rowlamp"><span class="sr">状态</span></th><th>文件</th><th>站点</th><th class="num">大小</th><th class="num">改于</th><th class="acts">操作</th></tr>
+      </thead>
+      <tbody>
+      {% for item in legacy %}
+      <tr>
+        <td class="rowlamp"><span class="lamp lamp--{{ item.lamp }}" title="{{ item.reason }}"></span></td>
+        <td class="name">
+          <a href="{{ mount }}/sources/{{ item.config }}/edit">{{ item.config }}</a>
+          <span class="sub sub--line" title="{{ item.reason }}">{{ item.reason }}</span>
+        </td>
+        <td class="dim host" title="{{ item.host }}">{{ item.host or '—' }}</td>
+        <td class="num">{{ (item.size / 1024) | round(1) }} KB</td>
+        <td class="num">{{ item.mtime }}</td>
+        <td class="acts">
+          <a href="{{ mount }}/sources/{{ item.config }}/edit">编辑</a>
+          <button class="linkish linkish--danger" type="button" data-dialog="del"
+                  data-action="{{ mount }}/sources/{{ item.config }}/delete"
+                  data-target="{{ item.config }}"
+                  data-note="这是老一代配置，删之前会留一份备份。">删除</button>
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <div class="empty"><b>没有老一代配置</b>顶层只剩清单文件。</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="bay">
+  <div class="bay__label"><b>新建</b>先建配置</div>
+  <div class="bay__body">
+    <form class="row" method="post" action="{{ mount }}/sources/new">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input class="search" name="name" placeholder="例如 yhdm" required pattern="[A-Za-z0-9._-]+"
+             aria-label="文件名">
+      <label class="row small muted" style="gap:6px">
+        <input type="radio" name="kind" value="spider" checked> spider（进 spiders/）
+      </label>
+      <label class="row small muted" style="gap:6px">
+        <input type="radio" name="kind" value="legacy"> 老一代（进顶层）
+      </label>
+      <button class="btn" type="submit">新建</button>
+    </form>
+  </div>
+</div>
+
+<dialog id="del">
+  <form method="post">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="dialog__body">
+      <h2 class="dialog__title">删除<span data-fill="target"></span>？</h2>
+      <p class="dialog__text" data-fill="note"></p>
+    </div>
+    <div class="dialog__foot">
+      <button class="btn btn--quiet" type="button" data-dialog-close>算了</button>
+      <button class="btn btn--danger" type="submit">删除</button>
+    </div>
+  </form>
+</dialog>
 {% endblock %}

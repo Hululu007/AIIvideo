@@ -1,21 +1,46 @@
 {% extends "base.html" %}
-{% block title %}审计日志 · AIIvideo 后台{% endblock %}
+{% block title %}审计 · 值班台{% endblock %}
 {% block body %}
-<h1>审计日志</h1>
-<p class="muted">最近 300 条。只记动作与目标，不记内容。</p>
-<table>
-  <thead><tr><th>时间</th><th>账号</th><th>动作</th><th>目标</th><th>说明</th><th>IP</th></tr></thead>
-  <tbody>
-  {% for row in rows %}
-  <tr>
-    <td class="muted">{{ row.at }}</td>
-    <td>{{ row.actor }}</td>
-    <td><code>{{ row.action }}</code></td>
-    <td>{{ row.target }}</td>
-    <td class="muted">{{ row.detail }}</td>
-    <td class="muted">{{ row.ip }}</td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
+<div class="head">
+  <h1>审计</h1>
+  <div class="head__meta">最近 <b>{{ rows | length }}</b> 条 · 只记动作与目标，不记内容</div>
+</div>
+
+<div class="bay">
+  <div class="bay__label"><b>记录</b>新的在上面</div>
+  <div class="bay__body">
+    {% if rows %}
+    <div class="scrollx">
+    <table class="table table--tight">
+      <thead>
+        <tr><th class="num">时间</th><th>账号</th><th>动作</th><th>目标</th><th>说明</th><th class="num">IP</th></tr>
+      </thead>
+      <tbody>
+      {% for row in rows %}
+      <tr>
+        <td class="num nowrap">{{ row.at }}</td>
+        <td>{{ row.actor }}</td>
+        <td class="nowrap">
+          {%- set labels = {'login': '登录', 'logout': '退出', 'source.save': '写配置',
+                            'market.save': '写清单', 'source.restore': '回滚',
+                            'source.delete': '删配置', 'source.create': '新建',
+                            'user.password': '改口令', 'user.delete': '删用户',
+                            'admin.password': '改口令'} -%}
+          {%- set label = labels.get(row.action, row.action) -%}
+          {%- set tone = 'tag--dead' if row.action.endswith('delete')
+                        else ('tag--warn' if row.action.endswith('restore') else '') -%}
+          <span class="tag {{ tone }}" title="{{ row.action }}">{{ label }}</span>
+        </td>
+        <td class="dim">{{ row.target or '—' }}</td>
+        <td class="dim">{{ row.detail or '—' }}</td>
+        <td class="num">{{ row.ip }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <div class="empty"><b>还没有记录</b>登录、保存、回滚都会进这张表。</div>
+    {% endif %}
+  </div>
+</div>
 {% endblock %}

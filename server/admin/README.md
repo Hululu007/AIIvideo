@@ -1,16 +1,38 @@
 # 运维后台（admin）
 
-一个跑在 VPS 上的小后台：维护源配置、市场清单，管理 App 用户。
+跑在 VPS 上的小后台：维护源、维护清单、管理 App 用户。界面叫「值班台」，
+设计意图写在 [DESIGN.md](DESIGN.md) 里 —— 改样式之前先读那三条硬规则。
 
-## 为什么单独一个工程
+## 它管什么
 
-之前的运维动作全是「本地改 JSON → scp 到 `/srv/cfg`」，改错一个字符 App 里就
-是白屏，而且没有回滚记录。这个工程把这些动作收进网页：
+```
+/srv/cfg/
+  market-spider.json      在用的 spider 清单（后台的「清单」页写这份）
+  market.json             旧版 REST 清单（客户端还认，页面上单独一块）
+  spiders/<id>.json       14 个 spider 源的配置
+  spiders/<id>.js         对应的 js（后台能读、能改）
+  hot-update.json         只读，走 GitHub 那条通道
+/data/backups/
+  <name>.bak-<stamp>      顶层文件的备份
+  spiders/<name>.bak-*    spiders 里文件的备份（按目录镜像，不撞名）
+```
 
-- 源清单 / 市场清单在浏览器里编辑，保存前做结构校验
-- 每次保存自动留一份 `<文件>.bak-<时间>`，出问题一键回滚到上一版
-- 用户列表直连账号库，能重置密码、删除账号
-- 所有写操作进审计日志（谁、什么时候、改了什么文件、改前改后的大小）
+范围写死在 `app/sources.py`：只认顶层和 `spiders/` 这两层，后缀只认 `.json` `.js`，
+`..`、绝对路径、别的目录一律拒。
+
+## 页面
+
+| 路径 | 干什么 |
+|---|---|
+| `/` | 灯带 + 需要你动手 + 数量 + 最近动作 + 这台机器 |
+| `/sources` | 源列表（spider 14 + 老一代 3），搜索、只看要动手的 |
+| `/sources/<rel>/edit` | 编辑器：行号、检查栏、备份时间线、⌘S、改动行数 |
+| `/market` | 清单：勾选 + 就地改名字和说明 + 写回 `market-spider.json` |
+| `/users` | App 用户，搜索、重置口令、删号（走弹层，不用 `prompt`） |
+| `/audit` | 审计，最近 300 条 |
+| `/account` | 改自己的口令 |
+
+`<rel>` 是相对路径，例如 `spiders/51cg.json` 或 `market.json`。
 
 ## 拓扑
 
@@ -18,9 +40,9 @@
 浏览器 ──https──> Caddy
                     ├─ /admin/*  （basicauth 先挡一层）
                     │     └─ reverse_proxy 127.0.0.1:8091  (admin-web)
-                    │            ├─ /srv/cfg        读写（源与市场清单）
+                    │            ├─ /srv/cfg        读写（源与清单）
                     │            ├─ admin.db        SQLite：后台账号 / 会话 / 审计
-                    │            └─ account-db:5432 PostgreSQL（App 用户，只读写 users 表）
+                    │            └─ 127.0.0.1:5432  PostgreSQL（App 用户，只读写 users）
                     └─ /*        /srv/cfg 静态文件（App 实际读取的源）
 ```
 
@@ -29,16 +51,34 @@
 ## 部署
 
 ```bash
-# 本机
-./deploy.sh            # 打包 web/ 推到 relay:/srv/admin 并重启容器
-
-# VPS 上（首次）
-cp .env.example .env   # 填 ADMIN_PASSWORD / POSTGRES_PASSWORD / SECRET
-docker compose up -d --build
+# 本机（需要 ~/.ssh/config 里配好 relay，用 key 登录）
+./deploy.sh
 ```
+
+Dockerfile 是 `COPY app ./app`，模板和静态文件都烤进镜像 —— **改完必须重建**，
+没有「只传文件」那条路。旧镜像在服务器上留了 tag：
+
+```bash
+docker tag admin-web:prev-20261023 admin-web:latest && docker compose up -d
+```
+
+## 本机开发
+
+不用为了看页面在开发机上装 PostgreSQL：
+
+```bash
+cd server/admin/web
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+CFG_DIR=/path/to/cfg-copy DATA_DIR=/tmp/admin-data MOUNT_PATH= \
+PUBLIC_BASE=https://example.test ADMIN_USER=admin ADMIN_PASSWORD=devpass123 SECRET=dev \
+.venv/bin/uvicorn dev.devapp:app --port 8099
+```
+
+`dev/devapp.py` 只把 `users` 里几个函数换成假数据，其余照真跑。`CFG_DIR` 指一份
+`/srv/cfg` 的副本，别指生产。
 
 ## 账号
 
-- 后台账号存 `admin.db`，首次启动用 `.env` 里的 `ADMIN_USER` / `ADMIN_PASSWORD`
-  建一个；登录后可在「账号」页改密码。
+- 后台账号存 `admin.db`，首次启动用 `.env` 里的 `ADMIN_USER` / `ADMIN_PASSWORD` 建一个；
+  登录后可在「账号」页改。
 - App 用户来自账号后端那张 `users` 表，后台不建用户，只管查询与处置。

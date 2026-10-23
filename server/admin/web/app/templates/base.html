@@ -1,34 +1,57 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}AIIvideo 后台{% endblock %}</title>
-<link rel="stylesheet" href="{{ mount }}/static/app.css">
+<title>{% block title %}值班台 · AIIvideo{% endblock %}</title>
+<link rel="stylesheet" href="{{ mount }}/static/app.css?v={{ asset }}">
+<script>
+(function () {
+  var saved = null;
+  try { saved = localStorage.getItem('admin-theme'); } catch (e) {}
+  var dark = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+})();
+</script>
 </head>
 <body>
+{%- set path = request.url.path -%}
+{%- set here = path[mount|length:] if mount and path.startswith(mount) else path -%}
+{%- macro item(href, label, count='') -%}
+  {%- set active = (here == href) or (href != '/' and here.startswith(href + '/')) -%}
+  <a href="{{ mount }}{{ href }}"{% if active %} aria-current="page"{% endif %}><span>{{ label }}</span>{% if count != '' %}<span class="n">{{ count }}</span>{% endif %}</a>
+{%- endmacro -%}
 <div class="shell">
-  <aside class="side">
-    <div class="brand">AIIvideo<span>后台</span></div>
-    <nav>
-      <a href="{{ mount }}/" class="{{ 'on' if request.url.path == '/admin/' else '' }}">总览</a>
-      <a href="{{ mount }}/sources" class="{{ 'on' if '/sources' in request.url.path else '' }}">源文件</a>
-      <a href="{{ mount }}/market" class="{{ 'on' if '/market' in request.url.path else '' }}">市场清单</a>
-      <a href="{{ mount }}/users" class="{{ 'on' if '/users' in request.url.path else '' }}">App 用户</a>
-      <a href="{{ mount }}/audit" class="{{ 'on' if '/audit' in request.url.path else '' }}">审计日志</a>
-      <a href="{{ mount }}/account" class="{{ 'on' if '/account' in request.url.path else '' }}">我的账号</a>
+  <aside class="rail">
+    <div class="rail__brand">AIIvideo<span>值班台</span></div>
+    <nav class="rail__nav" aria-label="主导航">
+      {{ item('/', '总览') }}
+      {{ item('/sources', '源', nav.sources) }}
+      {{ item('/market', '清单', nav.market) }}
+      {{ item('/users', '用户', nav.users) }}
+      {{ item('/audit', '审计', nav.audit) }}
+      {{ item('/account', '账号') }}
     </nav>
-    <form method="post" action="{{ mount }}/logout" class="logout">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <span class="who">{{ session.username }}</span>
-      <button type="submit">退出</button>
-    </form>
+    <div class="rail__foot">
+      <div class="rail__who">
+        <b>{{ session.username if session else '—' }}</b>
+        <form method="post" action="{{ mount }}/logout">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="linkish" type="submit">退出</button>
+        </form>
+      </div>
+      <button class="linkish" type="button" data-theme-toggle aria-pressed="false">夜间</button>
+    </div>
   </aside>
   <main class="main">
-    {% if ok %}<div class="flash ok">{{ ok }}</div>{% endif %}
-    {% if err %}<div class="flash bad">{{ err }}</div>{% endif %}
-    {% block body %}{% endblock %}
+    <div class="main__inner">
+      {% include "_strip.html" %}
+      {% if ok %}<div class="flash flash--ok"><span>{{ ok }}</span><button type="button" data-dismiss aria-label="关掉">×</button></div>{% endif %}
+      {% if err %}<div class="flash flash--bad"><span>{{ err }}</span><button type="button" data-dismiss aria-label="关掉">×</button></div>{% endif %}
+      {% block body %}{% endblock %}
+    </div>
   </main>
 </div>
+<script src="{{ mount }}/static/app.js?v={{ asset }}" defer></script>
 </body>
 </html>

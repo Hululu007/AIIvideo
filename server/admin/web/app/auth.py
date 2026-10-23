@@ -14,7 +14,7 @@ from typing import Optional
 from fastapi import HTTPException, Request
 from itsdangerous import BadSignature, URLSafeSerializer
 
-from .config import ADMIN_PASSWORD, ADMIN_USER, COOKIE_NAME, SECRET, SESSION_TTL_HOURS
+from .config import ADMIN_PASSWORD, ADMIN_USER, COOKIE_NAME, MOUNT_PATH, SECRET, SESSION_TTL_HOURS
 from .db import sqlite
 
 serializer = URLSafeSerializer(SECRET, salt="admin-session")
@@ -127,7 +127,7 @@ def current(request: Request):
 def require(request: Request):
     session = current(request)
     if not session:
-        raise HTTPException(status_code=303, detail="login", headers={"Location": "/admin/login"})
+        raise HTTPException(status_code=303, detail="login", headers={"Location": f"{MOUNT_PATH}/login"})
     return session
 
 

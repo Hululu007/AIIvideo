@@ -10,6 +10,24 @@ from typing import Any
 from .db import pg
 
 PAGE_SIZE = 30
+# 侧栏那个数字不用每页都往账号库里问一遍，30 秒一次够了
+_TOTAL = {"at": 0.0, "value": ""}
+
+
+def total_cached(ttl: float = 30.0) -> str:
+    """用户总数。读不到就返回空串 —— 侧栏少个数字，不该让整页挂掉。"""
+    import time
+
+    now = time.time()
+    if now - _TOTAL["at"] < ttl:
+        return _TOTAL["value"]
+    try:
+        with pg() as conn:
+            value = str(conn.execute("SELECT count(*) AS n FROM users").fetchone()["n"])
+    except Exception:
+        value = ""
+    _TOTAL.update({"at": now, "value": value})
+    return value
 
 
 def list_users(query: str = "", page: int = 1) -> dict[str, Any]:

@@ -1,50 +1,98 @@
 {% extends "base.html" %}
-{% block title %}App 用户 · AIIvideo 后台{% endblock %}
+{% block title %}用户 · 值班台{% endblock %}
 {% block body %}
-<h1>App 用户</h1>
-{% if user_error %}
-<div class="flash bad">读不到账号库：{{ user_error }}</div>
-{% else %}
-<form class="row" method="get" action="{{ mount }}/users">
-  <input name="q" value="{{ listing.query }}" placeholder="按用户名或邮箱搜">
-  <button type="submit">搜索</button>
-</form>
-<p class="muted">共 {{ listing.total }} 个用户 · 第 {{ listing.page }} 页</p>
-<table>
-  <thead><tr><th>用户名</th><th>邮箱</th><th>注册</th><th>更新</th><th></th></tr></thead>
-  <tbody>
-  {% for u in listing.users %}
-  <tr>
-    <td>{{ u.username }}</td>
-    <td class="muted">{{ u.email or '—' }}</td>
-    <td class="muted">{{ u.created_at }}</td>
-    <td class="muted">{{ u.updated_at }}</td>
-    <td class="right actions">
-      <form method="post" action="{{ mount }}/users/{{ u.id }}/password" onsubmit="return resetPw(this)">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <input type="hidden" name="password" value="">
-        <button class="ghost">重置口令</button>
-      </form>
-      <form method="post" action="{{ mount }}/users/{{ u.id }}/delete" onsubmit="return confirm('删除用户 {{ u.username }}？收藏与历史会一起清掉。')">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <button class="ghost danger">删除</button>
-      </form>
-    </td>
-  </tr>
-  {% else %}<tr><td colspan="5" class="muted">没有匹配的用户</td></tr>{% endfor %}
-  </tbody>
-</table>
-<div class="row pager">
-  {% if listing.page > 1 %}<a class="ghost link" href="{{ mount }}/users?q={{ listing.query }}&page={{ listing.page - 1 }}">上一页</a>{% endif %}
-  {% if listing.has_more %}<a class="ghost link" href="{{ mount }}/users?q={{ listing.query }}&page={{ listing.page + 1 }}">下一页</a>{% endif %}
+<div class="head">
+  <h1>用户</h1>
+  <div class="head__meta">共 <b>{{ listing.total }}</b> 个 · 第 <b>{{ listing.page }}</b> 页 · 每页 30</div>
 </div>
-<script>
-function resetPw(form) {
-  const value = prompt('给这个用户设置新口令（至少 8 位）');
-  if (!value) return false;
-  form.querySelector('input[name=password]').value = value;
-  return true;
-}
-</script>
+
+{% if user_error %}
+<div class="empty"><b>读不到账号库</b>{{ user_error }}</div>
+{% else %}
+<form class="row mt" method="get" action="{{ mount }}/users">
+  <input class="search" type="search" name="q" value="{{ listing.query }}" placeholder="用户名或邮箱">
+  <button class="btn btn--quiet" type="submit">搜</button>
+  {% if listing.query %}<a class="linkish" href="{{ mount }}/users">清掉</a>{% endif %}
+</form>
+
+<div class="bay">
+  <div class="bay__label"><b>账号</b>点名字看 id</div>
+  <div class="bay__body">
+    <div class="scrollx">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>用户名</th>
+          <th>邮箱</th>
+          <th class="num">注册</th>
+          <th class="num">最后动过</th>
+          <th class="acts">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for u in listing.users %}
+      <tr>
+        <td class="name"><span title="id {{ u.id }}">{{ u.username }}</span></td>
+        <td class="dim">{{ u.email or '—' }}</td>
+        <td class="num">{{ u.created_at }}</td>
+        <td class="num">{{ u.updated_at }}</td>
+        <td class="acts">
+          <button class="linkish" type="button" data-dialog="pw"
+                  data-action="{{ mount }}/users/{{ u.id }}/password"
+                  data-target="{{ u.username }}">重置口令</button>
+          <button class="linkish linkish--danger" type="button" data-dialog="rm"
+                  data-action="{{ mount }}/users/{{ u.id }}/delete"
+                  data-target="{{ u.username }}">删除</button>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="dim">{{ '没有匹配的用户' if listing.query else '还没有用户' }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+
+    <div class="row mt" style="justify-content: space-between">
+      <div>
+        {% if listing.page > 1 %}
+        <a class="btn btn--quiet" href="{{ mount }}/users?q={{ listing.query }}&page={{ listing.page - 1 }}">上一页</a>
+        {% endif %}
+        {% if listing.has_more %}
+        <a class="btn btn--quiet" href="{{ mount }}/users?q={{ listing.query }}&page={{ listing.page + 1 }}">下一页</a>
+        {% endif %}
+      </div>
+      <span class="small muted">重置口令会把这个用户的会话全踢掉</span>
+    </div>
+  </div>
+</div>
+
+<dialog id="pw">
+  <form method="post" data-password-form>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="password" value="">
+    <div class="dialog__body">
+      <h2 class="dialog__title">给 <span data-fill="target"></span> 设新口令</h2>
+      <p class="dialog__text">至少 8 位。这个用户的旧会话会全部失效，得重新登录。</p>
+      <input type="password" data-password-input placeholder="新口令" autocomplete="new-password" aria-label="新口令">
+    </div>
+    <div class="dialog__foot">
+      <button class="btn btn--quiet" type="button" data-dialog-close>算了</button>
+      <button class="btn" type="submit">设成这个</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="rm">
+  <form method="post">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="dialog__body">
+      <h2 class="dialog__title">删除 <span data-fill="target"></span>？</h2>
+      <p class="dialog__text">账号和他的收藏、历史一起删，没有回收站。</p>
+    </div>
+    <div class="dialog__foot">
+      <button class="btn btn--quiet" type="button" data-dialog-close>算了</button>
+      <button class="btn btn--danger" type="submit">删除</button>
+    </div>
+  </form>
+</dialog>
 {% endif %}
 {% endblock %}

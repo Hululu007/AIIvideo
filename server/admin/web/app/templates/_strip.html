@@ -1,0 +1,12 @@
+{% if strip is defined and strip %}
+<div class="strip">
+  <div class="strip__lamps" role="img" aria-label="{{ inv.counts.spider }} 个源：就绪 {{ inv.counts.live }}，未发布 {{ inv.counts.idle }}，有问题 {{ inv.counts.dead }}">
+    {% for item in strip %}<span class="lamp lamp--{{ item.lamp }}" title="{{ item.name }} · {{ item.reason }}"></span>{% endfor %}
+  </div>
+  <div class="strip__legend">
+    <span>就绪 <b>{{ inv.counts.live }}</b></span>
+    <span>未发布 <b>{{ inv.counts.idle }}</b></span>
+    <span>有问题 <b>{{ inv.counts.dead }}</b></span>
+  </div>
+</div>
+{% endif %}

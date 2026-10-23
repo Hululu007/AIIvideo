@@ -1,41 +1,98 @@
 {% extends "base.html" %}
-{% block title %}总览 · AIIvideo 后台{% endblock %}
+{% block title %}总览 · 值班台{% endblock %}
 {% block body %}
-<h1>总览</h1>
-<div class="grid">
-  <section class="card">
-    <h2>App 用户</h2>
-    {% if user_error %}<p class="muted">读不到账号库：{{ user_error }}</p>{% else %}
-    <p class="big">{{ counts.users }}</p>
-    <p class="muted">会话 {{ counts.sessions }} · 对象 {{ counts.objects }}</p>
-    {% endif %}
-  </section>
-  <section class="card">
-    <h2>源文件</h2>
-    <p class="big">{{ files | length }}</p>
-    <p class="muted">{{ cfg_dir }}</p>
-  </section>
-  <section class="card">
-    <h2>最近动作</h2>
-    <ul class="mini">
-      {% for row in recent %}
-      <li><time>{{ row.at }}</time><span>{{ row.actor }} {{ row.action }} {{ row.target }}</span></li>
-      {% else %}<li class="muted">还没有记录</li>{% endfor %}
-    </ul>
-  </section>
+<div class="head">
+  <h1>总览</h1>
+  <div class="head__meta">最近一次动作 <b>{{ recent[0].at if recent else '—' }}</b></div>
 </div>
-<h2 class="section">源文件速览</h2>
-<table>
-  <thead><tr><th>文件</th><th>类型</th><th>来源</th><th>修改时间</th></tr></thead>
-  <tbody>
-  {% for f in files %}
-  <tr>
-    <td><a href="{{ mount }}/sources/{{ f.name }}/edit">{{ f.name }}</a>{% if f.readonly %} <em>只读</em>{% endif %}</td>
-    <td>{{ '市场清单' if f.kind == 'market' else (f.adapter or '自定义') }}</td>
-    <td class="muted">{{ f.error or f.origin or f.api }}</td>
-    <td class="muted">{{ f.mtime }}</td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
+
+<div class="bay">
+  <div class="bay__label"><b>需要你动手</b>{{ inv.todo | length }} 件</div>
+  <div class="bay__body">
+    {% if inv.todo %}
+    <ul class="todolist">
+      {% for todo in inv.todo %}
+      <li>
+        <span class="lamp lamp--{{ 'dead' if todo.kind == 'bad' else 'warn' }}"></span>
+        <span>{{ todo.what }}
+          <a href="{{ mount }}/sources/{{ todo.where }}/edit">{{ todo.where }}</a></span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <div class="empty"><b>没有要处理的事</b>配置都解析得动，清单指向的文件也都在。</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="bay">
+  <div class="bay__label"><b>数量</b>截至现在</div>
+  <div class="bay__body">
+    <div class="scrollx">
+    <table class="table table--tight">
+      <tbody>
+      <tr>
+        <td class="name">App 用户</td>
+        <td class="num">{{ counts.users }}</td>
+        <td class="dim nowrap">会话 {{ counts.sessions }} · 对象 {{ counts.objects }}</td>
+        <td class="acts"><a href="{{ mount }}/users">看用户</a></td>
+      </tr>
+      <tr>
+        <td class="name">spider 源</td>
+        <td class="num">{{ inv.counts.spider }}</td>
+        <td class="dim nowrap">已发布 {{ inv.counts.published }} · 有问题 {{ inv.counts.dead }}</td>
+        <td class="acts"><a href="{{ mount }}/sources">看源</a></td>
+      </tr>
+      <tr>
+        <td class="name">老一代配置</td>
+        <td class="num">{{ inv.counts.legacy }}</td>
+        <td class="dim nowrap">顶层 json，REST 用</td>
+        <td class="acts"><a href="{{ mount }}/sources">看源</a></td>
+      </tr>
+      <tr>
+        <td class="name">清单条目</td>
+        <td class="num">{{ inv.counts.entries }}</td>
+        <td class="dim nowrap">market-spider.json</td>
+        <td class="acts"><a href="{{ mount }}/market">看清单</a></td>
+      </tr>
+      </tbody>
+    </table></div>
+    {% if user_error %}<p class="small muted">读不到账号库：{{ user_error }}</p>{% endif %}
+  </div>
+</div>
+
+<div class="bay">
+  <div class="bay__label"><b>最近动作</b>审计前 12 条</div>
+  <div class="bay__body">
+    {% if recent %}
+    <div class="scrollx">
+    <table class="table table--tight">
+      <tbody>
+      {% for row in recent %}
+      <tr>
+        <td class="num nowrap">{{ row.at }}</td>
+        <td>{{ row.actor }}</td>
+        <td><code>{{ row.action }}</code></td>
+        <td class="dim">{{ row.target }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <div class="empty"><b>还没有记录</b>第一次保存之后这里会开始有东西。</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="bay">
+  <div class="bay__label"><b>这台机器</b>路径与出口</div>
+  <div class="bay__body">
+    <dl class="kv">
+      <dt>配置目录</dt><dd class="v">{{ cfg_dir }}</dd>
+      <dt>备份目录</dt><dd class="v">{{ data_dir }}/backups</dd>
+      <dt>公网地址</dt><dd class="v">{{ public_base }}</dd>
+      <dt>只读文件</dt><dd class="v">hot-update.json（走 GitHub 那条通道）</dd>
+    </dl>
+  </div>
+</div>
 {% endblock %}

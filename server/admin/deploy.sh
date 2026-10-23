@@ -3,7 +3,8 @@
 # 部署运维后台到 relay。
 #
 #   ./deploy.sh            打包 web/ → relay:/srv/admin，重建容器
-#   ./deploy.sh --no-build 只同步代码，不重建（改模板/静态文件时够用）
+#   ./deploy.sh --no-build 只同步代码，不重建。注意：Dockerfile 是 COPY app，
+#                          模板和静态文件都在镜像里 —— 不重建等于没发。
 #
 # 前置：VPS 上 /srv/admin/.env 已经存在（首次从 .env.example 复制并填好）。
 set -euo pipefail

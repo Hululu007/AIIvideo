@@ -1,23 +1,37 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>登录 · AIIvideo 后台</title>
-<link rel="stylesheet" href="{{ mount }}/static/app.css">
+<title>登录 · 值班台</title>
+<link rel="stylesheet" href="{{ mount }}/static/app.css?v={{ asset }}">
+<script>
+(function () {
+  var saved = null;
+  try { saved = localStorage.getItem('admin-theme'); } catch (e) {}
+  var dark = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+})();
+</script>
 </head>
-<body class="login-body">
-<form class="login-card" method="post" action="{{ mount }}/login" autocomplete="off">
-  <h1>AIIvideo 后台</h1>
-  <p>维护源清单与 App 用户。</p>
-  {% if error %}<div class="flash bad">{{ error }}</div>{% endif %}
-  <label for="login-username">账号</label>
-  <input id="login-username" name="username" type="text" autocomplete="username"
-         autocapitalize="off" spellcheck="false" placeholder="admin" autofocus>
-  <label for="login-password">口令</label>
-  <input id="login-password" name="password" type="password" autocomplete="current-password"
-         placeholder="登录口令">
-  <button type="submit">登录</button>
-</form>
+<body>
+<div class="login">
+  <form class="login__card" method="post" action="{{ mount }}/login" autocomplete="off">
+    <h1 class="login__title">值班台</h1>
+    <p class="login__note">AIIvideo 的源、清单、用户。</p>
+    {% if error %}<div class="flash flash--bad" style="margin: 0 0 14px"><span>{{ error }}</span></div>{% endif %}
+    <div class="field">
+      <span><label for="u">账号</label></span>
+      <input id="u" name="username" type="text" autocomplete="username" autocapitalize="off"
+             spellcheck="false" placeholder="admin" autofocus>
+    </div>
+    <div class="field">
+      <span><label for="p">口令</label></span>
+      <input id="p" name="password" type="password" autocomplete="current-password" placeholder="登录口令">
+    </div>
+    <button class="btn" type="submit">进来</button>
+    <p class="login__stamp"><span>{{ public_base or '127.0.0.1' }}</span><span>{{ today }}</span></p>
+  </form>
+</div>
 </body>
 </html>

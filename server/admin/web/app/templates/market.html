@@ -1,33 +1,82 @@
 {% extends "base.html" %}
-{% block title %}市场清单 · AIIvideo 后台{% endblock %}
+{% block title %}清单 · 值班台{% endblock %}
 {% block body %}
-<h1>市场清单</h1>
-<p class="muted">勾选要出现在 market.json 里的源。App 端不会内置这个地址，用户自己粘一串。</p>
-<form method="post" action="{{ mount }}/market">
+<div class="head">
+  <h1>清单</h1>
+  <div class="head__meta">在用 <b>{{ entries | length }}</b> 条 · 旧版 <b>{{ legacy | length }}</b> 条</div>
+</div>
+{% if market_error %}<p class="lede" style="color: var(--dead)">{{ market_error }}</p>{% endif %}
+<p class="lede">勾上的会写进 <span class="v">market-spider.json</span>，那是用户在设置页粘的那个地址。改名等于改用户在列表里看到的名字。</p>
+
+<form method="post" action="{{ mount }}/market/save" data-market>
   <input type="hidden" name="csrf" value="{{ csrf }}">
-  <table>
-    <thead><tr><th>选</th><th>源</th><th>地址</th></tr></thead>
-    <tbody>
-    {% for f in registry %}
-    <tr>
-      <td><input type="checkbox" name="entry" value="{{ f.name }}|https://149.104.21.177.sslip.io/{{ f.name }}|{{ f.adapter or '自定义源' }}"
-        {% if ('https://149.104.21.177.sslip.io/' + f.name) in current_urls %}checked{% endif %}></td>
-      <td>{{ f.name }}<div class="muted">{{ f.adapter or '自定义' }}</div></td>
-      <td class="muted">https://149.104.21.177.sslip.io/{{ f.name }}</td>
-    </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  <div class="row"><button type="submit">写入 market.json</button></div>
+  <div class="bay">
+    <div class="bay__label"><b>在用的清单</b>market-spider.json</div>
+    <div class="bay__body bay__body--bar">
+      <div class="scrollx">
+      <table class="table">
+        <thead>
+          <tr>
+            <th class="rowlamp"><span class="sr">发布</span></th>
+            <th style="width: 200px">名字</th>
+            <th>说明</th>
+            <th style="width: 190px">指向</th>
+            <th class="acts">配置</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for item in spider %}
+        <tr>
+          <td class="rowlamp">
+            <input type="checkbox" name="pick" value="{{ item.config }}" aria-label="发布 {{ item.name }}"
+                   {% if item.published %}checked{% endif %}>
+            <input type="hidden" name="row" value="{{ item.config }}">
+          </td>
+          <td style="min-width: 130px">
+            <input type="text" name="name" value="{{ item.name }}" aria-label="名字">
+          </td>
+          <td style="width: 100%">
+            <input type="text" name="desc" value="{{ item.desc }}" aria-label="说明">
+          </td>
+          <td class="dim nowrap">
+            <span class="v">spiders/{{ item.config.rsplit('/', 1)[-1] }}</span>
+            {% if item.lamp == 'dead' %}<span class="tag tag--dead">坏了</span>{% endif %}
+          </td>
+          <td class="acts"><a href="{{ mount }}/sources/{{ item.config }}/edit">编辑</a></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table></div>
+      <div class="actionbar">
+        <button class="btn" type="submit">写入清单</button>
+        <span class="hint" data-market-count>已勾 {{ entries | length }} 条</span>
+      </div>
+    </div>
+  </div>
 </form>
-<h2 class="section">当前清单（{{ current | length }} 条）</h2>
-<table>
-  <thead><tr><th>名称</th><th>说明</th><th>地址</th></tr></thead>
-  <tbody>
-  {% for item in current %}
-  <tr><td>{{ item.name }}</td><td class="muted">{{ item.desc }}</td><td class="muted">{{ item.url }}</td></tr>
-  {% else %}<tr><td colspan="3" class="muted">还没有写清单</td></tr>{% endfor %}
-  </tbody>
-</table>
-<p class="muted small">要改描述或加第三方地址，直接到「源文件 → market.json」里编辑。</p>
+
+<div class="bay">
+  <div class="bay__label"><b>旧版 REST 清单</b>market.json</div>
+  <div class="bay__body">
+    <p class="small muted">老用户还在用的那份，条目是站点 API 而不是配置文件。改它走「编辑 JSON」。</p>
+    {% if legacy %}
+    <div class="scrollx">
+    <table class="table table--tight">
+      <thead><tr><th>名字</th><th>说明</th><th>地址</th></tr></thead>
+      <tbody>
+      {% for item in legacy %}
+      <tr>
+        <td class="nowrap">{{ item.name }}</td>
+        <td class="dim" style="width: 100%">{{ item.desc }}</td>
+        <td class="v">{{ item.url }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <div class="empty"><b>还没有旧版清单</b>新用户不需要它。</div>
+    {% endif %}
+    <p class="mt"><a class="btn btn--quiet" href="{{ mount }}/sources/market.json/edit">编辑 JSON</a></p>
+  </div>
+</div>
 {% endblock %}
