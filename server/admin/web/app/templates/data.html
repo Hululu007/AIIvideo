@@ -1,0 +1,248 @@
+{% extends "base.html" %}
+{% block title %}数据 · 值班台{% endblock %}
+{% block body %}
+{% set t = ov.total if ov else None %}
+<div class="head">
+  <h1>数据</h1>
+  <div class="head__meta">
+    窗口 <b>{{ d }} 天</b>
+    {% if ov %}<span class="dim">· 按 {{ ov.tz }} 切日 · 到 {{ t.latest or '—' }}</span>{% endif %}
+  </div>
+</div>
+
+<div class="bay">
+  <div class="bay__label"><b>看多久</b>切换窗口</div>
+  <div class="bay__body bay__body--bar">
+    <div class="acts">
+      <a href="{{ mount }}/data?d=1"{% if d == 1 %} aria-current="page"{% endif %}>今天</a>
+      <a href="{{ mount }}/data?d=7"{% if d == 7 %} aria-current="page"{% endif %}>7 天</a>
+      <a href="{{ mount }}/data?d=30"{% if d == 30 %} aria-current="page"{% endif %}>30 天</a>
+      <a href="{{ mount }}/data?d=90"{% if d == 90 %} aria-current="page"{% endif %}>90 天</a>
+    </div>
+  </div>
+</div>
+
+{% if not ov %}
+<div class="bay">
+  <div class="bay__label"><b>读不到</b>埋点服务</div>
+  <div class="bay__body">
+    <div class="empty"><b>概览拉不下来</b>{{ data_error }}</div>
+  </div>
+</div>
+{% else %}
+
+<div class="bay">
+  <div class="bay__label"><b>规模</b>{{ d }} 天合计</div>
+  <div class="bay__body">
+    <div class="scrollx">
+    <table class="table table--tight">
+      <tbody>
+      <tr>
+        <td class="name">设备<span class="sub">按 device_id 去重，不是账号</span></td>
+        <td class="num">{{ t.devices }}</td>
+        <td class="num dim">{{ t.sessions }} 次会话</td>
+        <td class="acts dim nowrap">{{ t.since or '—' }} 起</td>
+      </tr>
+      <tr>
+        <td class="name">事件<span class="sub">上报条数</span></td>
+        <td class="num">{{ t.events }}</td>
+        <td class="num dim">{% if t.devices %}{{ (t.events / t.devices) | round(1) }} 条/设备{% endif %}</td>
+        <td class="acts dim nowrap">{{ t.latest or '—' }} 最新</td>
+      </tr>
+      <tr>
+        <td class="name">崩溃<span class="sub">uncaught，进程直接没了</span></td>
+        <td class="num">{{ t.crashes }}</td>
+        <td class="num dim">{% if t.devices %}{{ (t.crashes / t.devices * 100) | round(1) }}% 设备{% endif %}</td>
+        <td class="acts"><a href="{{ mount }}/data?d={{ d }}&kind=crash">看崩溃</a></td>
+      </tr>
+      <tr>
+        <td class="name">失败<span class="sub">带 code 的事件；括号里是用户划过、请求被取代这类取消</span></td>
+        <td class="num">{{ t.errors - (t.noise or 0) }}</td>
+        <td class="num dim">
+          {% if t.events %}{{ ((t.errors - (t.noise or 0)) / t.events * 100) | round(1) }}% 事件{% endif %}
+          · 取消 {{ t.noise or 0 }}
+        </td>
+        <td class="acts"><a href="{{ mount }}/data?d={{ d }}#fail">看排行</a></td>
+      </tr>
+      </tbody>
+    </table></div>
+  </div>
+</div>
+
+<div class="bay">
+  <div class="bay__label"><b>每天</b>设备 / 事件 / 失败</div>
+  <div class="bay__body">
+    {% if ov.daily %}
+    <div class="scrollx">
+    <table class="table table--tight">
+      <thead><tr><th>日期</th><th class="num">设备</th><th class="num">会话</th><th class="num">事件</th><th class="num">崩溃</th><th class="num">真失败</th><th class="num">失败率</th></tr></thead>
+      <tbody>
+      {% for row in ov.daily | reverse %}
+      <tr>
+        <td class="name nowrap">{{ row.iso }}</td>
+        <td class="num">{{ row.devices }}</td>
+        <td class="num dim">{{ row.sessions }}</td>
+        <td class="num">{{ row.events }}</td>
+        <td class="num{{ ' dim' if not row.crashes }}">{{ row.crashes }}</td>
+        <td class="num{{ ' dim' if not row.errors }}">{{ row.errors - (row.noise or 0) }}</td>
+        <td class="num dim">{% if row.events %}{{ ((row.errors - (row.noise or 0)) / row.events * 100) | round(1) }}%{% else %}—{% endif %}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <div class="empty"><b>这个窗口里没有事件</b>换个更长的窗口，或者等 App 那边发上来。</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="bay">
+  <div class="bay__label"><b>源</b>哪一个出了事</div>
+  <div class="bay__body">
+    {% if ov.sources %}
+    <div class="scrollx">
+    <table class="table table--tight">
+      <thead><tr><th>源</th><th class="num">设备</th><th class="num">事件</th><th class="num">播放</th><th class="num">失败</th><th class="num">最后一次</th></tr></thead>
+      <tbody>
+      {% for row in ov.sources %}
+      <tr>
+        <td class="name">{{ row.source_id }}</td>
+        <td class="num">{{ row.devices }}</td>
+        <td class="num">{{ row.events }}</td>
+        <td class="num dim">{{ row.plays }}</td>
+        <td class="num{{ '' if row.errors else ' dim' }}">{{ row.errors }}</td>
+        <td class="num dim nowrap">{{ row.last_at or '—' }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <div class="empty"><b>没有源维度的数据</b>2.0.19 之前的事件不带 source。</div>
+    {% endif %}
+    {% if ov.sources and ov.sources | length == 1 and ov.sources[0].source_id == '（没报源）' %}
+    <p class="small muted">这一整列都是空的：App 侧只有前端播放事件带 source，桥指令（封面、spider、详情）
+    一律不带，所以服务端只能落成「没报源」。要在这一页看出「哪个源在出事」，得让 Java 侧的
+    Report 在每条事件上补当前的源身份 —— 排在下一版。</p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="bay" id="fail">
+  <div class="bay__label"><b>失败排行</b>前 20</div>
+  <div class="bay__body">
+    {% if ov.errors %}
+    <div class="scrollx">
+    <table class="table table--tight">
+      <thead><tr><th>哪一类</th><th>卡在哪</th><th class="num">次数</th><th class="num">设备</th><th class="num">最后一次</th></tr></thead>
+      <tbody>
+      {% for row in ov.errors %}
+      <tr>
+        <td class="name nowrap">{{ row.kind }}<span class="sub">{{ row.code }}{% if row.noise %} · 取消/竞态，不算故障{% endif %}</span></td>
+        <td>
+          <code>{{ row.stage or '—' }}</code>
+          {% if row.msg %}<span class="sub sub--line" title="{{ row.msg }}">{{ row.msg }}</span>{% endif %}
+        </td>
+        <td class="num">{{ row.n }}</td>
+        <td class="num dim">{{ row.devices }}</td>
+        <td class="num dim nowrap">{{ row.last_at or '—' }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <div class="empty"><b>这个窗口里没有失败</b>不是「没上报」，是「没失败」—— 失败的判定是 code 字段非空。</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="bay">
+  <div class="bay__label"><b>版本与机型</b>分母别搞错</div>
+  <div class="bay__body">
+    <div class="scrollx">
+    <table class="table table--tight">
+      <tbody>
+      <tr>
+        <td class="name">App 版本<span class="sub">只有 2.0.19 之后、且带密钥的包会上报</span></td>
+        <td>
+          {% for row in ov.versions %}
+          <span class="tag">{{ row.app_version }} · {{ row.devices }} 台</span>
+          {% else %}
+          <span class="dim">—</span>
+          {% endfor %}
+        </td>
+      </tr>
+      <tr>
+        <td class="name">机型 Top 10</td>
+        <td>
+          {% for row in ov.models %}
+          <span class="tag">{{ row.model }} · {{ row.devices }}</span>
+          {% else %}
+          <span class="dim">—</span>
+          {% endfor %}
+        </td>
+      </tr>
+      </tbody>
+    </table></div>
+  </div>
+</div>
+
+<div class="bay">
+  <div class="bay__label"><b>事件类型</b>这一版埋了什么</div>
+  <div class="bay__body">
+    <div class="scrollx">
+    <table class="table table--tight">
+      <thead><tr><th>kind / name</th><th class="num">事件</th><th class="num">设备</th><th class="num">失败</th></tr></thead>
+      <tbody>
+      {% for row in ov.kinds %}
+      <tr>
+        <td class="name nowrap">{{ row.kind }} <span class="dim">/ {{ row.name }}</span></td>
+        <td class="num">{{ row.events }}</td>
+        <td class="num dim">{{ row.devices }}</td>
+        <td class="num{{ '' if row.errors else ' dim' }}">{{ row.errors }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+  </div>
+</div>
+{% endif %}
+
+<div class="bay">
+  <div class="bay__label"><b>事件流</b>最近 {{ stream | length }} 条{% if kind %} · 只看 {{ kind }}{% endif %}</div>
+  <div class="bay__body">
+    <div class="acts" style="margin:0 0 10px">
+      <a href="{{ mount }}/data?d={{ d }}"{% if not kind %} aria-current="page"{% endif %}>全部</a>
+      <a href="{{ mount }}/data?d={{ d }}&kind=app"{% if kind == 'app' %} aria-current="page"{% endif %}>行为</a>
+      <a href="{{ mount }}/data?d={{ d }}&kind=play"{% if kind == 'play' %} aria-current="page"{% endif %}>播放</a>
+      <a href="{{ mount }}/data?d={{ d }}&kind=bridge"{% if kind == 'bridge' %} aria-current="page"{% endif %}>桥</a>
+      <a href="{{ mount }}/data?d={{ d }}&kind=crash"{% if kind == 'crash' %} aria-current="page"{% endif %}>崩溃</a>
+      <a href="{{ mount }}/data?d={{ d }}&kind={{ kind }}&clean={{ 0 if clean else 1 }}">{{ '含取消/竞态' if clean else '只看真失败' }}</a>
+    </div>
+    {% if stream_error %}
+    <div class="empty"><b>事件流拉不下来</b>{{ stream_error }}</div>
+    {% elif stream %}
+    <div class="scrollx">
+    <table class="table table--tight">
+      <thead><tr><th>时间</th><th>事件</th><th>源</th><th>设备 </th><th class="num">耗时</th></tr></thead>
+      <tbody>
+      {% for row in stream %}
+      <tr>
+        <td class="num nowrap">{{ row.at }}</td>
+        <td>
+          <span class="{{ 'tag tag--dead' if row.code else '' }}">{{ row.kind }}/{{ row.name }}</span>
+          {% if row.stage %}<code>{{ row.stage }}</code>{% endif %}
+          {% if row.msg %}<span class="sub sub--line" title="{{ row.msg }}">{{ row.msg }}</span>{% endif %}
+        </td>
+        <td class="dim nowrap">{{ row.source_id or '—' }}</td>
+        <td class="dim nowrap">{{ row.model or '—' }}<span class="sub">{{ row.app_version }} · {{ row.device }}</span></td>
+        <td class="num dim">{{ row.ms if row.ms is not none else '—' }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <div class="empty"><b>没有事件</b>App 那边一个都没发上来。</div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

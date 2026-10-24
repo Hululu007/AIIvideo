@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import auth, inspect, registry, sources, users
+from . import auth, inspect, registry, sources, track, users
 from .config import BASE_DIR, CFG_DIR, COOKIE_NAME, DATA_DIR, MOUNT_PATH, PUBLIC_BASE, SESSION_TTL_HOURS
 from .db import init_sqlite, sqlite
 
@@ -356,6 +356,25 @@ def audit_page(request: Request):
     with sqlite() as conn:
         rows = conn.execute("SELECT * FROM audit ORDER BY id DESC LIMIT 300").fetchall()
     return render(request, "audit.html", session, rows=rows)
+
+
+# ── 数据（埋点） ────────────────────────────────────────────────────
+#
+# 这里的数不是后台自己算的：埋点库一步都没出 track 的 compose 网络，后台够不着。
+# 所以整页靠 track 服务的 /stats/* 两个只读接口，失败也要能显示 —— 概览挂了
+# 事件流可能还在，两条路各报各的错。
+
+@app.get("/data", response_class=HTMLResponse)
+def data_page(request: Request, d: int = 7, kind: str = "", clean: int = 0):
+    session = auth.require(request)
+    inventory(request)          # base.html 的灯带要它
+    days = d if d in (1, 7, 30, 90) else 7
+    overview, data_error = track.overview(days)
+    stream, stream_error = track.events(60, kind, bool(clean))
+    return render(request, "data.html", session,
+                  ov=overview, data_error=data_error,
+                  stream=stream, stream_error=stream_error,
+                  d=days, kind=kind, clean=bool(clean))
 
 
 # ── 账号 ────────────────────────────────────────────────────────────

@@ -28,9 +28,10 @@ import java.util.UUID;
  * 采：机型、系统版本、App 版本、源 id、阶段、错误码、耗时、内容 id、分类。
  * 不采：账号、邮箱、手机号、搜索原文（只存关键词的哈希）、内容标题全文。
  *
- * ── 用户能关掉 ──────────────────────────────────────────────────────
- * 设置里关掉之后只留 crash。崩了之后连崩在哪都不知道，那这个 App 就没法维护了；
- * 除此之外的行为统计一律不发。
+ * ── 源身份 ──────────────────────────────────────────────────────────
+ * 每条事件都带 source：桥指令（封面、spider、详情）自己不知道当前是哪个源，
+ * 所以由 SiteProfile 在装配时调 setSource() 挂一份，build() 时补上。
+ * 不带的话后台那一列全是空的 —— 2.0.20 就是这样，只能靠报错文案倒推是哪个源。
  */
 final class Report {
 
@@ -54,6 +55,8 @@ final class Report {
     private static SharedPreferences prefs;
     private static String deviceId = "";
     private static String sessionId = "";
+    /** 当前内容源的短名字（51cg / mrds66 / hanime1…），由 SiteProfile 装配时挂上。 */
+    private static volatile String currentSource = "";
 
     private Report() {
     }
@@ -81,6 +84,48 @@ final class Report {
         queue = new ReportQueue(app, canFlush);
         // 上次没发出去的，开机补一发
         queue.maybeFlush(true);
+    }
+
+    /** 装配源的时候调一次（见 SiteProfile 构造）。空串 = 还不知道是哪个源。 */
+    static void setSource(String label) {
+        currentSource = label == null ? "" : label.trim();
+    }
+
+    static String source() {
+        return currentSource;
+    }
+
+    /**
+     * 标记：这个异常**已经报过一次**了，重试的时候别再报。
+     *
+     * 封面这类东西会被滚动反复重试，第一次失败值得上报，后面三十次同样的失败
+     * 只是噪音 —— 后台那 1340 条「封面解密结果无效」里，绝大多数是这么来的。
+     */
+    interface Once {
+    }
+
+    static boolean isOnce(Throwable error) {
+        return error instanceof Once;
+    }
+
+    /**
+     * 取消不算失败：用户快速划过时上一个请求被取代、spider 宿主退出时掐掉在途调用、
+     * 同一个宿主排队超时。这类以前和真失败混在一起上报，把失败率顶到了 75%。
+     * 现在单列成 command_cancelled，**不带 code** —— 服务端的「失败」判据是
+     * code 非空，所以它们会进事件流、但不进失败统计。
+     */
+    private static final String[] CANCEL_WORDS = {
+            "被更新的请求取代", "宿主已关闭", "排队超时", "被中断", "已取消", "取消了"
+    };
+
+    static boolean isCancellation(Throwable error) {
+        if (error == null) return false;
+        if (error instanceof InterruptedException) return true;
+        String message = String.valueOf(error.getMessage());
+        for (String word : CANCEL_WORDS) {
+            if (message.contains(word)) return true;
+        }
+        return false;
     }
 
     /** 自检口子要看的：还有多少条压在盘里没发出去。 */
@@ -126,14 +171,18 @@ final class Report {
      */
     static void bridgeFailure(String command, Exception error, long elapsedMs) {
         JSONObject props = new JSONObject();
+        boolean cancelled = isCancellation(error);
         try {
             props.put("stage", command);
-            props.put("code", error.getClass().getSimpleName());
+            // 取消类不带 code：服务端按 code 非空算失败，带了就等于换个名字继续污染。
+            if (!cancelled) {
+                props.put("code", error.getClass().getSimpleName());
+            }
             props.put("msg", shorten(String.valueOf(error.getMessage()), 200));
             props.put("ms", (int) Math.min(elapsedMs, 600000L));
         } catch (Exception ignored) {
         }
-        event("bridge", "command_error", props);
+        event("bridge", cancelled ? "command_cancelled" : "command_error", props);
     }
 
     /** 前端主动报：{kind, name, source, props:{...}}。 */
@@ -164,8 +213,9 @@ final class Report {
             event.put("session", sessionId);
             event.put("kind", kind);
             event.put("name", name);
-            if (source != null && !source.isEmpty()) {
-                event.put("source", source);
+            String effective = (source != null && !source.isEmpty()) ? source : currentSource;
+            if (effective != null && !effective.isEmpty()) {
+                event.put("source", effective);
             }
             if (props != null) {
                 event.put("props", props);
@@ -177,6 +227,9 @@ final class Report {
 
     private static void enqueue(JSONObject event) {
         if (queue == null) {
+            // 以前这里直接 return：上报没起来的时候，事件就这么没了，连一行日志都没有。
+            // 排查「为什么这条事件没到」时最想看到的就是这一句。
+            Log.w(TAG, "队列没起来，丢掉一条：" + event.optString("kind") + "/" + event.optString("name"));
             return;
         }
         try {

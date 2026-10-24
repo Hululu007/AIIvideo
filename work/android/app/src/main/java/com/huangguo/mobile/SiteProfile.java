@@ -85,6 +85,9 @@ final class SiteProfile {
     SiteProfile(JSONObject siteDefault, JSONObject userConfig) throws Exception {
         JSONObject jSONObjectMerge = merge(siteDefault, userConfig == null ? new JSONObject() : userConfig);
         this.rules = jSONObjectMerge;
+        // 埋点要的「当前是哪个源」在这里挂一次。放在这儿是因为注释里早就写了：
+        // 这是全 App 唯一一处「当前源长什么样」的组装点 —— 散到各调用方去挂必然漂。
+        Report.setSource(SourceConfig.label(jSONObjectMerge));
         String strReplaceAll = jSONObjectMerge.getString("origin").replaceAll("/+$", "");
         this.origin = strReplaceAll;
         if (!strReplaceAll.isEmpty()) {

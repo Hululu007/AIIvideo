@@ -14,6 +14,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
 
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -91,6 +92,40 @@ final class SourceConfig {
         // 说不出 id 往哪儿翻（配置没配全），就退回配置地址 —— 至少不会和别的源撞上。
         return "hgsrc:cfg|" + config.optString("__url", "");
     }
+    /**
+     * 源的短名字，只给埋点用：spider 取地址最后一段（51cg / mrds66），REST 取主机名。
+     *
+     * 为什么不直接用 identity()：那个是「id 空间」的指纹，长这样
+     * {@code hgsrc:spider|https://…/spiders/51cg.json}，进每条事件既占地方又没法看。
+     * 埋点要的是「能一眼认出是哪个源」，人工看的名字更合适；真要严格对账再按 identity 分组。
+     */
+    static String label(JSONObject config) {
+        if (config == null) return "";
+        JSONObject web = config.optJSONObject("web");
+        String spider = web == null ? "" : web.optString("spider", "").trim();
+        if (spider.length() > 0) {
+            int cut = spider.indexOf('?');
+            if (cut > 0) spider = spider.substring(0, cut);
+            int slash = spider.lastIndexOf('/');
+            String name = slash >= 0 ? spider.substring(slash + 1) : spider;
+            if (name.endsWith(".json")) name = name.substring(0, name.length() - 5);
+            else if (name.endsWith(".js")) name = name.substring(0, name.length() - 3);
+            if (name.length() > 0) return name;
+        }
+        String origin = config.optString("origin", "").trim();
+        if (origin.length() > 0) {
+            try {
+                String host = new URI(origin).getHost();
+                if (host != null && host.length() > 0) {
+                    return host.startsWith("www.") ? host.substring(4) : host;
+                }
+            } catch (Exception ignored) {
+            }
+            return origin;
+        }
+        return "";
+    }
+
     /** 把路径模板里 `{id}` 那一格挖掉。挖掉之后剩下的就是「id 空间」的边界。 */
     static String trimId(String template) {
         int at = template.indexOf("{id}");

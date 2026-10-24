@@ -36,4 +36,10 @@ READONLY_FILES = {"hot-update.json"}
 
 DB_PATH = DATA_DIR / "admin.db"
 
+# 埋点服务的只读接口。默认指向回环上的 8092（track 那套发布到 127.0.0.1:8092）。
+# 口令和 track 容器里的 STATS_TOKEN 必须是同一个，否则 /stats/* 一律 401。
+TRACK_URL = os.getenv("TRACK_URL", "http://127.0.0.1:8092").strip()
+TRACK_TOKEN = os.getenv("TRACK_STATS_TOKEN", "").strip()
+TRACK_TIMEOUT = float(os.getenv("TRACK_TIMEOUT", "6"))
+
 BASE_DIR.joinpath("templates")  # noqa: B018  —— 早失败：镜像里少拷了模板会直接崩

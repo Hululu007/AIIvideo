@@ -40,6 +40,11 @@ if [ ! -f .env ]; then
 else
   echo "  .env 已存在，保留原值"
 fi
+# 老部署没有 STATS_TOKEN（后台数据页要用）。缺就补一条，已有的不动。
+if ! grep -q '^STATS_TOKEN=' .env; then
+  echo "STATS_TOKEN=\$(openssl rand -hex 32)" >> .env
+  echo "  给 .env 补了一条 STATS_TOKEN（后台数据页读 /stats/* 用）"
+fi
 REMOTE_SCRIPT
 
 say "同步代码到 $REMOTE:$REMOTE_DIR"

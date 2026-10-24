@@ -20,6 +20,9 @@ services:
       DATA_DIR: /data
       DATABASE_URL: postgresql://aii:${POSTGRES_PASSWORD}@127.0.0.1:5432/aii
       PUBLIC_BASE: ${PUBLIC_BASE}
+      # 埋点只读接口。/stats/* 走 track 的 8092（回环发布），口令两边用同一个。
+      TRACK_URL: ${TRACK_URL:-http://127.0.0.1:8092}
+      TRACK_STATS_TOKEN: ${TRACK_STATS_TOKEN:-}
     volumes:
       - /srv/cfg:/srv/cfg
       - ./data:/data

@@ -41,6 +41,8 @@ services:
       # 换成自己的口令时注意 @ : / 这几个字符要百分号编码。
       DATABASE_URL: postgresql://track:${POSTGRES_PASSWORD}@db:5432/track
       TRACK_SECRET: ${TRACK_SECRET:?TRACK_SECRET 没设，App 侧签名会对不上}
+      # 后台读 /stats/* 用的口令。没设就整组回 503（页面报「没配」），不会敞着。
+      STATS_TOKEN: ${STATS_TOKEN:-}
       RETENTION_DAYS: ${RETENTION_DAYS:-90}
       AGG_TZ: ${AGG_TZ:-Asia/Shanghai}
       RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-60}

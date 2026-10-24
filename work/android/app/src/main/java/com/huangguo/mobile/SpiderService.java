@@ -59,7 +59,18 @@ public class SpiderService extends Service {
         // 见 SiteFetchWebView.appContext 的注释：2026-10-19 宿主搬进程之后，
         // MissAV 的过盾就是卡在「拿不到 MainActivity.host」上。
         SiteFetchWebView.init(getApplicationContext());
+        // 埋点：宿主进程的起点。主进程那边有「spider 服务绑定失败」这个报错，
+        // 但光看它分不清是「服务压根没起来」还是「起来了又死」——配上这两个
+        // 端点事件（进程内是写队列，由主进程统一发）才对得上账。
+        JSONObject born = new JSONObject();
+        try {
+            born.put("pid", android.os.Process.myPid());
+            born.put("reason", "onCreate");
+        } catch (Exception ignored) {
+        }
+        Report.event("spider", "host_start", born);
     }
+
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -124,6 +135,15 @@ public class SpiderService extends Service {
 
     @Override
     public void onDestroy() {
+        // 埋点：宿主进程的终点。主进程那边有「spider 服务绑定失败」这个报错，
+        // 但光看它分不清是「服务压根没起来」还是「起来了又死」——配上 start/stop
+        // 两个端点事件（进程内只写队列，由主进程统一发）才对得上账。
+        JSONObject gone = new JSONObject();
+        try {
+            gone.put("pid", android.os.Process.myPid());
+        } catch (Exception ignored) {
+        }
+        Report.event("spider", "host_stop", gone);
         // 进程回收前的收尾：销毁宿主 WebView，渲染进程随进程退出一起消失。
         // 不做这一步的话，被主进程 stopService 时 WebView 的渲染线程可能多活几秒。
         SpiderRuntime.shutdown();

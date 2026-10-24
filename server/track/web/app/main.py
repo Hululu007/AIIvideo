@@ -32,8 +32,8 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.concurrency import run_in_threadpool
 
-from . import db, ingest, jobs, ratelimit
-from .config import MAX_BODY_BYTES, MAX_INFLATED_BYTES, TRACK_SECRET
+from . import db, ingest, jobs, ratelimit, stats
+from .config import MAX_BODY_BYTES, MAX_INFLATED_BYTES, STATS_TOKEN, TRACK_SECRET
 
 log = logging.getLogger("track")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -187,3 +187,44 @@ async def healthz() -> JSONResponse:
     if not up:
         return JSONResponse({"ok": False, "db": "down"}, status_code=503)
     return JSONResponse({"ok": True, "db": "up"})
+
+
+# ── 只读接口：给值班台 ──────────────────────────────────────────────────
+#
+# 后台跑在 host 网络上，够不着 track-db（那个库没发布端口）。所以读也走 HTTP：
+# 一把 X-Stats-Token 头，常量时间比较，没配口令就整组关掉（503 而不是放行）。
+# 这两个接口只做查询，不写任何东西。
+
+def stats_denied(request: Request) -> JSONResponse | None:
+    if not STATS_TOKEN:
+        return fail(503, "没配 STATS_TOKEN，/stats/* 关着")
+    supplied = request.headers.get("x-stats-token", "")
+    if not hmac.compare_digest(supplied, STATS_TOKEN):
+        return fail(401, "X-Stats-Token 不对")
+    return None
+
+
+@app.get("/stats/overview")
+async def stats_overview(request: Request, days: int = 7) -> JSONResponse:
+    denied = stats_denied(request)
+    if denied is not None:
+        return denied
+    try:
+        data = await run_in_threadpool(stats.overview, days)
+    except Exception:  # noqa: BLE001
+        log.exception("读概览失败")
+        return fail(503, "数据库暂时读不出来")
+    return JSONResponse(data)
+
+
+@app.get("/stats/events")
+async def stats_events(request: Request, limit: int = 80, kind: str = "", clean: int = 0) -> JSONResponse:
+    denied = stats_denied(request)
+    if denied is not None:
+        return denied
+    try:
+        rows = await run_in_threadpool(stats.recent, limit, kind, bool(clean))
+    except Exception:  # noqa: BLE001
+        log.exception("读事件流失败")
+        return fail(503, "数据库暂时读不出来")
+    return JSONResponse({"items": rows})

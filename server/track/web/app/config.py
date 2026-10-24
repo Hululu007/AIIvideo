@@ -17,6 +17,10 @@ DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 # 效果是所有请求都 401。这比「没配就放行」安全：宁可挂，不可敞着。
 TRACK_SECRET = os.getenv("TRACK_SECRET", "").strip() or secrets.token_hex(32)
 
+# 后台读埋点用的口令。跟 TRACK_SECRET 分开：那把是 App 用来签请求体的，
+# 这把只验「你是值班台」。没配就等于关掉 /stats/*（回 503），不会敞着。
+STATS_TOKEN = os.getenv("STATS_TOKEN", "").strip()
+
 # ── 请求上限 ────────────────────────────────────────────────────────────
 MAX_EVENTS = int(os.getenv("MAX_EVENTS", "200"))            # 单次条数
 MAX_EVENT_BYTES = int(os.getenv("MAX_EVENT_BYTES", "4096"))  # 单条序列化后

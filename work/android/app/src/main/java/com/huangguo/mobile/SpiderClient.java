@@ -55,6 +55,10 @@ final class SpiderClient {
     private static ServiceConnection connection;
     private static Context appContext;
     private static boolean bindAttempted;
+    /** 「绑定失败」到底是哪一种，见 channelOf 里那段说明。 */
+    private static volatile boolean bindRefused;
+    private static volatile boolean disconnected;
+    private static volatile boolean bindingDied;
 
     private SpiderClient() {
     }
@@ -160,7 +164,15 @@ final class SpiderClient {
             throw new IOException("spider 调用被中断。");
         }
         final ISpiderChannel ch = channel;
-        if (ch == null) throw new IOException("spider 服务绑定失败。");
+        if (ch == null) {
+            // 以前只说「绑定失败」，看不出是哪种：bindService 直接被拒、服务连上又断、
+            // 还是 binder 死亡。这三种的修法完全不同，所以把理由带上。
+            throw new IOException("spider 服务绑定失败："
+                    + (bindRefused ? "bindService 被系统拒了（服务进程起不来）"
+                    : disconnected ? "服务连上又断开（:spider 进程中途死了）"
+                    : "回调到了但没有拿到 channel（binder 为空）")
+                    + "。");
+        }
         return ch;
     }
 
@@ -168,6 +180,8 @@ final class SpiderClient {
         if (bindAttempted && connection != null) return;
         appContext = app;
         bindAttempted = true;
+        disconnected = false;
+        bindingDied = false;
         bound = new CountDownLatch(1);
         connection = new ServiceConnection() {
             @Override
@@ -180,15 +194,28 @@ final class SpiderClient {
             public void onServiceDisconnected(ComponentName name) {
                 // 进程被杀：置空让下一次调用重新走绑定。bound 保持原值没关系 ——
                 // 它只在 ensure 的等待窗口里被消费，断连时那个窗口早已结束。
+                disconnected = true;
                 channel = null;
+            }
+
+            @Override
+            public void onBindingDied(ComponentName name) {
+                // API 26+ 才有：绑定还活着但服务进程没了。和「断开」分开记，
+                // 因为它不会重新连上，下一次必须重新 bind。
+                disconnected = true;
+                bindingDied = true;
+                channel = null;
+                bindAttempted = false;
             }
         };
         final Intent intent = new Intent(app, SpiderService.class);
         // BIND_AUTO_CREATE：让系统替我们维护 :spider 的生命周期；
         // BIND_IMPORTANT 之外不加任何提升 —— 它是后台工作者，不该抢前台调度。
+        bindRefused = false;
         if (!app.bindService(intent, connection, Context.BIND_AUTO_CREATE)) {
             // 绑定请求本身被拒（多为进程处于错误状态）：把闩锁放开，让上面的
             // channelOf 抛「绑定失败」而不是干等到超时。
+            bindRefused = true;
             bound.countDown();
         }
     }

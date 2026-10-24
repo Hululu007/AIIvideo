@@ -81,6 +81,50 @@ final class SiteRepository {
         }
     }
 
+    // ── 封面失败的负缓存 ────────────────────────────────────────────────
+    //
+    // 前台滚动时会不停重试同一张封面（cover.js 每 30 秒一次、且列表重绘又会问）。
+    // 没有这一层的话，一次故障能刷出几百条一模一样的上报 —— 线上那 1340 条
+    // 「封面解密结果无效」里绝大多数是这么来的。第一次照常抛、照常报；
+    // 五分钟内同样的地址直接抛缓存里那条，并且带上 Report.Once，dispatch 不再上报。
+
+    private static final long FAIL_CACHE_MS = 5 * 60 * 1000L;
+    private static final int FAIL_CACHE_MAX = 300;
+    private static final java.util.Map<String, CoverFailure> FAILED =
+            new java.util.concurrent.ConcurrentHashMap<String, CoverFailure>();
+
+    /** 缓存过的那条失败：消息和第一次一模一样，但重试时不再进上报。 */
+    static final class CoverFailure extends IllegalStateException implements Report.Once {
+        final long until;
+
+        CoverFailure(String message, long until) {
+            super(message);
+            this.until = until;
+        }
+    }
+
+    private static void rememberFailure(String url, String message) {
+        if (FAILED.size() > FAIL_CACHE_MAX) {
+            FAILED.clear();
+        }
+        FAILED.put(url, new CoverFailure(message, System.currentTimeMillis() + FAIL_CACHE_MS));
+    }
+
+    /** 把「拿回来的到底是什么」写清楚，别再让人靠猜。包可见，方便单测盯住文案。 */
+    static String coverFailureDetail(byte[] raw, byte[] decoded, String mode, String host) {
+        StringBuilder sb = new StringBuilder("封面不是图片：mode=").append(mode)
+                .append(" 原始").append(raw == null ? 0 : raw.length).append("字节");
+        if (decoded != null && decoded.length >= 4) {
+            sb.append(" 解出").append(String.format("%02x%02x%02x%02x",
+                    Integer.valueOf(decoded[0] & 255), Integer.valueOf(decoded[1] & 255),
+                    Integer.valueOf(decoded[2] & 255), Integer.valueOf(decoded[3] & 255)));
+            if (decoded[0] == 60) {
+                sb.append("（HTML，图床回了错误页）");
+            }
+        }
+        return sb.append(" @").append(host).toString();
+    }
+
     /** 只为日志取个主机名，失败返回原串。 */
     private static String hostOnly(String url) {
         try {
@@ -136,6 +180,13 @@ final class SiteRepository {
     String coverData(String str) throws Exception {
         String str2;
         String strCoverUrl = this.profile.coverUrl(str);
+        CoverFailure cached = FAILED.get(strCoverUrl);
+        if (cached != null) {
+            if (System.currentTimeMillis() < cached.until) {
+                throw cached;
+            }
+            FAILED.remove(strCoverUrl);
+        }
         URL url = new URL(strCoverUrl);
         String path = url.getPath();
         int dot = path.lastIndexOf(46);
@@ -183,18 +234,32 @@ final class SiteRepository {
             }
         }
         if (bArr == null) {
-            byte[] bArrFetch = fetchCover(strCoverUrl);
+            byte[] raw;
+            try {
+                raw = fetchCover(strCoverUrl);
+            } catch (Exception fetchError) {
+                // 抓不下来（超时、连接重置、图床回 4xx）就照原样抛 —— dispatch 会记一条。
+                // 同一条地址五分钟内再问，走上面的缓存，不再重复上报。
+                rememberFailure(strCoverUrl, String.valueOf(fetchError.getMessage()));
+                throw fetchError;
+            }
             String strOptString = this.profile.object("cover").optString("mode");
+            byte[] bArrFetch = raw;
             if ("aes-cbc".equals(strOptString) || (Text.TEXT_EMPHASIS_AUTO.equals(strOptString) && !validImage(bArrFetch))) {
                 Cipher cipher = Cipher.getInstance(this.profile.object("cover").getString("transformation"));
                 cipher.init(2, new SecretKeySpec(this.profile.keyBytes("key"), "AES"), new IvParameterSpec(this.profile.keyBytes("iv")));
                 bArrFetch = cipher.doFinal(bArrFetch);
             }
-            bArr = bArrFetch;
-            repairConfiguredHeader(bArr);
-            if (!validImage(bArr)) {
-                throw new IllegalStateException("封面解密结果无效");
+            repairConfiguredHeader(bArrFetch);
+            if (!validImage(bArrFetch)) {
+                // 以前这里只说「解密结果无效」，把两件事混成一件：图床没给图片
+                // （404 / 防盗链 / 断流回了个错误页），和密钥 IV 对不上。
+                // 现在把原始字节数、解出来的前四字节、主机一起带上，一眼能分清。
+                String detail = coverFailureDetail(raw, bArrFetch, strOptString, url.getHost());
+                rememberFailure(strCoverUrl, detail);
+                throw new IllegalStateException(detail);
             }
+            bArr = bArrFetch;
             FileOutputStream fileOutputStream2 = new FileOutputStream(file);
             try {
                 fileOutputStream2.write(bArr);

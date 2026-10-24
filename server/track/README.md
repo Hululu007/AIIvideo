@@ -204,6 +204,12 @@ TRACK_SECRET=<.env 里那串> python3 acceptance.py https://149.104.21.177.sslip
 
 ## 查数
 
+日常看数据用后台的 `/admin/data`（读这里的 `/stats/overview`、`/stats/events`，
+口令 `STATS_TOKEN`）。下面这些 SQL 是页面还没覆盖的问题时手工查的。
+
+两个接口的判定口径都在 `web/app/stats.py` 顶部：「取消/竞态」（请求被更新的取代、
+宿主已关闭、排队超时、InterruptedException）不算失败，单独计数。
+
 ```sql
 -- 最近一小时的播放失败，按阶段和错误码
 select stage, code, count(*) from events

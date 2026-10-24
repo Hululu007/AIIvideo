@@ -28,11 +28,18 @@
 | `/sources` | 源列表（spider 14 + 老一代 3），搜索、只看要动手的 |
 | `/sources/<rel>/edit` | 编辑器：行号、检查栏、备份时间线、⌘S、改动行数 |
 | `/market` | 清单：勾选 + 就地改名字和说明 + 写回 `market-spider.json` |
+| `/data` | 埋点：规模、每天、源、失败排行、版本机型、事件流（1/7/30/90 天） |
 | `/users` | App 用户，搜索、重置口令、删号（走弹层，不用 `prompt`） |
 | `/audit` | 审计，最近 300 条 |
 | `/account` | 改自己的口令 |
 
 `<rel>` 是相对路径，例如 `spiders/51cg.json` 或 `market.json`。
+
+`/data` 的数不是这个后台自己算的：埋点库一步都没出 track 那套 compose 网络，
+后台是 host 网络，够不着它。所以整页读 track 服务的两个只读接口
+（`/stats/overview`、`/stats/events`），用 `TRACK_URL` + `TRACK_STATS_TOKEN` 两个环境变量，
+后者要和 `/srv/track/.env` 的 `STATS_TOKEN` 完全一致。没配就只显示一句「没配」，
+其它页不受影响。
 
 ## 拓扑
 

@@ -791,7 +791,8 @@ public final class MainActivity extends Activity {
             // 桥指令失败的统一出口。以前这些异常要么被前端的 catch 吞掉、要么
             // 变成一句「播放失败」；现在至少知道是哪个 stage、什么异常、花了多久。
             // 少数常态失败的指令不报，见 QUIET_COMMANDS。
-            if (!QUIET_COMMANDS.contains(str)) {
+            // 已经报过一次的（封面重试那条路）不再报，否则一次故障能刷出几百条。
+            if (!QUIET_COMMANDS.contains(str) && !Report.isOnce(error)) {
                 Report.bridgeFailure(str, error, System.currentTimeMillis() - startedAt);
             }
             throw error;
