@@ -167,18 +167,36 @@ async def events(request: Request) -> JSONResponse:
 
     device_id = ingest.device_of(request.headers.get("x-device"), payload)
     try:
-        rows = ingest.parse_batch(payload, device_id)
+        rows, rejected = ingest.parse_batch(payload, device_id)
     except ingest.IngestError as exc:
+        # 只有批级问题会到这里：请求体不是对象、events 不是数组、空数组、条数超限。
+        # 单条不合格已经降级成 rejected，不再连坐整批。
         log.info("拒收 ip=%s device=%s reason=%s", ip, device_id, exc.message)
         return fail(exc.status, exc.message)
 
+    if rejected:
+        # 客户端会反复重发同一批，所以这类不再回 4xx（回了它就在客户端被丢掉，
+        # 反而更难发现）。服务端留痕，把前几条 reason 带回去给排查用。
+        log.warning(
+            "逐条拒收 device=%s %s/%s 条：%s",
+            device_id, len(rejected), len(rejected) + len(rows),
+            "；".join(r["reason"] for r in rejected[:ingest.MAX_REPORTED_ERRORS]),
+        )
+
     # ⑥ 入库
     try:
-        accepted = await run_in_threadpool(db.insert_events, rows)
+        accepted = await run_in_threadpool(db.insert_events, rows) if rows else 0
     except Exception:  # noqa: BLE001 —— 堆栈只进日志
         log.exception("入库失败 device=%s 条数=%s", device_id, len(rows))
         return fail(503, "数据库暂时写不进去，稍后重试")
-    return JSONResponse({"ok": True, "accepted": accepted})
+    if not rejected:
+        return JSONResponse({"ok": True, "accepted": accepted})
+    return JSONResponse({
+        "ok": True,
+        "accepted": accepted,
+        "rejected": len(rejected),
+        "errors": rejected[:ingest.MAX_REPORTED_ERRORS],
+    })
 
 
 @app.get("/healthz")

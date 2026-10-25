@@ -178,14 +178,28 @@ final class SiteRepository {
     }
 
     String coverData(String str) throws Exception {
-        String str2;
-        String strCoverUrl = this.profile.coverUrl(str);
-        CoverFailure cached = FAILED.get(strCoverUrl);
+        String str2;   // 方法尾部拼 data URI 的 MIME 类型，别删。
+        // ── 负缓存查在 coverUrl() **之前** ─────────────────────────────
+        // coverUrl() 自己会抛「无效封面域名 / 无效封面地址」（配置问题，不是网络问题）。
+        // 缓存原来是放在它后面的，于是这两类失败永远进不了 rememberFailure ——
+        // 一张被白名单拒掉的封面会被每 30 秒重试一次、次次都上报。
+        // 线上证据：一台设备 34 条「无效封面域名」，横跨 351 分钟。
+        //
+        // 缓存键用**原始 URL**：coverUrl() 可能抛，那时拿不到归一化后的键。
+        CoverFailure cached = FAILED.get(str);
         if (cached != null) {
             if (System.currentTimeMillis() < cached.until) {
                 throw cached;
             }
-            FAILED.remove(strCoverUrl);
+            FAILED.remove(str);
+        }
+        String strCoverUrl;
+        try {
+            strCoverUrl = this.profile.coverUrl(str);
+        } catch (IllegalArgumentException configError) {
+            // 配置缺主机这类失败，重试一万次结果一样 —— 缓存住，别再刷上报。
+            rememberFailure(str, configError.getMessage() == null ? "封面配置不合法" : configError.getMessage());
+            throw configError;
         }
         URL url = new URL(strCoverUrl);
         String path = url.getPath();
@@ -240,7 +254,7 @@ final class SiteRepository {
             } catch (Exception fetchError) {
                 // 抓不下来（超时、连接重置、图床回 4xx）就照原样抛 —— dispatch 会记一条。
                 // 同一条地址五分钟内再问，走上面的缓存，不再重复上报。
-                rememberFailure(strCoverUrl, String.valueOf(fetchError.getMessage()));
+                rememberFailure(str, fetchError.getMessage() == null ? "请求失败" : fetchError.getMessage());
                 throw fetchError;
             }
             String strOptString = this.profile.object("cover").optString("mode");
@@ -256,7 +270,7 @@ final class SiteRepository {
                 // （404 / 防盗链 / 断流回了个错误页），和密钥 IV 对不上。
                 // 现在把原始字节数、解出来的前四字节、主机一起带上，一眼能分清。
                 String detail = coverFailureDetail(raw, bArrFetch, strOptString, url.getHost());
-                rememberFailure(strCoverUrl, detail);
+                rememberFailure(str, detail);
                 throw new IllegalStateException(detail);
             }
             bArr = bArrFetch;

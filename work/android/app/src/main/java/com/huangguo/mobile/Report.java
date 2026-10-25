@@ -118,10 +118,39 @@ final class Report {
             "被更新的请求取代", "宿主已关闭", "排队超时", "被中断", "已取消", "取消了"
     };
 
+    /**
+     * 取消判定。**顺序是有意义的**，别随手重排：
+     *
+     * `SocketTimeoutException extends InterruptedIOException`，而 okhttp 的
+     * callTimeout 也抛 `InterruptedIOException("timeout")`。那两条都是**真超时**
+     * —— 线上 26 条 SocketTimeoutException 均值 30 秒、全在 detail 阶段，把它们
+     * 洗成「取消」就等于把「站点慢到读不出来」这个信号藏起来。所以先排掉超时，
+     * 再看剩下的 InterruptedIOException。
+     *
+     * 只按类名判断不够：`DeadObjectException`（binder 对端进程死了）和
+     * `ConnectionShutdownException`（连接被本机关掉）在 2.0.21 里合计 37 条，
+     * 全被算成失败。它们本质都是「我们这边的生命周期结束了」。
+     */
     static boolean isCancellation(Throwable error) {
         if (error == null) return false;
         if (error instanceof InterruptedException) return true;
-        String message = String.valueOf(error.getMessage());
+        // binder 对端进程没了、连接被本机关掉：都是生命周期事件，不是故障。
+        String simple = error.getClass().getSimpleName();
+        if ("DeadObjectException".equals(simple) || "ConnectionShutdownException".equals(simple)) {
+            return true;
+        }
+        String message = error.getMessage() == null ? "" : error.getMessage().trim();
+        String lower = message.toLowerCase(Locale.US);
+        // 先排真超时（含子类，别让 instanceof InterruptedIOException 把它们吃掉）。
+        if (error instanceof java.net.SocketTimeoutException) return false;
+        if ("timeout".equals(lower) || "timed out".equals(lower)) return false;
+        if (error instanceof java.io.InterruptedIOException) {
+            // 消息为空的 InterruptedIOException 是 okhttp 掐连接时的常态，算取消。
+            return message.isEmpty()
+                    || lower.contains("interrupt")
+                    || lower.contains("cancel")
+                    || lower.contains("socket closed");
+        }
         for (String word : CANCEL_WORDS) {
             if (message.contains(word)) return true;
         }
@@ -151,14 +180,19 @@ final class Report {
     /**
      * 崩溃。同步落盘不发送 —— 进程马上就要死了，这时候发网络是给系统添乱，
      * 留着下次启动补发。
+     *
+     * 堆栈按**字节**裁，不按字符：服务端的上限是「序列化后 4096 字节」，
+     * 一个中文字符占 3 字节，`shorten(…, 4000)` 那种按字符写的上限在真实
+     * Android 堆栈（40 帧 × 70 字符）下会算到 4400+ 字节，整条被 413 掉。
+     * 只有手搓的十帧 diag 崩溃才刚好过得去 —— 线上 crash 表里就那两条。
      */
     static void crash(Throwable error, String where) {
         JSONObject props = new JSONObject();
         try {
             props.put("stage", where);
             props.put("code", error.getClass().getSimpleName());
-            props.put("msg", shorten(String.valueOf(error.getMessage()), 200));
-            props.put("trace", shorten(stackOf(error), 4000));
+            props.put("msg", text(error.getMessage(), 200));
+            props.put("trace", traceOf(error));
             props.put("thread", Thread.currentThread().getName());
         } catch (Exception ignored) {
         }
@@ -178,7 +212,7 @@ final class Report {
             if (!cancelled) {
                 props.put("code", error.getClass().getSimpleName());
             }
-            props.put("msg", shorten(String.valueOf(error.getMessage()), 200));
+            props.put("msg", text(error.getMessage(), 200));
             props.put("ms", (int) Math.min(elapsedMs, 600000L));
         } catch (Exception ignored) {
         }
@@ -219,6 +253,55 @@ final class Report {
             }
             if (props != null) {
                 event.put("props", props);
+            }
+        } catch (Exception ignored) {
+        }
+        return fit(event);
+    }
+
+    /**
+     * 单条事件的字节预算：服务端 `MAX_EVENT_BYTES` 是 4096，这里先自己收住。
+     *
+     * 留 296 字节余量给服务端可能补的字段（device 由 enqueue 补，它算在内；
+     * 但以后若加 kind 之外的列，别让它一脚踩过线）。超了就先砍 trace、再砍 msg ——
+     * 丢几行堆栈远好过整条被 413，然后连带把同批的其它事件一起带走。
+     */
+    static final int EVENT_BUDGET = 3800;
+
+    static int serializedSize(JSONObject event) {
+        try {
+            return event.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        } catch (Exception impossible) {
+            return 0;
+        }
+    }
+
+    /** 超预算就按顺序收缩，直到进线。改的是 props 里的 value，不新建对象。 */
+    private static JSONObject fit(JSONObject event) {
+        if (serializedSize(event) <= EVENT_BUDGET) {
+            return event;
+        }
+        JSONObject props = event.optJSONObject("props");
+        if (props == null) {
+            return event;
+        }
+        // 堆栈是最占地方的，也是最能砍的：前十几帧就够定位了。
+        for (int keep : new int[]{1200, 600, 200}) {
+            try {
+                String trace = props.optString("trace", "");
+                if (!trace.isEmpty()) {
+                    props.put("trace", shortenBytes(trace, keep));
+                }
+            } catch (Exception ignored) {
+            }
+            if (serializedSize(event) <= EVENT_BUDGET) {
+                return event;
+            }
+        }
+        try {
+            String msg = props.optString("msg", "");
+            if (!msg.isEmpty()) {
+                props.put("msg", shortenBytes(msg, 200));
             }
         } catch (Exception ignored) {
         }
@@ -279,10 +362,52 @@ final class Report {
         return new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date(at));
     }
 
-    private static String stackOf(Throwable error) {
+    /**
+     * 异常消息 → 字符串，null 安全。
+     *
+     * 旧代码这里是 `String.valueOf(error.getMessage())` —— `getMessage()` 为 null
+     * 时它返回字面量 `"null"`，线上 156 条事件的 `props.msg` 就是那个字符串，
+     * 后台看着像「有消息」，实际什么都没说。
+     *
+     * 这里按字符截（沿用原来的口径），字节预算由 {@link #fit} 兜底。
+     */
+    static String text(String value, int maxChars) {
+        if (value == null || value.isEmpty()) {
+            return "";
+        }
+        return value.length() <= maxChars ? value : value.substring(0, maxChars) + "…";
+    }
+
+    /**
+     * 按**字节**截断，且只在字符边界切。
+     *
+     * 服务端算的是 UTF-8 字节数，中文字符占 3 字节。按字符截会让中文密集的
+     * 内容超出预期两倍多 —— 崩溃堆栈就是这样超限的。
+     */
+    static String shortenBytes(String value, int maxBytes) {
+        if (value == null || value.isEmpty()) {
+            return "";
+        }
+        byte[] raw = value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        if (raw.length <= maxBytes) {
+            return value;
+        }
+        int end = maxBytes;
+        // 往回退到 UTF-8 的字符起点：0b10xxxxxx 是续字节。
+        while (end > 0 && (raw[end] & 0xC0) == 0x80) {
+            end--;
+        }
+        return new String(raw, 0, end, java.nio.charset.StandardCharsets.UTF_8) + "…";
+    }
+
+    /**
+     * 崩溃堆栈：60 帧上限，再按字节收到 2400 —— 40 帧 × 70 字符的 Android 堆栈约 3.3KB。
+     * 包可见是为了让单测能直接盯住「裁完还能定位」这件事。
+     */
+    static String traceOf(Throwable error) {
         StringBuilder text = new StringBuilder();
         StackTraceElement[] frames = error.getStackTrace();
-        int limit = Math.min(frames.length, 40);
+        int limit = Math.min(frames.length, 60);
         for (int i = 0; i < limit; i++) {
             text.append(frames[i].toString()).append('\n');
         }
@@ -294,13 +419,9 @@ final class Report {
                 text.append("  at ").append(inner[i].toString()).append('\n');
             }
         }
-        return text.toString();
+        return shortenBytes(text.toString(), TRACE_BUDGET);
     }
 
-    private static String shorten(String text, int limit) {
-        if (text == null) {
-            return "";
-        }
-        return text.length() <= limit ? text : text.substring(0, limit) + "…";
-    }
+    /** 堆栈的字节预算。整条事件 3800，剩下的给 id/session/kind/model 这些。 */
+    static final int TRACE_BUDGET = 2400;
 }

@@ -449,6 +449,66 @@ E4B8AD 读回来变成 `ä¸­` 三个字符，再按 UTF-8 写出去就是 C3A4
 
 顺序：B → C → D → F。E 独立可并行。A 随时插队。
 
+### 2.0.22：埋点管道里那个「数据在看不见的地方消失」的洞
+
+上线两天（10-23 14:05 ~ 10-25 03:10 UTC）攒了 10065 条事件、218 台设备。按报错分桶
+之后发现真正该看的不是那一堆 `command_error`，是**两个为 0 的计数**：
+
+```
+select count(*) from events where name='play_error';   -- 0
+select count(*) from events where kind='crash';        -- 2（都是手搓的 diag）
+```
+
+TODO 里 C 那批写着「已接入」，实际一条都没进来过。根因不是接入漏了，是**一条坏事件
+会炸掉自己的批次**，而客户端对 4xx 的处理是「丢掉」：
+
+1. `feed-player.js:517` 的 decode 分支把 `video.error.code`（MediaError 枚举，数字）
+   塞进 `props.code`；服务端 `ingest.py` 对 `code` 走 `_text()`，数字过不去 → 400。
+2. `parse_batch` 遇到第 N 条不合法就 `raise`，前面 N-1 条合法的也一起不要。
+3. `ReportQueue` 收到 400 走 `acknowledge(sending)`，把队列文件删掉，日志只一行 `Log.w`。
+
+线上实测（`/t/events`，验证完已删掉探针行）：
+
+```
+对照(code=字符串)        200 {"ok":true,"accepted":1}
+play decode(code=3)     400 {"ok":false,"error":"第 1 条的 code 必须是字符串"}
+混合批次                 400 {"ok":false,"error":"第 2 条的 code 必须是字符串"}
+```
+
+**修法**：服务端逐条拒收（返回 `rejected`/`errors`，其余照收），`code` 列收数字；
+客户端 4xx 改成二分隔离到 `files/reports/dead/`，401 单独退避。
+
+顺带查出三个同源问题：
+
+- **崩溃一直上报不上去。** `Report.crash` 把堆栈按**字符**截到 4000，而服务端算的是
+  UTF-8 **字节**。真实 Android 堆栈（40 帧 × 70 字符 + cause 10 行）序列化后 4434 字节，
+  被 413 掉；只有手搓的十帧 diag 崩溃（958 字节）刚好过得去 —— 线上 crash 表里就那两条。
+  现在堆栈按字节裁（2400）、整条事件压到 `EVENT_BUDGET = 3800`，服务端留 296 字节余量。
+- **单日超 200 条就丢。** `claimFiles()` 认领全部文件、只发前 200 条、然后
+  `acknowledge()` 删掉**整个**文件。线上已发生 4 台设备日（708 / 539 / 449 / 322 条），
+  丢了多少无从得知 —— 因为丢的时候日志写的是「发送成功」。现在按已发送条数把剩下的
+  写回（`.tmp` + rename）。
+- **封面负缓存漏了配置错误那一关。** `coverData()` 第一行就是 `profile.coverUrl(str)`，
+  它在 `FAILED.get()` **之前**抛「无效封面域名」，于是这类失败永远进不了
+  `rememberFailure`。证据：一台设备 34 条「无效封面域名」，横跨 351 分钟。缓存键也用
+  原始 URL 而不是归一化后的（`coverUrl()` 抛的时候拿不到）。
+
+**一个必须记住的判据坑**：`SocketTimeoutException extends InterruptedIOException`，
+okhttp 的 callTimeout 也抛 `InterruptedIOException("timeout")`。按类名把
+`InterruptedIOException` 加进「取消」名单，会把线上 26 条真超时（均值 30 秒、全在
+detail 阶段）洗成取消 —— 那等于把「站点慢到读不出来」这个信号藏起来。只能按 message 判。
+
+单测 260 → 271（`ReportTest` 新增 5 条、新建 `ReportQueueTest` 6 条），服务端从 0 个
+测试变成 19 个（`server/track/tests/`，标准库 unittest，不需要库）。
+
+**二分隔离里两个容易写错的地方**，都写进单测钉住了：
+
+- 返回值不能是「成功条数」。坏事件在中间时，「前 N 条成功」这个假设不成立，按条数切
+  前缀会把没发出去的删掉。改成按**对象身份**返回（`IdentityHashMap`）—— 用 equals 更糟，
+  重试刷出来的事件内容可能完全相同。
+- 从 tail 递归下来的单条**从没被单独发过**（父层只 post 了 head），直接判它有问题就是
+  冤杀。进 `isolate` 之前必须自己试一次。
+
 ## 2026-10-21：中继取流与环境装配 —— 已完成（真机验证）
 
 一天三个「看不了」，两个是同一个结构缺陷、一个是配置漂移。全文见

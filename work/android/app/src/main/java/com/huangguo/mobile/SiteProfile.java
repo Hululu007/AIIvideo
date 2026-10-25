@@ -175,7 +175,10 @@ final class SiteProfile {
         URI uri = new URI(str);
         String host = uri.getHost();
         if (!ProxyConfig.MATCH_HTTPS.equals(uri.getScheme()) || host == null || uri.getUserInfo() != null) {
-            throw new IllegalArgumentException("无效封面地址");
+            // 带上原串 —— 否则线上只看到「无效封面地址」五个字，不知道是哪种畸形地址。
+            // 相对路径（/upload_01/xxx.jpg）就是从这里被挡下的，而它到底是少了域名
+            // 还是带了 http，看这一个字符串就知道。
+            throw new IllegalArgumentException("无效封面地址：" + str);
         }
         JSONObject jSONObjectOptJSONObject = object("cover").optJSONObject("hostRewrites");
         if (jSONObjectOptJSONObject != null && jSONObjectOptJSONObject.has(host)) {
@@ -189,7 +192,10 @@ final class SiteProfile {
                 return uri.toString();
             }
         }
-        throw new IllegalArgumentException("无效封面域名");
+        // 带上被拒的主机和白名单 —— 线上的 90 条「无效封面域名」原文只有五个字，
+        // 拿不到 host 就无法判断该往 allowedHosts 里补什么，等于白报。
+        throw new IllegalArgumentException("无效封面域名：" + host
+                + "（白名单：" + jSONArray.toString() + "）");
     }
 
     boolean patchHeader(byte[] bArr) throws Exception {

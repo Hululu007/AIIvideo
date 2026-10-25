@@ -22,6 +22,7 @@ server/track/
   docker-compose.yml      track-db（postgres:16-alpine）+ track-web
   deploy.sh               rsync 到 relay:/srv/track 并重建
   acceptance.py           契约逐条验收（标准库，不用装依赖）
+  tests/                  单元测试（标准库 unittest，不需要库）
   .env.example
 ```
 
@@ -48,7 +49,23 @@ Content-Encoding: gzip           # 可选，支持
 成功 `{"ok": true, "accepted": N}`，N 是**真正新写入**的行数 —— 重发的 event_id 被
 去重掉，不计入，所以客户端重发同一批会看到 `accepted: 0`，这是对的。
 
+**一批里有个别坏事件时**：回 200，多两个字段 `rejected` 和 `errors`：
+
+```json
+{"ok": true, "accepted": 1, "rejected": 1,
+ "errors": [{"index": 2, "reason": "第 2 条的 at 必须是毫秒时间戳",
+             "kind": "play", "name": "play_error"}]}
+```
+
+`errors` 最多带 5 条（`ingest.MAX_REPORTED_ERRORS`），`rejected` 是总数。这个口径是
+2026-10-25 改的：以前一条坏事件让整批回 400，而客户端对 4xx 的处理是「丢掉」——
+线上 `kind='play'` 一条都没有，就是每次播放失败都在炸自己的批次。
+
 失败 `{"ok": false, "error": "人话"}` + 400 / 401 / 405 / 413 / 429。堆栈只进容器日志。
+
+**两种拒收，别混**：批级问题（请求体不是对象 / events 不是数组 / 空数组 / 条数超限 /
+请求体超字节）才回 4xx，因为那是发请求的人根本不会发；单条问题（字段类型不对、单条超
+4KB、`at` 越界）降级进 `rejected`，其余照收。见 `web/app/ingest.py` 顶部那段注释。
 
 **校验顺序：方法 → 大小 → 签名 → 限流 → 解析 → 入库。** 这个次序是攻击面的一部分：
 签名排在小请求体之后、限流之前，所以坏签名的扫描流量不消耗限流配额；超大请求不花
@@ -65,11 +82,21 @@ CPU 去算 HMAC 和解析 JSON。别调换。
   `X-Device` 头 → 请求顶层的 `device`/`device_id` → `unknown`。列是 `not null`，
   宁可留一个占位值也不丢整条事件。
 - **`stage` / `code` / `ms`** 从 `props` 里抽成列（也认事件顶层的同名键），`props`
-  原样整份保留 —— 抽列是为了能走索引，不是丢弃。
+  原样整份保留 —— 抽列是为了能走索引，不是丢弃。**`code` 收数字**：前端播放失败带的
+  是 `video.error.code`（MediaError 枚举 1~4），数字转字符串入库（`_code_text`）。
 - **条数上限 413**：200 条是「大小」那一条限制的另一半，所以和 4KB 一样返回 413，
-  error 里写明是条数超了，不是字节超了。
-- 单条上限按 `json.dumps(event, separators=(",",":"))` 的 UTF-8 字节数算。
+  error 里写明是条数超了，不是字节超了。这是**批级**问题。
+- 单条上限按 `json.dumps(event, separators=(",",":"))` 的 UTF-8 字节数算。超了是
+  **单条**问题：那一条进 `rejected`，不再 413。App 侧另有 `Report.EVENT_BUDGET = 3800`
+  先自己收住（崩溃堆栈按字节裁），两边留了 296 字节余量。
 - `at` 限定在 2000~2100 年，防止时钟坏掉的客户端把聚合表切成 1970 年的行。
+- **`app` 那组元数据（v/vc/os/model）坏了不拒单条**：它们是装饰字段，一条
+  `model` 超长的老客户端不该让整批进不来（`_app_meta` 自己吞异常）。
+
+**`/stats/*` 的「真失败」口径**在 `stats.py` 的 `NOISE_SQL`，把取消类剔出去。它只影响
+页面读数，**不动 `events_daily` 的 `errors` 判据**（那边仍是「code 非空」），所以改
+`NOISE_SQL` 不用重跑聚合。里面 `InterruptedIOException` 是按 message 判的，因为
+`SocketTimeoutException extends InterruptedIOException` —— 按类名判会把真超时洗成取消。
 
 ## 表设计（最终形态）
 
@@ -194,11 +221,20 @@ curl -s https://149.104.21.177.sslip.io/api/classes/_User                       
 ## 验收
 
 ```bash
+# 单元测试（不需要数据库/网络，psycopg 在 .venv 里）
+.venv/bin/python -m unittest discover -s tests -v
+
+# 契约逐条打接口（要跑着的服务和 TRACK_SECRET）
 TRACK_SECRET=<.env 里那串> python3 acceptance.py http://127.0.0.1:8092
 TRACK_SECRET=<.env 里那串> python3 acceptance.py https://149.104.21.177.sslip.io/t
 ```
 
-脚本覆盖：healthz、2 条合法事件、错签名 401、gzip、300 条 413、单条超 4KB 413、
+`tests/test_events.py` 盯的是「哪些问题拒整批、哪些只拒一条」—— 这条分界在
+2026-10-25 之前搞反了，见上面「两种拒收」那一段。`tests/test_signature.py` 是
+`ReportTest.java` 注释里点名要求存在的那份服务端向量，两边用同一个 secret 和 body。
+
+`acceptance.py` 覆盖：healthz、2 条合法事件、错签名 401、gzip、300 条 413、
+单条超 4KB → 200+rejected:1、数字错误码 → 收、好+坏混批 → 各计一条、
 同一 event_id 发两次去重、坏 JSON 400、连打 70 次出 429。限流那条放最后跑，
 跑完这个 IP 一分钟内是被限的。
 

@@ -51,6 +51,8 @@ final class ReportQueue {
     private static final String DIR = "reports";
     private static final String EXT = ".jsonl";
     private static final String SENDING = ".sending";
+    /** 发不出去的那几条隔离在这里。不进 backlog、不参与发送，纯本地取证。 */
+    private static final String DEAD_DIR = "dead";
     private static final int MAX_BATCH = 200;      // 服务端上限
     private static final int MAX_BACKLOG = 600;    // 攒到这个数就不收新的，别把磁盘撑爆
     // 事件量级很小（一次会话几十条），攒批没有意义，反而让「打开 App 看一眼就划掉」
@@ -165,44 +167,32 @@ final class ReportQueue {
         if (sending.isEmpty()) {
             return;
         }
-        List<JSONObject> events = new ArrayList<JSONObject>();
+        // 每个文件读出来的行要分开记：发完得知道「这个文件还剩几条」，
+        // 不然超过 MAX_BATCH 的那部分会被连同文件一起删掉（见 acknowledge 的注释）。
+        List<Batch> claimed = new ArrayList<Batch>();
+        int total = 0;
         for (File file : sending) {
-            events.addAll(readLines(file));
-            if (events.size() >= MAX_BATCH) {
+            List<JSONObject> items = readLines(file);
+            claimed.add(new Batch(file, items));
+            total += items.size();
+            if (total >= MAX_BATCH) {
                 break;
             }
         }
-        if (events.isEmpty()) {
+        if (total == 0) {
             for (File file : sending) {
                 release(file);
             }
             return;
         }
         try {
-            byte[] body = new JSONObject()
-                    .put("app", Report.appInfo(this.context))
-                    .put("device", Report.deviceId())
-                    .put("events", new JSONArray(events.subList(0, Math.min(events.size(), MAX_BATCH))))
-                    .toString().getBytes(StandardCharsets.UTF_8);
-            int status = post(body);
-            if (status >= 200 && status < 300) {
-                acknowledge(sending);
+            boolean ok = send(claimed);
+            if (ok) {
                 this.failures = 0;
                 this.nextAttemptAt = 0L;
-                return;
-            }
-            if (status == 429 || status >= 500) {
-                // 限流和临时故障都能重试：文件改回去，等退避
-                for (File file : sending) {
-                    release(file);
-                }
+            } else {
                 backoff();
-                return;
             }
-            // 400/401/413：这批本身有问题，重发一万次也一样，丢掉并留痕
-            Log.w(TAG, "服务端拒收（HTTP " + status + "），丢 " + events.size() + " 条");
-            acknowledge(sending);
-            this.failures = 0;
         } catch (Exception error) {
             for (File file : sending) {
                 release(file);
@@ -212,6 +202,259 @@ final class ReportQueue {
         } finally {
             maybeFlush(false);
         }
+    }
+
+    /** 一个已认领的队列文件和它的行。发完要按「已发送的条数」把剩下的写回去。 */
+    private static final class Batch {
+        final File file;
+        final List<JSONObject> items;
+
+        Batch(File file, List<JSONObject> items) {
+            this.file = file;
+            this.items = items;
+        }
+    }
+
+    /**
+     * 把已认领的批次发出去。返回 true = 已处理完（成功或已隔离毒事件），false = 该退避。
+     *
+     * ── 为什么是「发完写回剩余」而不是「删文件」──────────────────────
+     * 原来 acknowledge() 直接把整个文件删掉，而上面只发了前 200 条。单日单设备
+     * 超过 200 条时，剩下的就跟着文件一起消失，日志里只有一行「发送成功」。
+     * 线上已经有 4 台设备撞上（单日 708 / 539 / 449 / 322 条）。
+     *
+     * ── 为什么 4xx 要二分 ──────────────────────────────────────────
+     * 服务端现在逐条拒收（不会再因为一条坏事件回 4xx），但老服务端还在跑、
+     * 而且以后还会有别的单条问题。一条毒事件不该带走整批：二分到单条，
+     * 把它扔进 dead/ 留证，其余照常发。
+     */
+    private boolean send(List<Batch> claimed) throws Exception {
+        List<JSONObject> batch = new ArrayList<JSONObject>();
+        for (Batch one : claimed) {
+            for (JSONObject event : one.items) {
+                if (batch.size() >= MAX_BATCH) {
+                    break;
+                }
+                batch.add(event);
+            }
+        }
+        int status = post(encode(batch));
+        if (status >= 200 && status < 300) {
+            consume(claimed, batch);
+            return true;
+        }
+        if (status == 429 || status >= 500) {
+            for (Batch one : claimed) {
+                release(one.file);
+            }
+            return false;
+        }
+        if (status == 401) {
+            // 签名被拒：TRACK_SECRET 两边对不上，每一批都会 401。二分只会白打 N 次，
+            // 留在队列里等下次 —— 换密钥之后旧客户端本来就该等新版。
+            Log.w(TAG, "服务端回 401（TRACK_SECRET 对不上），" + batch.size() + " 条留在队列里");
+            for (Batch one : claimed) {
+                release(one.file);
+            }
+            return false;
+        }
+        // 400/413：单条问题。二分到最小，把发不出去的那条隔离，其余收下。
+        Log.w(TAG, "服务端拒收（HTTP " + status + "），" + batch.size() + " 条开始二分隔离");
+        List<JSONObject> sentOk = new ArrayList<JSONObject>();
+        bisect(batch, sentOk);
+        consume(claimed, sentOk);
+        return true;
+    }
+
+    /**
+     * 二分：把这一批里发得出去的收进 `ok`，发不出去的单条隔离进 dead/。
+     *
+     * **不能用「成功的条数」当返回值。** 坏事件可能在中间，那时「前 200 条成功」
+     * 这个假设就不成立了 —— 直接按条数从前缀切，会把没发出去当成发过的删掉。
+     * 所以这里按**身份**返回：ok 里是真正被服务端收下的那些对象。
+     *
+     * 两半都要走：head 失败只说明坏事件在 head 里，tail 完全可能是好的。
+     * 只递归 head 的话，tail 得等下一轮 flush 才试 —— 一次故障要发好几轮才清空。
+     */
+    private void bisect(List<JSONObject> batch, List<JSONObject> ok) throws Exception {
+        if (batch.isEmpty()) {
+            return;
+        }
+        if (batch.size() == 1) {
+            // 必须自己试一次再判死刑：从 tail 递归下来的这一条**从没被单独发过**
+            // （父层只 post 了 head），直接 isolate 等于无辜地杀掉一条好事件。
+            JSONObject only = batch.get(0);
+            int solo = post(encode(batch));
+            if (solo >= 200 && solo < 300) {
+                ok.add(only);
+                return;
+            }
+            if (solo == 429 || solo >= 500 || solo == 401) {
+                throw new java.io.IOException("二分途中服务端回 " + solo);
+            }
+            isolate(only);
+            return;
+        }
+        int mid = batch.size() / 2;
+        List<JSONObject> head = new ArrayList<JSONObject>(batch.subList(0, mid));
+        List<JSONObject> tail = new ArrayList<JSONObject>(batch.subList(mid, batch.size()));
+        int status = post(encode(head));
+        if (status >= 200 && status < 300) {
+            ok.addAll(head);
+        } else if (status == 429 || status >= 500 || status == 401) {
+            // 中途变成服务端问题，别再往下切了。抛出去让 flushOnWorker 的 catch
+            // 把本次认领的文件全部 release，等退避重来。
+            throw new java.io.IOException("二分途中服务端回 " + status);
+        } else {
+            bisect(head, ok);
+        }
+        bisect(tail, ok);
+    }
+
+    /** 发不出去的那条：进 dead/，不进 backlog、不再重发。 */
+    private void isolate(JSONObject event) {
+        File dead = new File(this.dir, DEAD_DIR);
+        if (!dead.isDirectory() && !dead.mkdirs()) {
+            Log.w(TAG, "建不了 dead 目录，丢掉一条 " + event.optString("kind") + "/" + event.optString("name"));
+            return;
+        }
+        File target = new File(dead, Report.dayKey(System.currentTimeMillis()) + EXT);
+        FileOutputStream out = null;
+        try {
+            out = new FileOutputStream(target, true);
+            out.write((event.toString() + "\n").getBytes(StandardCharsets.UTF_8));
+            Log.w(TAG, "隔离一条发不出去的事件：" + event.optString("kind") + "/" + event.optString("name"));
+        } catch (IOException error) {
+            Log.w(TAG, "隔离失败：" + error.getMessage());
+        } finally {
+            if (out != null) {
+                try {
+                    out.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+        trimDead(dead);
+    }
+
+    /** dead/ 只留最近 200 条 —— 它不参与发送，纯粹是本地取证，别让它长成第二个队列。 */
+    private void trimDead(File dead) {
+        File[] files = dead.listFiles();
+        if (files == null || files.length <= 1) {
+            return;
+        }
+        Arrays.sort(files);
+        for (int i = 0; i < files.length - 1; i++) {
+            if (!files[i].delete()) {
+                return;
+            }
+        }
+    }
+
+    /**
+     * 把发成功的那些从队列里去掉，剩下的写回去。
+     *
+     * `sent` 是**真正被服务端收下的那些事件对象**，不是条数 —— 坏事件可能在中间，
+     * 按条数切前缀会把没发出去的一起删掉。这里逐个文件过滤：还在 sent 里的删掉，
+     * 剩下的重写。写回用 `.tmp` + rename，半路被杀也不会留下一个写了一半的队列文件。
+     *
+     * 用 IdentityHashMap：同一批里可能有多条内容相同的事件（重试刷出来的），
+     * 按 equals 去重会连没发出去的一起删。
+     */
+    private void consume(List<Batch> claimed, List<JSONObject> sent) {
+        synchronized (this) {
+            for (Batch one : claimed) {
+                List<JSONObject> rest = remaining(one.items, sent);
+                int dropped = one.items.size() - rest.size();
+                if (dropped == 0) {
+                    // 这个文件一条都没发出去，原样还回去。
+                    release(one.file);
+                    continue;
+                }
+                if (rest.isEmpty()) {
+                    if (one.file.delete()) {
+                        this.backlog = Math.max(0, this.backlog - dropped);
+                    } else {
+                        Log.w(TAG, "删不掉 " + one.file.getName() + "，下次会重发");
+                    }
+                    continue;
+                }
+                if (rewrite(one.file, rest)) {
+                    this.backlog = Math.max(0, this.backlog - dropped);
+                } else {
+                    release(one.file);
+                }
+            }
+        }
+    }
+
+    /**
+     * 从 `items` 里剔掉**已经发成功**的那些（按对象身份，不按 equals）。
+     *
+     * 按 equals 会出事：重试刷出来的事件内容可能完全相同，一条发成功就把另一条
+     * 也当成发过了删掉。所以用 IdentityHashMap，只认同一个对象引用。
+     *
+     * 包可见 + 不碰文件系统，纯逻辑，单测直接盯。
+     */
+    static List<JSONObject> remaining(List<JSONObject> items, List<JSONObject> sent) {
+        java.util.IdentityHashMap<JSONObject, Boolean> acked =
+                new java.util.IdentityHashMap<JSONObject, Boolean>();
+        for (JSONObject event : sent) {
+            acked.put(event, Boolean.TRUE);
+        }
+        List<JSONObject> rest = new ArrayList<JSONObject>();
+        for (JSONObject event : items) {
+            if (!acked.containsKey(event)) {
+                rest.add(event);
+            }
+        }
+        return rest;
+    }
+
+    /** 把剩下的行写回原文件（先写 .tmp 再改名）。失败就保持 .sending 等下次。 */
+    private boolean rewrite(File sendingFile, List<JSONObject> rest) {
+        if (rest.isEmpty()) {
+            return sendingFile.delete();
+        }
+        File tmp = new File(this.dir, sendingFile.getName() + ".tmp");
+        java.io.BufferedWriter writer = null;
+        try {
+            writer = new java.io.BufferedWriter(new java.io.OutputStreamWriter(
+                    new FileOutputStream(tmp), StandardCharsets.UTF_8));
+            for (JSONObject event : rest) {
+                writer.write(event.toString());
+                writer.write('\n');
+            }
+            writer.flush();
+            writer.close();
+            writer = null;
+            // tmp → 正常的队列文件名（去掉 .sending）
+            String name = sendingFile.getName();
+            File target = new File(this.dir, name.substring(0, name.length() - SENDING.length()));
+            if (tmp.renameTo(target)) {
+                return true;
+            }
+            Log.w(TAG, "写回改名失败 " + name);
+            return false;
+        } catch (IOException error) {
+            Log.w(TAG, "写回队列失败：" + error.getMessage());
+            return false;
+        } finally {
+            if (writer != null) {
+                try {
+                    writer.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+
+    private byte[] encode(List<JSONObject> batch) throws Exception {
+        return new JSONObject()
+                .put("app", Report.appInfo(this.context))
+                .put("device", Report.deviceId())
+                .put("events", new JSONArray(batch))
+                .toString().getBytes(StandardCharsets.UTF_8);
     }
 
     private int post(byte[] body) throws Exception {
@@ -260,7 +503,8 @@ final class ReportQueue {
             }
             Arrays.sort(files);                     // 文件名带日期，旧的先发
             for (File file : files) {
-                if (!file.getName().endsWith(EXT)) {
+                // dead/ 是子目录，countEvents 里也按 isFile 过滤；这里同样只认普通文件。
+                if (!file.isFile() || !file.getName().endsWith(EXT)) {
                     continue;
                 }
                 File staging = new File(this.dir, file.getName() + SENDING);
@@ -271,20 +515,6 @@ final class ReportQueue {
             }
         }
         return claimed;
-    }
-
-    /** 发成功：删文件，把条数从积压里减掉。 */
-    private void acknowledge(List<File> files) {
-        synchronized (this) {
-            for (File file : files) {
-                int count = readLines(file).size();
-                if (file.delete()) {
-                    this.backlog = Math.max(0, this.backlog - count);
-                } else {
-                    Log.w(TAG, "删不掉 " + file.getName() + "，下次会重发");
-                }
-            }
-        }
     }
 
     /** 没发出去：改回普通队列文件。 */
@@ -299,13 +529,27 @@ final class ReportQueue {
         }
     }
 
-    /** 进程被杀留下的 `.sending`：改回来，接着发。 */
+    /**
+     * 进程被杀留下的残局：`.sending` 改回来接着发，`.tmp`（写回到一半）直接删。
+     *
+     * `.tmp` 不能改名回来 —— 它可能是半截内容，改回去等于把一半的事件当成完整的发。
+     * 而它对应的原 `.sending` 还在，那份是完整的，重发一次就够了。
+     */
     private void recoverSending() {
         File[] files = this.dir.listFiles();
         if (files == null) {
             return;
         }
         for (File file : files) {
+            if (!file.isFile()) {
+                continue;
+            }
+            if (file.getName().endsWith(".tmp")) {
+                if (!file.delete()) {
+                    Log.w(TAG, "删不掉残留的 " + file.getName());
+                }
+                continue;
+            }
             if (file.getName().endsWith(SENDING)) {
                 release(file);
             }
@@ -371,7 +615,7 @@ final class ReportQueue {
             return 0;
         }
         for (File file : files) {
-            if (file.getName().endsWith(EXT)) {
+            if (file.isFile() && file.getName().endsWith(EXT)) {
                 total += readLines(file).size();
             }
         }

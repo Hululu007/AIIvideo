@@ -27,9 +27,21 @@ from .db import connect
 # 生命周期结束时把在途调用掐掉、同一宿主被占满时的排队超时。这些 App 那边迟早
 # 该静默掉（bridgeFailure 的安静名单），但在那之前，页面上的「失败率」必须先
 # 把它们剔出去，否则 93% 这个数字只会让人以为全线崩了。
+#
+# ── 为什么 InterruptedIOException 要按消息判，不能按类名 ──────────────
+# `SocketTimeoutException extends InterruptedIOException`，okhttp 的 callTimeout
+# 也抛 `InterruptedIOException("timeout")`。那两条都是**真超时**，线上 26 条
+# SocketTimeoutException 均值 30 秒、全在 detail 阶段，把它们算成取消就等于
+# 把「站点慢到读不出来」这个信号藏起来。只有 message 是 interrupted / Canceled /
+# Socket closed 的才真是「我们主动掐的」。
+#
+# 这里只影响 /stats/* 的读数，不改 events_daily 的 errors 判据（那边还是
+# 「code 非空」），所以改这段不用重跑聚合。
 NOISE_SQL = """(
   code is not null and (
-    code = 'InterruptedException'
+    code in ('InterruptedException', 'DeadObjectException', 'ConnectionShutdownException')
+    or (code = 'InterruptedIOException'
+        and coalesce(props ->> 'msg', '') ~* '^(interrupted|canceled|cancelled|socket closed)$')
     or coalesce(props ->> 'msg', '') ~ '被更新的请求取代|宿主已关闭|排队超时'
   )
 )"""

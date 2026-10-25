@@ -91,6 +91,104 @@ public class ReportTest {
     }
 
     @Test
+    public void 取消判定按消息也按进程生命周期() {
+        // 2.0.21 线上：InterruptedIOException 99 条、DeadObjectException 36 条、
+        // ConnectionShutdownException 1 条，全被算成失败。它们本质都是「我们这边
+        // 的生命周期结束了」，不是故障。
+        assertTrue(Report.isCancellation(new java.io.InterruptedIOException("interrupted")));
+        assertTrue(Report.isCancellation(new java.io.InterruptedIOException("Canceled")));
+        assertTrue(Report.isCancellation(new java.io.InterruptedIOException("Socket closed")));
+        assertTrue(Report.isCancellation(new java.io.InterruptedIOException()));
+        assertTrue(Report.isCancellation(new android.os.DeadObjectException()));
+
+        // 真超时必须留在失败那边：SocketTimeoutException extends InterruptedIOException，
+        // okhttp 的 callTimeout 也抛 InterruptedIOException("timeout")。线上 26 条
+        // SocketTimeoutException 均值 30 秒、全在 detail 阶段 —— 洗成取消就等于把
+        // 「站点慢到读不出来」这个信号藏起来。
+        assertTrue(!Report.isCancellation(new java.net.SocketTimeoutException("timeout")));
+        assertTrue(!Report.isCancellation(new java.net.SocketTimeoutException("Read timed out")));
+        assertTrue(!Report.isCancellation(new java.io.InterruptedIOException("timeout")));
+        assertTrue(!Report.isCancellation(new java.io.InterruptedIOException("timed out")));
+    }
+
+    @Test
+    public void 空的异常消息不写出字面量_null() {
+        // 线上 156 条事件的 props.msg 是字符串 "null" —— String.valueOf(null) 的锅。
+        // 后台看着像「有消息」，实际什么都没说。
+        assertEquals("", Report.text(null, 200));
+        assertEquals("", Report.text("", 200));
+        assertTrue(!Report.text(null, 200).equals("null"));
+
+        // 正常的照抄，超长的按字符截并带省略号。
+        assertEquals("站点必须是 HTTPS 域名", Report.text("站点必须是 HTTPS 域名", 200));
+        String longText = Report.text("x".repeat(300), 200);
+        assertEquals(201, longText.length());
+        assertTrue(longText.endsWith("…"));
+    }
+
+    @Test
+    public void 数字错误码不会让整条事件超预算() {
+        // feed-player.js:517 塞的是 video.error.code（1~4 的枚举），天生是数字。
+        // 客户端这边只能保证「整条序列化后在预算内」，数字本身由服务端的宽松
+        // 解析收下（server/track/tests/test_events.py::数字错误码照收）。
+        JSONObject props = new JSONObject();
+        try {
+            props.put("stage", "decode").put("code", 3).put("why", "网络错误").put("ep", 2);
+        } catch (Exception error) {
+            throw new AssertionError(error);
+        }
+        JSONObject event = Report.build("play", "play_error", "51cg", props);
+        assertTrue("整条 " + Report.serializedSize(event) + " 字节",
+                Report.serializedSize(event) <= Report.EVENT_BUDGET);
+    }
+
+    @Test
+    public void 超长堆栈按字节裁到预算内() {
+        // 真实 Android 堆栈：40 帧 × 70 字符 + cause 10 行，实测序列化后 4400+ 字节，
+        // 而服务端上限是 4096 —— 只有手搓的十帧 diag 崩溃（958 字节）过得去。
+        // 线上 crash 表里就那两条，正是这么来的。
+        StackTraceElement[] frames = new StackTraceElement[60];
+        for (int i = 0; i < frames.length; i++) {
+            frames[i] = new StackTraceElement(
+                    "com.huangguo.mobile.SiteRepository$4", "run",
+                    "SiteRepository.java", 1000 + i);
+        }
+        Throwable fat = new IllegalStateException("中".repeat(200), new NullPointerException("cause"));
+        fat.setStackTrace(frames);
+
+        JSONObject props = new JSONObject();
+        try {
+            props.put("stage", "uncaught");
+            props.put("code", fat.getClass().getSimpleName());
+            props.put("msg", Report.text(fat.getMessage(), 200));
+            props.put("trace", Report.traceOf(fat));
+            props.put("thread", "main");
+        } catch (Exception error) {
+            throw new AssertionError(error);
+        }
+        JSONObject event = Report.build("crash", "uncaught", "", props);
+        int size = Report.serializedSize(event);
+        assertTrue("整条 " + size + " 字节，超了 " + Report.EVENT_BUDGET, size <= Report.EVENT_BUDGET);
+
+        // 裁完还得剩下能定位的东西：至少前面几帧在。
+        String trace = props.optString("trace");
+        assertTrue("堆栈被裁空了", trace.length() > 100);
+        assertTrue(trace.contains("SiteRepository"));
+    }
+
+    @Test
+    public void 按字节裁不会把中文切成半个字符() {
+        String chinese = "中".repeat(100);          // 300 字节
+        String cut = Report.shortenBytes(chinese, 100);
+        assertTrue(cut.length() < 100);
+        // 能原样还原成合法字符串就说明没切在字符中间（否则会出现替换字符）。
+        assertEquals(-1, cut.indexOf('\uFFFD'));
+        assertTrue(cut.endsWith("…"));
+        // 每个中文字符 3 字节，100 字节装得下 33 个。
+        assertEquals(33, cut.length() - 1);
+    }
+
+    @Test
     public void 已经报过一次的异常不再报() {
         assertTrue(Report.isOnce(new SiteRepository.CoverFailure("x", 0L)));
         assertTrue(!Report.isOnce(new IllegalStateException("x")));

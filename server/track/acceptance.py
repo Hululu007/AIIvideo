@@ -115,10 +115,33 @@ def main() -> int:
     status, body = post(batch(big))
     check("300 条 → 413 且说明条数限制", status == 413 and "200" in body.get("error", ""), json.dumps(body, ensure_ascii=False))
 
-    # 单条超 4KB
+    # 单条超 4KB：现在**不再**是 413 —— 只拒这一条，回 200 + rejected:1。
+    # 这条改口径是因为崩溃：真实 Android 堆栈序列化后 4400+ 字节，按老的「整批 413」
+    # 会让崩溃事件连带同批的 app_open 一起消失（客户端对 4xx 的处理是丢掉）。
     fat = event(props={"blob": "x" * 5000})
     status, body = post(batch([fat]))
-    check("单条超 4KB → 413 且说明哪一条", status == 413 and "4096" in body.get("error", ""), json.dumps(body, ensure_ascii=False))
+    check("单条超 4KB → 200 且 rejected:1（不再连坐整批）",
+          status == 200 and body.get("ok") is True
+          and body.get("accepted") == 0 and body.get("rejected") == 1,
+          json.dumps(body, ensure_ascii=False))
+
+    # 数字错误码：feed-player.js 的 decode 分支塞的是 MediaError 枚举（1~4）。
+    # 以前这里 400「code 必须是字符串」，然后整批被客户端丢掉 —— 线上 kind='play' 一条都没有。
+    status, body = post(batch([event(kind="play", name="play_error",
+                                     props={"stage": "decode", "code": 3, "why": "网络错误", "ep": 2})]))
+    check("数字错误码 → 200 且 accepted:1",
+          status == 200 and body.get("accepted") == 1,
+          json.dumps(body, ensure_ascii=False))
+
+    # 好 + 坏混批：好的要进来，坏的只计数。
+    status, body = post(batch([
+        event(kind="app", name="acceptance_good", props={}),
+        event(props="不是对象"),
+    ]))
+    check("混批 → 200，accepted:1 rejected:1",
+          status == 200 and body.get("accepted") == 1 and body.get("rejected") == 1
+          and body.get("errors"),
+          json.dumps(body, ensure_ascii=False))
 
     # 重发同一个 event_id
     dup = event(name="dup_probe")
