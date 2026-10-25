@@ -6,6 +6,7 @@
 #   ./scripts/build.sh debug      出 debug APK
 #   ./scripts/build.sh check      只验编译 + 资源 + assets，秒级
 #   ./scripts/build.sh test       跑单元测试（42 个用例，秒级）
+#   ./scripts/build.sh jscheck    前端钩子的离线回归（js-errors-check.js）
 #   ./scripts/build.sh install    构建 → 装真机 → 冷启动 → 截图
 #   ./scripts/build.sh verify     清空后从零构建，并断言 APK 内容
 #
@@ -76,6 +77,16 @@ PYEOF
   ok "测试通过"
 }
 
+# 前端钩子的离线回归。和 JUnit 分开是因为它测的是 assets 里的 JS：
+# 那三条约束（trace 键名、不走桥、不带 source）违反后都是静默失效，
+# Java 测试碰不到，只有真机出故障才看得出来。见 js-errors-check.js 文件头。
+cmd_jscheck() {
+  say "JS 钩子离线回归"
+  command -v node >/dev/null || die "缺 node（js-errors-check.js 要用）"
+  node scripts/js-errors-check.js
+  ok "JS 钩子通过"
+}
+
 cmd_install() {
   cmd_build release
   local apk; apk=$(cat "$LAST_APK")
@@ -109,6 +120,7 @@ cmd_verify() {
   say "清理（证明不是增量缓存的假象）"
   rm -rf app/build .gradle
   cmd_test
+  cmd_jscheck
   cmd_build release
   local apk; apk=$(cat "$LAST_APK")
   say "断言产物"
@@ -118,7 +130,8 @@ cmd_verify() {
 
 case "${1:-build}" in
   check)   doctor; cmd_check ;;
-  test)    doctor; cmd_test ;;
+  test)    doctor; cmd_test; cmd_jscheck ;;
+  jscheck) doctor; cmd_jscheck ;;
   build)   doctor; cmd_build release ;;
   debug)   doctor; cmd_build debug ;;
   install) doctor; cmd_install ;;

@@ -19,6 +19,10 @@ REQUIRED = [
     "assets/app-update.js",
     "assets/source-market.js",
     "assets/proxy-panel.js",
+    # 未捕获异常的钩子。漏了它页面照常跑、一个字都不报错，只是所有 JS 异常
+    # 从此静默消失 —— 而「静默消失」正是 2.0.22 花一整版去修的那类故障。
+    # app.html 里那条 <script src> 的对账已经能覆盖，这里再显式钉一条。
+    "assets/js-errors.js",
 ]
 
 

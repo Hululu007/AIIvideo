@@ -209,7 +209,7 @@ public final class AiiHttp {
         // 预热有结果就直接用（等它、或取已经落下的那份），没有就自己发。
         byte[] hot = AiiHttpCache.take(url);
         if (hot != null) return hot;
-        return fetchUncached(url, profile);
+        return fetchUncached(url, pathOfUrl(url), profile);
     }
 
     /**
@@ -234,8 +234,9 @@ public final class AiiHttp {
     }
 
     /** 真正的网络取数。get() 负责分流、预热命中、然后调它。 */
-    private static byte[] fetchUncached(String url, SiteProfile profile) throws Exception {
+    private static byte[] fetchUncached(String url, String userFacingPath, SiteProfile profile) throws Exception {
         log("GET " + hostOfUrl(url) + pathOfUrl(url));
+        Exception first = null;
         try {
             return getWith(client(profile), url, profile);
         } catch (Exception e) {
@@ -248,6 +249,7 @@ public final class AiiHttp {
             // 快速切页时每个请求都撞一次、每次都直接失败，用户看到的就是卡住。
             if (!isStreamBreak(e)) throw e;
             log("HTTP/2 被重置，降级 HTTP/1.1 重试 " + pathOfUrl(url));
+            first = e;
         }
         // 降级之后再给两次机会。
         //
@@ -264,6 +266,7 @@ public final class AiiHttp {
             } catch (Exception e) {
                 boolean last = attempt == 1;
                 log("HTTP/1.1 重试 " + (attempt + 1) + " 失败：" + e.getMessage() + (last ? "（放弃）" : ""));
+                if (first == null) first = e;
                 if (last || !isStreamBreak(e)) throw e;
                 try {
                     Thread.sleep(120);
@@ -273,7 +276,22 @@ public final class AiiHttp {
                 }
             }
         }
-        throw new IOException("请求失败：" + pathOfUrl(url));
+        // **不要把原因吃掉。** 原来这条只写 URL，线上 313 条「请求失败：https://…」
+        // 翻遍数据库只看到 code=IOException，分不清是超时、被 RST、还是 TLS 失败。
+        // 现在带上原始异常的类名和 message（一次重试链可能有多条，取第一条）。
+        throw new IOException("请求失败：" + userFacingPath + "（" + describe(first) + "）", first);
+    }
+
+    /** 把异常压成「类名: message」，给上报和日志用。null 安全。 */
+    static String describe(Throwable error) {
+        if (error == null) return "原因不明";
+        String name = error.getClass().getSimpleName();
+        String message = error.getMessage();
+        if (message == null || message.trim().isEmpty()) return name;
+        // 有些 message 已经自带类名（OkHttp 的 "java.net.SocketTimeoutException: timeout"），
+        // 别拼成两遍。
+        if (message.startsWith(name)) return message;
+        return name + ": " + message;
     }
 
     private static byte[] getWith(OkHttpClient http, String url, SiteProfile profile) throws Exception {
@@ -361,7 +379,26 @@ public final class AiiHttp {
         }
         // 不要压缩。这条链路本来就慢，多一次解压不值当，也让响应体大小可预期。
         builder.header("Accept-Encoding", "identity");
-        return routeAndSend(http, builder.build(), url, cookieOut, profile);
+        try {
+            return routeAndSend(http, builder.build(), url, cookieOut, profile);
+        } catch (java.io.IOException error) {
+            throw withRedirectHint(error);
+        }
+    }
+
+    /**
+     * 给「重定向撞上限」那条错误补一句人话，其余原样返回。
+     *
+     * OkHttp 抛 `ProtocolException("Too many follow-up requests: 21")` — 只有数字。
+     * 线上 74 条全是这个形态，既看不出绕去哪，也分不清是站点在环、还是我们把
+     * Host/Referer 发错了触发了循环。拦截器已经记下每一跳，这里把它们拼进去。
+     */
+    private static java.io.IOException withRedirectHint(java.io.IOException error) {
+        String hint = describeRedirects();
+        if (hint.isEmpty()) return error;
+        String message = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
+        if (message.contains("重定向环")) return error;
+        return new java.io.IOException(message + hint, error);
     }
 
 
@@ -389,7 +426,7 @@ public final class AiiHttp {
         if (profile == null || appContext == null) return;
         AiiHttpCache.warmup(profile, new AiiHttpCache.Fetcher() {
             @Override public byte[] fetch(String url, SiteProfile p) throws Exception {
-                return fetchUncached(url, p);
+                return fetchUncached(url, pathOfUrl(url), p);
             }
         });
     }
@@ -609,8 +646,12 @@ public final class AiiHttp {
         }
         // 两条路都失败到「换路也上不去」：学不了（不知道哪条对），把可能过时的
         // 记忆清掉回落到规则层，抛第一个错。
+        //
+        // first 为 null 说明一次都没进过 catch（理论上不会），这时也得说清是谁：
+        // 原来这里只写一句「请求失败：URL」，线上 313 条无法归因的失败有一半是它。
         RouteMemory.forget(host);
-        throw first != null ? first : new IOException("请求失败：" + url);
+        if (first != null) throw first;
+        throw new IOException("请求失败：" + url + "（两条路由都没走通，且没有留下异常）");
     }
 
     /**
@@ -1000,9 +1041,80 @@ public final class AiiHttp {
             route.applyTo(builder);
             log("走代理 " + route.describe());
         }
+        // 把重定向链记下来。OkHttp 撞到 20 跳上限时抛的是
+        // 「Too many follow-up requests: 21」—— 一句只有数字、没有地址的话，
+        // 线上 74 条全是这个形态，翻数据库也看不出绕去了哪。
+        //
+        // 这个拦截器只做观测、不改行为：记下每一跳的地址，撞环时把整条链
+        // 塞进异常消息。**上限保持 OkHttp 默认的 20**——真正的环多半是站点
+        // 自己的配置问题，放宽只会让用户多等，看不出来才是要修的。
+        builder.addInterceptor(new okhttp3.Interceptor() {
+            @Override
+            public okhttp3.Response intercept(okhttp3.Interceptor.Chain chain) throws java.io.IOException {
+                okhttp3.Response response = chain.proceed(chain.request());
+                if (response.isRedirect()) {
+                    String from = chain.request().url().toString();
+                    String to = response.header("Location", "");
+                    String hop = from + " → " + to;
+                    java.util.ArrayList<String> hops = REDIRECT_CHAIN.get();
+                    hops.add(hop);
+                    if (hops.size() > 24) hops.remove(0);
+                    log("重定向 " + hop);
+                }
+                return response;
+            }
+        });
         OkHttpClient built = builder.build();
         CLIENTS.put(key, built);
         return built;
+    }
+
+    /**
+     * 最近这条请求链上的重定向，只用来在撞环时补一句可读的说明。
+     *
+     * 用 ThreadLocal 而不是全局：并发请求各自成链，混在一起就分不清谁绕谁。
+     * 进出配对由 {@link #describeRedirects} 负责清理。
+     */
+    private static final ThreadLocal<java.util.ArrayList<String>> REDIRECT_CHAIN =
+            new ThreadLocal<java.util.ArrayList<String>>() {
+                @Override
+                protected java.util.ArrayList<String> initialValue() {
+                    return new java.util.ArrayList<String>();
+                }
+            };
+
+    /**
+     * 把「绕了哪几跳」写进人话。没绕就返回空串。
+     *
+     * OkHttp 的原话 `Too many follow-up requests: 21` 只说数字，运维看到它
+     * 既不知道绕去哪、也不知道是不是自己发错了 Host。补一句能直接看见。
+     */
+    // ── 只给单测用的两个口子 ───────────────────────────────────────────
+    // 重定向链是 ThreadLocal，单测里要能造链、也能清干净。
+
+    static void clearRedirectsForTest() {
+        REDIRECT_CHAIN.get().clear();
+    }
+
+    static void noteRedirectForTest(String from, String to) {
+        REDIRECT_CHAIN.get().add(from + " → " + to);
+    }
+
+    static String describeRedirects() {
+        java.util.ArrayList<String> chain = REDIRECT_CHAIN.get();
+        try {
+            if (chain == null || chain.isEmpty()) return "";
+            int n = Math.min(chain.size(), 3);
+            StringBuilder sb = new StringBuilder("（重定向环：");
+            for (int i = 0; i < n; i++) {
+                if (i > 0) sb.append("；");
+                sb.append(chain.get(i));
+            }
+            if (chain.size() > n) sb.append("；…共 ").append(chain.size()).append(" 跳");
+            return sb.append("）").toString();
+        } finally {
+            if (chain != null) chain.clear();
+        }
     }
 
     /** 主客户端：带 AiiHttpDns（DoH + 配置钉死的地址）。 */

@@ -32,6 +32,17 @@ import java.util.UUID;
  * 每条事件都带 source：桥指令（封面、spider、详情）自己不知道当前是哪个源，
  * 所以由 SiteProfile 在装配时调 setSource() 挂一份，build() 时补上。
  * 不带的话后台那一列全是空的 —— 2.0.20 就是这样，只能靠报错文案倒推是哪个源。
+ *
+ * ── 唯一一条绕开 request("report") 的路：kind=js ────────────────────
+ * 前端未捕获异常和未处理 rejection 由 assets/js-errors.js 直调
+ * Bridge.reportJs(@JavascriptInterface) 进来，**故意不走桥**。原因是桥要回包，
+ * 回包会调 window.NativeCallbacks.resolve —— 那个对象在 app.js 里，app.js 整份
+ * 没执行时回包自己就抛 TypeError，钩子接住再报就是死循环。而「app.js 没跑起来」
+ * 恰恰是这条链最该抓到的故障，所以它不能有回程。
+ *
+ * 两条配套约束，改前端那块之前先读 js-errors.js 的文件头：
+ *   · 堆栈的键必须叫 trace（本类 fit() 只收缩 trace 和 msg，其余键它不认识）；
+ *   · 前端不能带 source（不传才回落到下面这份 currentSource，传了就是假源）。
  */
 final class Report {
 
@@ -224,6 +235,10 @@ final class Report {
         if (payload == null) {
             return;
         }
+        // kind 的默认值是 "js"：2.0.23 之前这条分支没有任何调用方（只有 kind=play
+        // 的 play_error 在走），默认值一直没被兑现。现在由 js-errors.js 兑现 ——
+        // 它调 Bridge.reportJs，载荷里带全 kind/name/props，因此这条默认值仍然只是
+        // 「万一没带 kind 就按 JS 异常算」的兜底。
         String kind = payload.optString("kind", "js");
         String name = payload.optString("name", "event");
         String source = payload.optString("source", "");

@@ -15,6 +15,8 @@
     前一天）；
   · devices 是设备数，不是人数 —— 没有账号体系那一步，别在页面上写「用户数」；
   · errors 的定义是「code 不为空」，也就是这条事件描述了一次失败。
+  · **fails 是失败率的分子**：errors 再剔掉取消/竞态、再剔掉 `kind='js'`。
+    两个不是一回事，页面上用 fails，不要用 errors（见下面 FAIL_SQL）。
 """
 from __future__ import annotations
 
@@ -46,6 +48,17 @@ NOISE_SQL = """(
   )
 )"""
 
+# 失败率的分子。在 errors 的基础上再剔掉 `kind='js'`（2.0.23 起 App 会报 JS 异常）。
+#
+# 为什么要单剔 JS：**它没有对应的分母。** 一次坏掉的渲染循环会在几秒内刷出成百上千条
+# js_error，而背后只是「用户点了一下，这一屏没渲染出来」这一次操作。混进失败率，
+# 这个数就会因为和源健康完全无关的原因上下跳 —— 和 10-24 那次「失败率 93% 是假的」
+# 是同一种误读，只是换了个来源。
+#
+# 注意这不是「不算失败」，是「不算这一个比率」。js 事件照样进「失败排行」和事件流，
+# 那才是真正要看它的地方；页面上单列成一个「JS 异常」的计数。
+FAIL_SQL = "(code is not null and kind <> 'js' and not " + NOISE_SQL + ")"
+
 
 def overview(days: int = 7) -> dict:
     days = max(1, min(int(days), 90))
@@ -61,7 +74,9 @@ def overview(days: int = 7) -> dict:
                    count(distinct session_id)::int                         as sessions,
                    count(*) filter (where kind = 'crash')::int            as crashes,
                    count(*) filter (where code is not null)::int          as errors,
-                   count(*) filter (where """ + NOISE_SQL + """)::int as noise
+                   count(*) filter (where """ + NOISE_SQL + """)::int as noise,
+                   count(*) filter (where """ + FAIL_SQL + """)::int as fails,
+                   count(*) filter (where kind = 'js')::int               as js
             from events
             where at >= now() - make_interval(days => %(days)s)
             group by 1, 2
@@ -78,6 +93,8 @@ def overview(days: int = 7) -> dict:
                    count(*) filter (where kind = 'crash')::int      as crashes,
                    count(*) filter (where code is not null)::int    as errors,
                    count(*) filter (where """ + NOISE_SQL + """)::int as noise,
+                   count(*) filter (where """ + FAIL_SQL + """)::int as fails,
+                   count(*) filter (where kind = 'js')::int         as js,
                    to_char(min(at) at time zone %(tz)s, 'MM-DD HH24:MI') as since,
                    to_char(max(at) at time zone %(tz)s, 'MM-DD HH24:MI') as latest
             from events
@@ -106,6 +123,7 @@ def overview(days: int = 7) -> dict:
                    count(*)::int                                       as events,
                    count(distinct device_id)::int                       as devices,
                    count(*) filter (where code is not null)::int        as errors,
+                   count(*) filter (where """ + FAIL_SQL + """)::int as fails,
                    count(*) filter (where kind = 'play')::int           as plays,
                    to_char(max(at) at time zone %(tz)s, 'MM-DD HH24:MI')  as last_at
             from events

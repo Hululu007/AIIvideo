@@ -10,6 +10,84 @@
 > 历史。看的时候注意每段的日期。哪份文档是现行口径、哪份只剩历史价值，
 > 看 [`docs/README.md`](docs/README.md)。
 
+## 2026-10-25：2.0.23 —— 接上 JS 异常（C 批那条一直空着）
+
+C 批写了三条，另外两条都落了（`UncaughtExceptionHandler` 在 `HuangGuoApp`，
+`play_error` 四个 stage 在 feed-player），只有中间那条 `window.onerror` /
+`unhandledrejection` 一行代码都没有。核过三层：`assets/` 全树（含 `hxm/`、
+`vendor/`）grep `unhandledrejection` 是 0 条；Java 侧 `onConsoleMessage` 只打
+logcat，二十多个 `evaluateJavascript` 注入点没一个有错误回调；最硬的旁证是
+`Report.fromFrontend` 的 kind 默认值就写着 `"js"` —— 口子挖好了，管子没接，
+而全 App 唯一调 `track()` 的地方是 `feed-player.js:807` 的 `play_error`。
+
+### 接了，但没走桥
+
+`assets/js-errors.js` 直调新加的 `Bridge.reportJs`（`@JavascriptInterface`、
+**void、不回包**），不走 `request("report", …)`。
+
+原因是回包：桥走完会灌一句 `window.NativeCallbacks.resolve(id, …)`，而那个对象
+定义在 `app.js`。`app.js` 整份没执行时这一句自己就是个 TypeError，钩子接住、
+再报一次、再回包 —— 死循环。偏偏「app.js 没跑起来导致白屏」正是这条链最该抓
+的故障，所以它不能有回程。
+
+配套三件事，都写进 `js-errors.js` 文件头和 `Report` 类注释了：
+
+1. **钩子必须是 `app.html` 里的第一个脚本**。放后面就漏掉前面所有脚本的解析
+   错误。现在插在 `<title>` 之后、主题那段内联脚本之前。
+2. **堆栈的键叫 `trace`，不叫 `stack`**。`Report.fit()` 只认 `trace` 和 `msg`
+   两个键做收缩，用 `stack` 就是整条顶穿 `EVENT_BUDGET(3800)`、服务端 4096
+   拦下进 `dead/` —— 2.0.22 刚修掉的那种「数据在看不见的地方消失」。
+3. **不带 `source`**。不传才回落到 `SiteProfile` 挂上的真实源标签；传了就是拿
+   前端的 `contentSource` 覆盖它，而那个值恒为 `'hongguo'`。
+
+### 防刷：对数收敛 + 会话硬顶
+
+封面那 1340 条是「同一个坏东西被重试 16 次」刷出来的，坏掉的渲染循环比那猛两个
+数量级（每帧一条）。所以同一个 key（`stage|code|msg|where`）只在第 1、10、100、
+1000 次上报，`props.seen` 带累计次数；每个页面会话硬顶 50 条，到顶只补一条带
+`suppressed` 的汇总。50 远低于 `MAX_BACKLOG(600)`，撑不爆队列。
+
+### 口径变了：JS 异常不进失败率
+
+这是 10-24 那次「失败率 93% 是假的」的同一种误读，先堵。**JS 异常没有分母** ——
+一次坏渲染循环能刷出上千条 `js_error`，背后只是「用户点了一下，这屏没渲染出来」
+这一次操作。混进失败率，这个数会因为和源健康无关的原因上下跳。
+
+落法是加法不是减法（`errors` / `noise` 两个字段语义不动，免得模板里
+`errors - noise` 被减两次）：`stats.py` 新增 `FAIL_SQL` =
+`code is not null and kind <> 'js' and not NOISE_SQL`，在 daily / total / sources
+三处各出一列 `fails`，total 与 daily 再加一列 `js`。后台「数据」页的失败率
+分子换成 `fails`，另起一行「JS 异常」单列计数，事件流加一个 `kind=js` 过滤钮。
+**js 事件照样进「失败排行」** —— 那才是真正要看它的地方。
+
+### 怎么验的
+
+- `node scripts/js-errors-check.js`：39 条断言，跑在假 window 上。钉住三条静默
+  约束（trace 键名、不走桥、不带 source）、四种 reason 形态（Error / 字符串 /
+  `undefined` / 循环引用）、资源 404 不算 JS 异常、30 次同错只发 2 条、200 条
+  不同错误被截到 50 条、钩子自己抛异常不外泄。接进了 `build.sh verify` 和新增的
+  `build.sh jscheck`。
+- `ReportTest` 新增 2 条（16 条全过）：JS 堆栈放 `trace` 时整条在预算内且裁完
+  还剩函数名；不带 source 时回落到当前源。
+- `check-apk.py` 的 `REQUIRED` 加 `assets/js-errors.js`。
+- 后台模板用假数据渲染过一遍：失败数字取 `fails`、JS 单列、过滤钮到位。
+
+真机那条还没跑 —— 当前没有设备在线。`diag` 加了两个自检口子，和 `mode=crash`
+同一个入口：`{mode:"js"}` 在 setTimeout 里抛一个，`{mode:"rejection"}` 造一个
+没人 catch 的 Promise。
+
+### 没做，理由记着
+
+- **`spider-host.html` 的钩子。** spider 在另一个 WebView，CSP 写死
+  `connect-src 'none'`，唯一出口是 `__spider.call(op)`，要接得给 `SpiderBridge`
+  加个 op 并同步改 `docs/spider-接入规范.md` 的契约表 —— 独立一块。而且绝大多数
+  spider JS 异常今天已经上来了：`__spiderRun` 把同步异常和 rejection 都收敛成
+  `{ok:false,error}`，最终变成 `bridge/command_error`。真正漏的只有 spider 自己
+  detach 出去的 then / setTimeout 里抛的。
+- **`play_error` 的 source 标签。** `app.js:62` 的 `bridgeCall` 无差别注入
+  `source: contentSource`，而它恒为 `'hongguo'` —— 所以播放事件那一列今天全是
+  假源。是个真 bug，但修它会改变既有历史数据的可比性，单独一轮。
+
 ## 2026-10-24 傍晚：2.0.21 —— 把四条报错从「看得出坏了」变成「看得出为什么坏」
 
 对着 2.0.20 的数据查了一遍用户报错（72 台设备、3,335 条事件、真失败 2,505 条 / 49 台，
@@ -508,6 +586,60 @@ detail 阶段）洗成取消 —— 那等于把「站点慢到读不出来」�
   重试刷出来的事件内容可能完全相同。
 - 从 tail 递归下来的单条**从没被单独发过**（父层只 post 了 head），直接判它有问题就是
   冤杀。进 `isolate` 之前必须自己试一次。
+
+### 2.0.23：确属我们代码的那三类报错
+
+上一轮按归因分组时，有一档是「这个确实是我们的问题」。量小，但每一条都能修。
+
+**一、源没实现的兜底从来没生效过。**
+
+`contentFallback`（tag-list → category、tags → 用配置的分类现拼）只挂在 `api()` 的
+能力预判上，而那句预判要 `info.caps.length` 非空才走：
+
+```js
+if (info.caps.length && info.caps.indexOf(cap) < 0) { /* 兜底 */ }
+```
+
+探测本身会失败（宿主页建不起来、`__meta` 超时），失败时 caps 是空数组 —— 整句跳过，
+直接调，然后源抛错。线上 19 条 `没有实现 tagList`、3 条 `没有实现 tags` 全来自两台
+没探到能力集的设备，全是 2.0.20。用户看到的是「这个源没有实现「类型列表」（spider 里
+没有 tagList 函数）」—— 一句带内部函数名的技术报错，而那个源本身完全正常。
+
+现在 `spiderApi` 在 catch 里也兜一次：`isMissingCapability(error)` → 调
+`contentFallback`，兜不了才把人话错误抛出去。两条路都试过才算真没有。
+
+**二、失败消息把原因吃掉了。**
+
+`AiiHttp.java:276` 和 `:613` 两处 `throw new IOException("请求失败：" + url)` 把底层
+异常扔了，只剩地址。线上 **313 条**这种消息，`code` 列统一是 `IOException` —— 想知
+道是超时、被 RST、还是 TLS 失败，翻数据库翻不出来。
+
+现在带上 `describe(底层异常)`（类名 + message，null 安全，不重复拼已经带了类名的）。
+顺带修 `fetchUncached` 的降级循环：原来第二次重试的异常会覆盖第一次，拿不到根因。
+
+**三、重定向环只说数字。**
+
+OkHttp 抛 `ProtocolException("Too many follow-up requests: 21")`，74 条，全是这个形态。
+看不出绕去哪，也分不清是站点在环、还是我们发的 Host/Referer 触发了循环。本地拿
+huangguoai.com 复现不出来（无 UA / okhttp UA / http→https 都只 1 跳），所以这一条
+**改成「看得出原因」而不是猜原因**：
+
+- 加一个只观测、不改行为的 OkHttp 拦截器，每跳记进 ThreadLocal；
+- 撞环时 `withRedirectHint` 把前三跳 + 总跳数拼进错误消息；
+- 上限**保持 OkHttp 默认的 20**。放宽只会让用户多等，看不出来才是要修的。
+
+**四、封面负缓存补主机一层。**
+
+一个源的封面主机挂了，列表里每张封面 URL 都**不同**，按 URL 缓存一次都命中不了。
+一台设备 34 条「无效封面域名」横跨 351 分钟，就是这么来的 —— 34 张不同封面的同一个
+错误。现在 `FAILED_HOSTS` 记主机，同主机五分钟内只报第一条，后面那些照常失败但带
+`Report.Once` 不上报（`dispatch` 里 `!Report.isOnce(error)` 会挡）。
+
+`不支持的封面格式` 也接进了缓存 —— 原来它直接抛，绕过了 `rememberFailure`。
+
+单测 271 → 283（新增 `CoverFailureCacheTest` 5 条、`AiiHttpErrorTextTest` 5 条，
+`ReportQueueTest` 补到 6 条）。缓存是静态的，用例之间要 `resetCoverFailureCache()`，
+和 `ReportTest` 里 `setSource("")` 那个坑同一类。
 
 ## 2026-10-21：中继取流与环境装配 —— 已完成（真机验证）
 

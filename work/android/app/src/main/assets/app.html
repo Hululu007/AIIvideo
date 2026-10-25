@@ -6,6 +6,9 @@
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#f5f2e9" id="theme-color">
   <title>AIIvideo</title>
+  <!-- 必须是第一个脚本：放后面就漏掉前面所有脚本的解析错误，而「某个分片没打进包 /
+       语法坏了导致白屏」正是它最该抓到的那类故障。见 js-errors.js 文件头。 -->
+  <script src="js-errors.js"></script>
   <script>
     /* 主题要在 CSS 之前定下来。放到 app.js 里会先画一帧浅色再翻成深色，
        冷启动的闪白在 OLED 上特别明显。这里只读偏好、算一次，不碰任何 DOM。 */

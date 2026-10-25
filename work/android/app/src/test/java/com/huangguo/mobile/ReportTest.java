@@ -221,4 +221,60 @@ public class ReportTest {
         assertTrue(other.contains("ffd8ffe0"));
         assertTrue(!other.contains("HTML"));
     }
+
+    @Test
+    public void JS_堆栈放在_trace_键上且收得住预算() {
+        // assets/js-errors.js 那边把堆栈写在 props.trace（不是 stack）—— 这条约束
+        // 是静默的：键名叫错时 fit() 不认识这个键，收缩不了，整条顶穿
+        // EVENT_BUDGET(3800)、服务端 4096 一拦就进 dead/，后台一条都看不到。
+        //
+        // 造一份真机形态的 JS 堆栈：首行是构造器名，后面每帧一行，40 帧。
+        StringBuilder stack = new StringBuilder("TypeError: x is not a function\n");
+        for (int i = 0; i < 40; i += 1) {
+            stack.append("    at fn").append(i)
+                    .append(" (appassets.androidplatform.net/assets/app.js:")
+                    .append(100 + i).append(":9)\n");
+        }
+        JSONObject props = new JSONObject();
+        try {
+            props.put("stage", "onerror")
+                    .put("code", "TypeError")
+                    .put("msg", "x is not a function")
+                    .put("trace", stack.toString())
+                    .put("where", "app.js:1234:7")
+                    .put("route", "detail");
+        } catch (Exception error) {
+            throw new AssertionError(error);
+        }
+        JSONObject event = Report.build("js", "js_error", "", props);
+        int size = Report.serializedSize(event);
+        assertTrue("整条 " + size + " 字节，超了 " + Report.EVENT_BUDGET, size <= Report.EVENT_BUDGET);
+
+        // 裁完还得剩下能定位的东西。
+        String trace = props.optString("trace");
+        assertTrue("堆栈被裁空了", trace.length() > 100);
+        assertTrue("丢了函数名", trace.contains("at fn0"));
+    }
+
+    @Test
+    public void JS_异常不带_source_时回落到当前源() {
+        // js-errors.js 刻意不传 source —— 传了就等于拿前端的 contentSource
+        // （恒为 'hongguo'）覆盖掉 SiteProfile 装配时挂上的真实源标签。
+        // 不传才能落到这里验的这条路径上。
+        Report.setSource("51cg");
+        try {
+            JSONObject props = new JSONObject();
+            props.put("stage", "onerror");
+            props.put("code", "TypeError");
+            JSONObject event = Report.build("js", "js_error", "", props);
+
+            assertEquals("js", event.getString("kind"));
+            assertEquals("js_error", event.getString("name"));
+            assertEquals("51cg", event.getString("source"));
+        } catch (Exception error) {
+            throw new AssertionError(error);
+        } finally {
+            Report.setSource("");
+        }
+    }
 }

@@ -106,6 +106,18 @@ public final class MainActivity extends Activity {
     private final ExecutorService requests = Executors.newFixedThreadPool(4);
     private final ExecutorService localRequests = Executors.newSingleThreadExecutor();
     private final ExecutorService coverRequests = Executors.newFixedThreadPool(2);
+    /**
+     * JS 异常上报专用。**不蹭上面那三个池子**：
+     *
+     * <p>{@code requests} 是网络（4 线程），{@code localRequests} 是单线程且用户在等
+     * 结果，{@code coverRequests} 是封面解码。一个坏掉的渲染循环能在一秒内灌几十条
+     * 异常，塞进任何一条既有池子都会把它顶住 —— 用户看到的是「点什么都没反应」，
+     * 而那个症状和真实故障完全分不开。
+     *
+     * <p>单线程而不是多线程：入队这条路上真正的开销是写 jsonl，ReportQueue 自己
+     * 有 synchronized，给多线程只是多一层锁竞争，没有收益。
+     */
+    private final ExecutorService reports = Executors.newSingleThreadExecutor();
     private final Handler hotHandler = new Handler(Looper.getMainLooper());
     private float pendingBackProgress = -1.0f;
     private final Map<String, Command> commands = new HashMap<>();
@@ -748,6 +760,11 @@ public final class MainActivity extends Activity {
         this.requests.shutdownNow();
         this.localRequests.shutdownNow();
         this.coverRequests.shutdownNow();
+        // JS 异常那个池子也要关。**不写这一句的代价不是崩溃，是泄漏**：
+        // Activity 重建（换源、改配置都会）时旧的池子留着跑，每条都握着
+        // 已经被系统回收的 WebView 上下文；而且这个池子是 2.0.23 才加的，
+        // 前三个都关了、只有它没关，属于最容易被忘掉的那一类。
+        this.reports.shutdownNow();
         // 站点侧那个隐藏 WebView（见 SiteFetchWebView）。它挂在 decor 上，
         // 不销毁的话渲染进程会一直留着，定时器和视频缓冲都不退。
         SiteFetchWebView.shutdown();
@@ -854,14 +871,30 @@ public final class MainActivity extends Activity {
             Report.fromFrontend(jSONObject);
             return true;
         });
-        // 自检口子：mode=crash 时在主线程抛一个，走真正的 UncaughtExceptionHandler。
-        // 不这么留一个入口，崩溃上报这条链路就只能靠「等真用户崩一次」来验证。
+        // 自检口子：和崩溃那条一样的用途，只是换成验证另外两条链路。
+        // 不这么留入口，「JS 异常上报」就只能靠等真用户踩一次才能验。
         this.commands.put("diag", jSONObject -> {
-            if ("crash".equals(jSONObject.optString("mode"))) {
+            String mode = jSONObject.optString("mode");
+            if ("crash".equals(mode)) {
                 new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
                     throw new IllegalStateException("diag: 手动触发的崩溃（验证上报链路，不是 bug）");
                 });
                 return new JSONObject().put("ok", true).put("note", "主线程即将崩溃");
+            }
+            // 另外两条走 WebView：必须回主线程 evaluateJavascript，diag 本身在后台池里。
+            // 抛在 setTimeout 里而不是当场抛 —— 当场抛会被 evaluateJavascript 那层
+            // 吞成一句 "Uncaught Error"，拿不到完整的 ErrorEvent（也就没有 filename/lineno）。
+            if ("js".equals(mode) || "rejection".equals(mode)) {
+                final String script = "js".equals(mode)
+                        ? "setTimeout(function(){throw new Error('diag: 手动触发的 JS 异常（验证上报链路，不是 bug）')},0)"
+                        : "Promise.reject(new Error('diag: 手动造一个未处理 rejection（不是 bug）'))";
+                final WebView view = this.webView;
+                if (view == null) {
+                    return new JSONObject().put("ok", false).put("note", "webView 还没起来");
+                }
+                view.post(() -> view.evaluateJavascript(script, null));
+                return new JSONObject().put("ok", true).put("note",
+                        "js".equals(mode) ? "主线程 setTimeout 里抛一个" : "一个没人 catch 的 Promise");
             }
             return Report.state();
         });
@@ -1229,6 +1262,36 @@ public final class MainActivity extends Activity {
             } catch (Exception ignored) {
                 // 触感是锦上添花，失败就当没有。
             }
+        }
+
+        /**
+         * 前端未捕获异常与未处理 rejection 的唯一入口。见 assets/js-errors.js。
+         *
+         * <p><b>和 {@code request("report", …)} 的区别只有一条：不回包。</b> 桥那条路
+         * 走完会灌一句 {@code window.NativeCallbacks.resolve(id, …)}，而
+         * {@code NativeCallbacks} 定义在 app.js —— app.js 整份没执行时这一句自己就是
+         * 个 TypeError，被钩子接住再报一次就是死循环。偏偏「app.js 没跑起来」正是
+         * 这条链最该抓到的故障，所以它不能有回程。
+         *
+         * <p>参数是一条完整事件 {@code {kind,name,props}}，和前端 {@code track()} 同形，
+         * 只是不带 source —— 不传才能让 {@link Report#build} 回落到 SiteProfile 装配时
+         * 挂上的真实源标签（前端那个 contentSource 恒为 hongguo，传了就是假源）。
+         *
+         * <p>线程：{@link #reports}。js-errors.js 已经把量压到每会话 50 条以内，这里
+         * 只是再兜一层 —— 一个坏掉的渲染循环不该把请求池顶住。
+         */
+        @JavascriptInterface
+        public void reportJs(final String json) {
+            if (json == null || json.isEmpty()) {
+                return;
+            }
+            MainActivity.this.reports.execute(() -> {
+                try {
+                    Report.fromFrontend(new JSONObject(json));
+                } catch (Throwable ignored) {
+                    // 上报失败不影响页面，也不该在 logcat 里制造噪音。
+                }
+            });
         }
 
         /**

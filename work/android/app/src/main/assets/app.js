@@ -395,6 +395,27 @@ function spiderArgsFor(action, args) {
   return out;
 }
 
+/**
+ * 一次 spider 能力调用。**兜底也走这里**，不只在 api() 的能力预判里。
+ *
+ * ── 为什么要两条路都兜（2026-10-25）────────────────────────────────
+ *
+ * `contentFallback` 原来只挂在 api() 里那句预判上：
+ *
+ *     if (info.caps.length && info.caps.indexOf(cap) < 0) { 兜底 }
+ *
+ * 只有当**探测成功、且明确没有这个能力**时才兜。可探测本身会失败（宿主页
+ * 建不起来、`__meta` 超时），失败时 caps 是空数组，`caps.length` 为 0，
+ * 整句跳过 —— 直接调，然后源抛「spider 没有实现 tagList」，用户看到一句
+ * 带内部函数名的技术报错。
+ *
+ * 线上就是这么来的：19 条 `没有实现 tagList`、3 条 `没有实现 tags`，全在
+ * 2.0.20 上，全来自两台没探到能力集的设备。源本身没坏 —— tag-list 在绝大多数
+ * 站上就等于 category（见 siteTagFallback 那段注释），兜底完全能接住。
+ *
+ * 现在：预判能兜就预判兜，预判兜不了（探测失败/没探过）就在**调用失败时**
+ * 再兜一次。两条路都试过才算真没有。
+ */
 async function spiderApi(action, args) {
   const id = spiderIdOf();
   if (!id) throw new Error('这个源没有声明 web.spider');
@@ -413,11 +434,28 @@ async function spiderApi(action, args) {
       op: 'call', id, cap, args: spiderArgs, timeoutMs: 90000
     });
   } catch (error) {
+    // 能力没实现 → 先试兜底；兜不了再把原始错误翻译成人话抛出去。
+    if (isMissingCapability(error)) {
+      const info = await spiderMetaOf(id);
+      const fallback = contentFallback(action, info.caps, args);
+      if (fallback) {
+        console.log('[spider-api] ' + action + ' 源没实现 ' + cap + '，走本机兜底');
+        return fallback;
+      }
+      // 不往 caps 里塞假条目做缓存：探测失败那种情况本来就没探到能力集，
+      // 往里写事实会让别的读 caps 的地方跟着错。多跑一次失败调用很便宜。
+    }
     throw spiderErrorOf(action, error);
   }
   const out = model.fromBridge(payload, cap);
   if (action === 'episode') return episodeShapeOf(out);
   return out;
+}
+
+/** 这条错误是不是「源没写这个函数」。宿主页的原文是 `spider 没有实现 xxx`。 */
+function isMissingCapability(error) {
+  const raw = String((error && error.message) || error || '');
+  return /没有实现\s*[A-Za-z0-9_-]+/.test(raw);
 }
 
 // spider 内部报的一类错需要翻译一下再交给用户。

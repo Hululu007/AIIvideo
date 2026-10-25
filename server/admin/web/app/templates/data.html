@@ -56,13 +56,21 @@
         <td class="acts"><a href="{{ mount }}/data?d={{ d }}&kind=crash">看崩溃</a></td>
       </tr>
       <tr>
-        <td class="name">失败<span class="sub">带 code 的事件；括号里是用户划过、请求被取代这类取消</span></td>
-        <td class="num">{{ t.errors - (t.noise or 0) }}</td>
+        <td class="name">失败<span class="sub">带 code 的事件，剔掉取消/竞态和 JS 异常</span></td>
+        <td class="num">{{ t.fails }}</td>
         <td class="num dim">
-          {% if t.events %}{{ ((t.errors - (t.noise or 0)) / t.events * 100) | round(1) }}% 事件{% endif %}
+          {% if t.events %}{{ (t.fails / t.events * 100) | round(1) }}% 事件{% endif %}
           · 取消 {{ t.noise or 0 }}
         </td>
         <td class="acts"><a href="{{ mount }}/data?d={{ d }}#fail">看排行</a></td>
+      </tr>
+      <tr>
+        <td class="name">JS 异常<span class="sub">前端未捕获异常 + 未处理 rejection，<b>不进上面那个失败率</b></span></td>
+        <td class="num">{{ t.js or 0 }}</td>
+        <td class="num dim">
+          {% if t.js %}一次坏渲染循环能刷出几百条，没有对应的分母{% else %}还没有 —— 2.0.23 才接上{% endif %}
+        </td>
+        <td class="acts"><a href="{{ mount }}/data?d={{ d }}&kind=js">看 JS</a></td>
       </tr>
       </tbody>
     </table></div>
@@ -75,7 +83,7 @@
     {% if ov.daily %}
     <div class="scrollx">
     <table class="table table--tight">
-      <thead><tr><th>日期</th><th class="num">设备</th><th class="num">会话</th><th class="num">事件</th><th class="num">崩溃</th><th class="num">真失败</th><th class="num">失败率</th></tr></thead>
+      <thead><tr><th>日期</th><th class="num">设备</th><th class="num">会话</th><th class="num">事件</th><th class="num">崩溃</th><th class="num">真失败</th><th class="num">失败率</th><th class="num">JS</th></tr></thead>
       <tbody>
       {% for row in ov.daily | reverse %}
       <tr>
@@ -84,8 +92,9 @@
         <td class="num dim">{{ row.sessions }}</td>
         <td class="num">{{ row.events }}</td>
         <td class="num{{ ' dim' if not row.crashes }}">{{ row.crashes }}</td>
-        <td class="num{{ ' dim' if not row.errors }}">{{ row.errors - (row.noise or 0) }}</td>
-        <td class="num dim">{% if row.events %}{{ ((row.errors - (row.noise or 0)) / row.events * 100) | round(1) }}%{% else %}—{% endif %}</td>
+        <td class="num{{ ' dim' if not row.fails }}">{{ row.fails }}</td>
+        <td class="num dim">{% if row.events %}{{ (row.fails / row.events * 100) | round(1) }}%{% else %}—{% endif %}</td>
+        <td class="num{{ ' dim' if not row.js }}">{{ row.js or 0 }}</td>
       </tr>
       {% endfor %}
       </tbody>
@@ -110,7 +119,7 @@
         <td class="num">{{ row.devices }}</td>
         <td class="num">{{ row.events }}</td>
         <td class="num dim">{{ row.plays }}</td>
-        <td class="num{{ '' if row.errors else ' dim' }}">{{ row.errors }}</td>
+        <td class="num{{ '' if row.fails else ' dim' }}">{{ row.fails }}</td>
         <td class="num dim nowrap">{{ row.last_at or '—' }}</td>
       </tr>
       {% endfor %}
@@ -216,6 +225,7 @@
       <a href="{{ mount }}/data?d={{ d }}&kind=play"{% if kind == 'play' %} aria-current="page"{% endif %}>播放</a>
       <a href="{{ mount }}/data?d={{ d }}&kind=bridge"{% if kind == 'bridge' %} aria-current="page"{% endif %}>桥</a>
       <a href="{{ mount }}/data?d={{ d }}&kind=crash"{% if kind == 'crash' %} aria-current="page"{% endif %}>崩溃</a>
+      <a href="{{ mount }}/data?d={{ d }}&kind=js"{% if kind == 'js' %} aria-current="page"{% endif %}>JS</a>
       <a href="{{ mount }}/data?d={{ d }}&kind={{ kind }}&clean={{ 0 if clean else 1 }}">{{ '含取消/竞态' if clean else '只看真失败' }}</a>
     </div>
     {% if stream_error %}

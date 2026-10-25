@@ -87,11 +87,21 @@ final class SiteRepository {
     // 没有这一层的话，一次故障能刷出几百条一模一样的上报 —— 线上那 1340 条
     // 「封面解密结果无效」里绝大多数是这么来的。第一次照常抛、照常报；
     // 五分钟内同样的地址直接抛缓存里那条，并且带上 Report.Once，dispatch 不再上报。
-
+    //
+    // ── 键分两层（2026-10-25）────────────────────────────────────────
+    // 只按 URL 存是不够的：一个源的封面主机挂了，**每一张封面的 URL 都不同**，
+    // 缓存一次都命中不了。线上证据：一台设备 34 条「无效封面域名」，横跨 351 分钟
+    // —— 那是列表里 34 张不同封面的同一个配置错误。
+    //
+    // 所以再存一份按**主机**的：同一个主机上的失败，后面那些不再逐个上报。
+    // 消息里带上第一次的原文，方便知道是哪一类问题（白名单/网络/解密）。
     private static final long FAIL_CACHE_MS = 5 * 60 * 1000L;
     private static final int FAIL_CACHE_MAX = 300;
     private static final java.util.Map<String, CoverFailure> FAILED =
             new java.util.concurrent.ConcurrentHashMap<String, CoverFailure>();
+    /** 主机级：key = 主机名（小写）。值只用来判断「这个主机刚失败过」，消息不共用。 */
+    private static final java.util.Map<String, Long> FAILED_HOSTS =
+            new java.util.concurrent.ConcurrentHashMap<String, Long>();
 
     /** 缓存过的那条失败：消息和第一次一模一样，但重试时不再进上报。 */
     static final class CoverFailure extends IllegalStateException implements Report.Once {
@@ -103,11 +113,61 @@ final class SiteRepository {
         }
     }
 
-    private static void rememberFailure(String url, String message) {
+    static void rememberFailure(String url, String message) {
         if (FAILED.size() > FAIL_CACHE_MAX) {
             FAILED.clear();
         }
         FAILED.put(url, new CoverFailure(message, System.currentTimeMillis() + FAIL_CACHE_MS));
+        String host = hostOf(url);
+        if (host.length() > 0) {
+            if (FAILED_HOSTS.size() > FAIL_CACHE_MAX) {
+                FAILED_HOSTS.clear();
+            }
+            FAILED_HOSTS.put(host, System.currentTimeMillis() + FAIL_CACHE_MS);
+        }
+    }
+
+    /**
+     * 这个主机的同一条 URL 之外，还有没有别的封面在同一个坑里。
+     *
+     * 命中时返回一条**带 Report.Once 的**异常：调用方照常失败（该有的错误态不变），
+     * 但 `dispatch` 里 `!Report.isOnce(error)` 会挡住上报 —— 一次主机级故障
+     * 只留一条记录，不是几十条。
+     */
+    static CoverFailure hostFailure(String url) {
+        String host = hostOf(url);
+        if (host.length() == 0) return null;
+        Long until = FAILED_HOSTS.get(host);
+        if (until == null) return null;
+        if (System.currentTimeMillis() >= until) {
+            FAILED_HOSTS.remove(host);
+            return null;
+        }
+        return new CoverFailure("封面主机刚刚失败过（" + host + "），本轮不再重复上报", until);
+    }
+
+    // ── 只给单测用的两个口子 ───────────────────────────────────────────
+    // 都带 Test 后缀，生产代码里搜不到调用点。缓存是静态的，不重置的话
+    // 用例之间会互相污染（和 ReportTest 里 setSource 那个坑同一类）。
+
+    static void resetCoverFailureCache() {
+        FAILED.clear();
+        FAILED_HOSTS.clear();
+    }
+
+    static void rememberHostFailureForTest(String host, long until) {
+        FAILED_HOSTS.put(host.toLowerCase(Locale.ROOT), until);
+    }
+
+    /** 从任意 URL 里取主机名，取不到返回空串（不抛）。包可见，单测要盯。 */
+    static String hostOf(String url) {
+        try {
+            java.net.URI uri = java.net.URI.create(String.valueOf(url));
+            String h = uri.getHost();
+            return h == null ? "" : h.toLowerCase(Locale.ROOT);
+        } catch (Throwable ignored) {
+            return "";
+        }
     }
 
     /** 把「拿回来的到底是什么」写清楚，别再让人靠猜。包可见，方便单测盯住文案。 */
@@ -193,6 +253,13 @@ final class SiteRepository {
             }
             FAILED.remove(str);
         }
+        // 第二层：这个主机的**另一张**封面刚失败过。
+        // 列表里 34 张封面是 34 个不同 URL，只按 URL 缓存拦不住；主机关挂了
+        // 却会一次性报 34 条。这里把它们合并成一条（仍然抛，界面照常出占位图）。
+        CoverFailure hostCached = hostFailure(str);
+        if (hostCached != null) {
+            throw hostCached;
+        }
         String strCoverUrl;
         try {
             strCoverUrl = this.profile.coverUrl(str);
@@ -215,6 +282,7 @@ final class SiteRepository {
         if (this.profile.object("cover").optBoolean("checkExtension", true)
                 && hasExtension
                 && !Arrays.asList("jpg", "jpeg", "png", "webp", "gif").contains(lowerCase)) {
+            rememberFailure(str, "不支持的封面格式：" + lowerCase + " @" + url.getHost());
             throw new IllegalArgumentException("不支持的封面格式：" + lowerCase + " @" + url.getHost());
         }
         byte[] bArrDigest = MessageDigest.getInstance("SHA-256").digest((this.profile.fingerprint + ":" + url.getHost() + path).getBytes(StandardCharsets.UTF_8));
