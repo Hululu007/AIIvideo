@@ -43,7 +43,9 @@ function restoreScreen(snapshot) {
   if (snapshot.listing) state.listing = snapshot.listing;
   state.listingReturn = snapshot.listingReturn;
   state.tagsReturn = snapshot.tagsReturn;
-  content.replaceChildren(snapshot.pageNode);
+  // replaceChildren 是 Chrome 86；这里改成「清空 + append」。见 app-nav.js 里的同一处理。
+  while (content.firstChild) content.removeChild(content.firstChild);
+  content.appendChild(snapshot.pageNode);
   if (snapshot.route === 'home') refreshHomeHistory();
   if (snapshot.route === 'library') renderLibrary();
   if (snapshot.route === 'settings') renderSettings();

@@ -1,4 +1,15 @@
 'use strict';
+/*
+ * 「这个文件从头到尾解析通过了」的标记。
+ *
+ * app.html 末尾那块兜底面板只看它：整份解析失败时下面一句都不会执行，标记缺席，
+ * 面板就出来说人话，而不是留一片空白。2.0.23 线上两台设备就是这样 —— `?.` 和
+ * `||=` 让 14 个脚本同时倒在解析阶段，除了 app_open 一个业务事件都没有。
+ *
+ * 为什么放在**最前面**而不是启动链末尾：解析失败是整份的，标记放哪儿都评不上；
+ * 而放最前面能顺带把「解析通过但启动早期就抛了」和「解析失败」分开。
+ */
+window.__hgParsed = 1;
 const callbacks = new Map();
 let requestNumber = 0;
 let contentSource = 'hongguo';
@@ -156,6 +167,31 @@ window.__hgNativeEpsBusy = window.__hgNativeEpsBusy || {};
 
 function hgNativeEpKey(id, ep) { return id + ':' + ep; }
 
+/**
+ * 播放地址解析失败的上报口。
+ *
+ * 以前 hgNativeResolve 的收尾是 `.catch(() => {})` —— 一个字都不留。而这一句
+ * 恰好罩住了最常见的「播不了」：接口没给地址、给了但不是 http(s)、wasm 解不出来。
+ * 结果就是全库 15,932 条事件里 kind='play' 零条 —— 最该有数据的链路一个样本都没有。
+ *
+ * 按 `stage|code|msg` 去重、上限 10 条：同一个坏源会被反复点，逐条上报只是噪音。
+ */
+const PLAY_RESOLVE_SEEN = new Set();
+function trackPlayResolveError(stage, code, message) {
+  try {
+    const text = String(message == null ? '' : message);
+    const key = stage + '|' + code + '|' + text.slice(0, 80);
+    if (PLAY_RESOLVE_SEEN.has(key) || PLAY_RESOLVE_SEEN.size >= 10) return;
+    PLAY_RESOLVE_SEEN.add(key);
+    track('play', 'play_error', {
+      stage: stage,
+      code: code || 'error',
+      msg: text.slice(0, 200),
+      mode: 'single'
+    });
+  } catch (ignored) {}
+}
+
 function hgNativeResolve(id, ep) {
   const key = hgNativeEpKey(id, ep);
   if (window.__hgNativeEpsBusy[key]) return;   // 已经在解了，别重复打接口
@@ -168,7 +204,13 @@ function hgNativeResolve(id, ep) {
           : window.HG_AGEDM_PLAY.resolve(url.slice('agedm-wasm:'.length), () => {}))
       : Promise.resolve(url);
     return Promise.resolve(resolveWasm).then(resolved => {
-      if (!/^https?:\/\//.test(resolved)) return;
+      if (!/^https?:\/\//.test(resolved)) {
+        // 解析出来是空串或者不是 http(s)：以前这里静默 return，用户看到的是
+        // 一个永远转圈的播放页，后台一条痕迹都没有。
+        trackPlayResolveError('resolve', 'empty-url',
+          '解析结果不是 http(s) 地址：' + String(resolved == null ? '' : resolved).slice(0, 60));
+        return;
+      }
       window.__hgNativeEps[key] = resolved;
       try {
         const all = JSON.parse(localStorage.getItem('hgpref:epurl') || '{}');
@@ -176,7 +218,10 @@ function hgNativeResolve(id, ep) {
         localStorage.setItem('hgpref:epurl', JSON.stringify(all));
       } catch (error) {}
     });
-  }).catch(() => {}).then(() => { delete window.__hgNativeEpsBusy[key]; });
+  }).catch(error => {
+    trackPlayResolveError('resolve', (error && error.name) || 'error',
+      (error && error.message) || String(error));
+  }).then(() => { delete window.__hgNativeEpsBusy[key]; });
 }
 
 window.__hgNativeEpisode = (id, ep) => {
@@ -1337,7 +1382,7 @@ function campaignSlide(item, index, count) {
   return '<div class="hero-slide hero-campaign" data-index="' + index + '">'
     + '<img class="hero-image campaign-image" src="' + esc(campaignArtwork(item)) + '" alt="">'
     + '<button class="hero-cover-button" type="button" data-open-campaign="' + esc(item.id) + '" aria-label="查看国庆庆祝页"></button>'
-    + '<div class="hero-copy"><h2>' + esc(item.title) + '</h2><p>' + esc(item.description || '').replaceAll('\n', '<br>') + '</p>'
+    + '<div class="hero-copy"><h2>' + esc(item.title) + '</h2><p>' + esc(item.description || '').split('\n').join('<br>') + '</p>'
     + '<button class="hero-action" type="button" data-open-campaign="' + esc(item.id) + '">' + esc(item.button || '查看庆祝页') + '</button></div>'
     + '<span class="campaign-date">' + esc(item.dateLabel || '') + '</span>'
     + '<div class="hero-index"><b>' + String(index + 1).padStart(2, '0') + '</b> / ' + String(count).padStart(2, '0') + '</div></div>';
@@ -1349,7 +1394,7 @@ function goCampaign(item) {
   state.campaign = item;
   content.innerHTML = '<article class="campaign-page"><button class="campaign-back" type="button" data-back>' + icon('back') + ' 返回首页</button>'
     + '<section class="campaign-poster"><img src="' + esc(campaignArtwork(item)) + '" alt="">'
-    + '<div><h1>' + esc(item.title) + '</h1><p>' + esc(item.description || '').replaceAll('\n', '<br>') + '</p><span>' + esc(item.dateLabel || '') + '</span></div></section>'
+    + '<div><h1>' + esc(item.title) + '</h1><p>' + esc(item.description || '').split('\n').join('<br>') + '</p><span>' + esc(item.dateLabel || '') + '</span></div></section>'
     + '<section class="campaign-message"><h2>共庆好时光</h2><p>' + esc(item.message || '') + '</p><button type="button" data-back>返回首页</button></section></article>';
   scroll.scrollTop = 0;
 }
@@ -1399,7 +1444,13 @@ async function changeBanner(targetIndex, direction, automatic = false) {
   let incoming = null;
   try {
     const item = slides[targetIndex];
-    const data = item.kind === 'campaign' ? campaignArtwork(item) : await cover.get(item.cover);
+    // 没有封面就别去问桥。adapters.js 的选集适配器会给条目 cover: ''，而
+    // cover.get('') 会一路走到 Java 的 coverUrl('') —— 它当场抛「无效封面地址：」
+    // （冒号后面是空的），被记成一次失败。线上 13 台设备 15 条就是这么来的，
+    // 每轮 banner 重报一遍（ms 只有 0~3ms，压根没到网络）。
+    const data = item.kind === 'campaign'
+      ? campaignArtwork(item)
+      : (item.cover ? await cover.get(item.cover) : '');
     const template = document.createElement('template');
     template.innerHTML = route === 'category' ? categorySlide(item, targetIndex, slides.length) : heroSlide(item, targetIndex, slides.length);
     incoming = template.content.firstElementChild;

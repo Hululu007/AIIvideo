@@ -27,6 +27,89 @@
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
+  <!-- ── 白屏兜底 ────────────────────────────────────────────────────────
+       2.0.23 线上有两台设备是这个样子：App 起来了、页面也加载了，但 14 个 JS
+       文件全倒在解析阶段（`?.` 要 Chrome 80，`||=` 要 Chrome 85，而 minSdk 26
+       的出厂 WebView 是 Chrome 58），除了 app_open 一个业务事件都没有 —— 用户
+       看到的是一片空白，然后卸载。
+
+       这块面板只做一件事：把「为什么是空的」说出来，并告诉他怎么修。
+       样式写成内联是故意的 —— 它不能依赖 app.css 加载成功。
+       不用 flex 也是故意的：`hidden` 靠 UA 的 display:none 生效，内联只要写了
+       display 就会把它覆盖掉，那这面板从一开始就盖在页面上。 -->
+  <div id="boot-fail" hidden role="alert" style="position:fixed;top:0;right:0;bottom:0;left:0;z-index:99999;overflow:auto;padding:28px;background:#f5f2e9;color:#2b2118;font:15px/1.7 system-ui,-apple-system,'Noto Sans SC',sans-serif">
+    <h2 style="margin:0 0 14px;font-size:17px">界面没能加载出来</h2>
+    <p id="boot-fail-why" style="margin:0 0 12px"></p>
+    <p id="boot-fail-ua" style="margin:0 0 16px;font:12px/1.5 ui-monospace,SFMono-Regular,monospace;word-break:break-all;opacity:.65"></p>
+    <p style="margin:0 0 18px"><button type="button" onclick="location.reload()" style="padding:11px 22px;border:0;border-radius:10px;background:#2b2118;color:#fff;font:15px system-ui,-apple-system,sans-serif">重试</button></p>
+    <p style="margin:0;font-size:13px;opacity:.75">一直这样的话：在应用商店里搜「Android System WebView」把它更新到最新；找不到的话，把 Chrome 也更新一次（两者共用同一个内核）。</p>
+  </div>
+  <script>
+    /*
+     * 白屏兜底的判据脚本。
+     *
+     * **必须手写 ES5。** 它要照顾的正是「旧 WebView 连 app.js 都解析不了」的机器，
+     * 这里出现一个箭头函数或者 const，兜底自己就成了新的白屏。jscheck 里有一条
+     * 断言用 acorn 按 ES5 解析这段（含 head 里那段主题脚本）。
+     *
+     * **判据是标记在不在，不是等了多久。** 慢网络下首屏本来就要几秒，按时间报
+     * 会误杀；而 app.js 第一句就是 `window.__hgParsed = 1`，只要整份解析通过就
+     * 一定执行。所以先给 5 秒（本地 assets，正常几十毫秒就到了），还没等到就先
+     * 把面板亮出来；之后每 2 秒再看一眼，标记一出现就收回去 —— 慢机器不会因为
+     * 下载慢被误判成故障。
+     */
+    (function () {
+      var panel = document.getElementById('boot-fail');
+      if (!panel) return;
+      var shown = false;
+      var tries = 0;
+
+      function show() {
+        if (shown || window.__hgParsed === 1) return;
+        shown = true;
+        // 钩子活着 = 异常上报这条路是通的，那么 app.js 没到就只有一种解释：
+        // 它整份没解析过。钩子也没活着，说明这个包或者运行环境更早就坏了。
+        var hookAlive = window.__hgJsHook === 1;
+        var why = hookAlive
+          ? '这个版本的界面脚本没能运行。多半是系统 WebView 太旧，认不出里面的新语法。'
+          : '连异常钩子都没能运行，这个安装包可能不完整，重装一次试试。';
+        var ua = navigator.userAgent || '';
+        var whyBox = document.getElementById('boot-fail-why');
+        var uaBox = document.getElementById('boot-fail-ua');
+        if (whyBox) whyBox.textContent = why;
+        if (uaBox) uaBox.textContent = ua;
+        panel.hidden = false;
+        try {
+          if (window.AndroidHost && typeof window.AndroidHost.reportJs === 'function') {
+            window.AndroidHost.reportJs(JSON.stringify({
+              kind: 'js',
+              name: 'boot_fail',
+              props: {
+                stage: hookAlive ? 'parse' : 'hook',
+                code: 'boot_fail',
+                msg: why,
+                // UA 里带着 WebView 的真实版本号，是判断「到底多旧」的唯一依据。
+                trace: ua,
+                where: String(location.href).slice(0, 120)
+              }
+            }));
+          }
+        } catch (ignored) {}
+      }
+
+      function poll() {
+        tries += 1;
+        if (window.__hgParsed === 1) {
+          if (shown) panel.hidden = true;
+          return;
+        }
+        show();
+        if (tries < 15) window.setTimeout(poll, 2000);
+      }
+
+      window.setTimeout(poll, 5000);
+    })();
+  </script>
   <div id="app">
     <header class="app-top">
       <button id="account-avatar" class="account-avatar" type="button" aria-label="登录账号">

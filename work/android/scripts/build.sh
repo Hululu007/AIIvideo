@@ -5,7 +5,7 @@
 #   ./scripts/build.sh            出 release APK（默认）
 #   ./scripts/build.sh debug      出 debug APK
 #   ./scripts/build.sh check      只验编译 + 资源 + assets，秒级
-#   ./scripts/build.sh test       跑单元测试（42 个用例，秒级）
+#   ./scripts/build.sh test       跑单元测试 + 前端降级自检 + JS 钩子，秒级
 #   ./scripts/build.sh jscheck    前端钩子的离线回归（js-errors-check.js）
 #   ./scripts/build.sh install    构建 → 装真机 → 冷启动 → 截图
 #   ./scripts/build.sh verify     清空后从零构建，并断言 APK 内容
@@ -29,9 +29,22 @@ LAST_APK=".build-last-apk"
 
 doctor() {
   command -v python3 >/dev/null || die "缺 python3（gen-web-config.py 与 check-apk.py 要用）"
+  # node 现在是必需的，不再是「只有跑 jscheck 才要」：前端降级（transpileAssets）、
+  # ES2017 解析断言、js-errors 回归，三条都在构建链上。缺了就直接停。
+  command -v node >/dev/null || die "缺 node（transpile-assets.js / js-target-check.js 要用）"
   [ -f local.properties ] || die "缺 local.properties（写 sdk.dir=$HOME/Library/Android/sdk）"
   [ -x "$PW" ] || die "缺 gradlew"
   ok "工具链就绪"
+}
+
+# 前端产物目录。sourceSets 里配的就是这个，见 app/build.gradle.kts 的注释。
+WEB_DIR="app/build/generated/assets/webview"
+
+cmd_webassets() {
+  say "前端降级 + ES2017 断言"
+  "$PW" :app:transpileAssets -q
+  [ -f "$WEB_DIR/app.js" ] || die "降级没产出：$WEB_DIR/app.js 不在"
+  ok "产物 $WEB_DIR"
 }
 
 cmd_build() {
@@ -80,10 +93,14 @@ PYEOF
 # 前端钩子的离线回归。和 JUnit 分开是因为它测的是 assets 里的 JS：
 # 那三条约束（trace 键名、不走桥、不带 source）违反后都是静默失效，
 # Java 测试碰不到，只有真机出故障才看得出来。见 js-errors-check.js 文件头。
+#
+# **必须对着生成目录跑。** 包里那份是 Babel 降级后的输出，不是 src/main/assets
+# 里这份；验源码等于没验。
 cmd_jscheck() {
   say "JS 钩子离线回归"
   command -v node >/dev/null || die "缺 node（js-errors-check.js 要用）"
-  node scripts/js-errors-check.js
+  [ -f "$WEB_DIR/js-errors.js" ] || cmd_webassets
+  node scripts/js-errors-check.js --file "$WEB_DIR/js-errors.js" --html "$WEB_DIR/app.html"
   ok "JS 钩子通过"
 }
 
@@ -120,6 +137,7 @@ cmd_verify() {
   say "清理（证明不是增量缓存的假象）"
   rm -rf app/build .gradle
   cmd_test
+  cmd_webassets
   cmd_jscheck
   cmd_build release
   local apk; apk=$(cat "$LAST_APK")
@@ -130,8 +148,8 @@ cmd_verify() {
 
 case "${1:-build}" in
   check)   doctor; cmd_check ;;
-  test)    doctor; cmd_test; cmd_jscheck ;;
-  jscheck) doctor; cmd_jscheck ;;
+  test)    doctor; cmd_test; cmd_webassets; cmd_jscheck ;;
+  jscheck) doctor; cmd_webassets; cmd_jscheck ;;
   build)   doctor; cmd_build release ;;
   debug)   doctor; cmd_build debug ;;
   install) doctor; cmd_install ;;

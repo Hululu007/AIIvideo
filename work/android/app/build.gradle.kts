@@ -10,6 +10,9 @@ val keystoreProps = Properties().apply {
     if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
 }
 
+// 前端产物的生成目录。见下面 sourceSets["main"] 的注释。
+val webviewAssets = layout.buildDirectory.dir("generated/assets/webview")
+
 android {
     namespace = "com.huangguo.mobile"
     compileSdk = 36
@@ -30,8 +33,8 @@ android {
         applicationId = "com.huangguo.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 20023
-        versionName = "2.0.23"
+        versionCode = 20024
+        versionName = "2.0.24"
         vectorDrawables { useSupportLibrary = true }
     }
 
@@ -41,7 +44,21 @@ android {
     }
 
     sourceSets["main"].apply {
-        assets.srcDirs("src/main/assets")
+        // 注意：这里**不是** src/main/assets。
+        //
+        // 前端源码是 ES2021（247 处 `?.`、1 处 `||=`），而 minSdk 26 的出厂
+        // WebView 是 Chrome 58 —— 装到那些机器上每个脚本都在解析阶段就死，
+        // 表现是整个 App 白屏（线上 2.0.23 两台设备，14 个文件全部倒在第一处
+        // `?.`）。所以包里的 JS 必须是 transpileAssets 降级后的产物。
+        //
+        // 只留**一个** assets 目录、且它由构建生成：两个 srcDir 撞同名文件时
+        // 谁赢取决于合并顺序，那正是「某个分片没打进包」这类静默故障的温床
+        // （check-apk.py 的头注释记着同一类事故）。整棵 assets 只有 4.9MB，
+        // 拷一次几毫秒，不值得为省这点时间换一个不确定的优先级。
+        // setSrcDirs 而不是 srcDirs：`srcDirs(...)` 是**追加**（SourceDirectorySet
+        // 的语义），结果 src/main/assets 和生成目录同时在，AGP 直接报
+        // "Duplicate resources"。必须整体替换。
+        assets.setSrcDirs(listOf(webviewAssets))
     }
 
     // 单测要读 assets/site-default.json —— 那是内置模板，UserSourceTest 里有一条
@@ -180,4 +197,27 @@ tasks.register<Exec>("genWebConfig") {
     onlyIf { json.exists() }
 }
 
-tasks.named("preBuild") { dependsOn("genWebConfig") }
+// 前端 JS 降级到 ES2017 + 白屏兜底用到的全部自检都在这个脚本里（见其文件头）。
+//
+// 声明 inputs/outputs 而不是无脑重跑：改一行 CSS 不该触发整个降级，而改了任意
+// 一个 js 或者动了 Babel 版本都必须重跑。少声明一个 input 的后果是「改了源码、
+// 包里还是旧的」—— 这个项目已经踩过一次（配置类 assets 要 --rerun-tasks 才更新）。
+tasks.register<Exec>("transpileAssets") {
+    val src = file("src/main/assets")
+    val out = webviewAssets.get().asFile
+    inputs.dir(src)
+    inputs.file(rootProject.file("scripts/transpile-assets.js"))
+    inputs.file(rootProject.file("scripts/js-target-check.js"))
+    inputs.file(rootProject.file("tools/babel.standalone.min.js"))
+    inputs.file(rootProject.file("tools/acorn.js"))
+    outputs.dir(out)
+    commandLine("node",
+            rootProject.file("scripts/transpile-assets.js").absolutePath,
+            "--src", src.absolutePath,
+            "--out", out.absolutePath)
+    // site-web.js 是 genWebConfig 现生成到源树里的，必须先生成再拷贝。
+    dependsOn("genWebConfig")
+}
+
+tasks.named("preBuild") { dependsOn("genWebConfig", "transpileAssets") }
+

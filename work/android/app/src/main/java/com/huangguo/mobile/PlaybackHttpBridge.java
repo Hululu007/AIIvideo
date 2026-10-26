@@ -123,7 +123,7 @@ final class PlaybackHttpBridge {
             out.put("body", new String(raw, "UTF-8"));
             return out;
         } catch (Throwable e) {
-            return UserSource.fail(out, "HTTP 失败：" + e.getClass().getSimpleName() + " " + e.getMessage());
+            return UserSource.fail(out, "HTTP 失败：" + AiiHttp.describe(e));
         }
     }
 }

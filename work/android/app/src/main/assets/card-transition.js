@@ -7,7 +7,12 @@
   const clamp = value => Math.max(0, Math.min(1, value));
   const rect = value => ({ x: value.left, y: value.top, w: value.width, h: value.height });
   const local = (value, origin) => ({ x: value.left - origin.left, y: value.top - origin.top, w: value.width, h: value.height });
-  const interpolate = (a, b, p) => Object.fromEntries(Object.keys(a).map(key => [key, mix(a[key], b[key], p)]));
+  // 不用 Object.fromEntries：那是 Chrome 73，而这条链要照顾到 Chrome 58。
+  // 每次转场都要算几十次，所以写成显式 reduce，不去凑数组再转对象。
+  const interpolate = (a, b, p) => Object.keys(a).reduce((out, key) => {
+    out[key] = mix(a[key], b[key], p);
+    return out;
+  }, {});
   const position = value => value.split(' ').map(part => parseFloat(part) / 100);
   const stripIds = node => { node.removeAttribute('id'); node.querySelectorAll('[id]').forEach(child => child.removeAttribute('id')); };
 

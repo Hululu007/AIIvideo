@@ -135,15 +135,19 @@ public class SpiderService extends Service {
 
     @Override
     public void onDestroy() {
-        // 埋点：宿主进程的终点。主进程那边有「spider 服务绑定失败」这个报错，
-        // 但光看它分不清是「服务压根没起来」还是「起来了又死」——配上 start/stop
-        // 两个端点事件（进程内只写队列，由主进程统一发）才对得上账。
-        JSONObject gone = new JSONObject();
-        try {
-            gone.put("pid", android.os.Process.myPid());
-        } catch (Exception ignored) {
-        }
-        Report.event("spider", "host_stop", gone);
+        // 埋点：host_stop **不在这里写**，哪怕这里正是最自然的地方。
+        //
+        // 原因有两个，都硬：
+        //   ① 这个进程 canFlush=false（只写不发），写下来也要等主进程下次启动才发
+        //      得出去；而进程被系统杀掉时 onDestroy 根本不执行，那条事件压根没写。
+        //      线上证据：2.0.23 上 host_start 728 / host_stop 494，110 台设备缺 234 条，
+        //      缺的全是「宿主怎么死的」这种最该知道的情况。
+        //   ② 主进程现在也会报（SpiderClient.shutdown 的 reason=unbind、
+        //      onServiceDisconnected 的 reason=disconnected）。两边都写的话，
+        //      一次启动会配出两个终点，对账反而更乱。
+        //
+        // 所以终点只由**掌握生命周期的那一方**说，这里是空位。host_start 仍留在
+        // onCreate —— 那是「这个进程真的起来了」的唯一第一手证据。
         // 进程回收前的收尾：销毁宿主 WebView，渲染进程随进程退出一起消失。
         // 不做这一步的话，被主进程 stopService 时 WebView 的渲染线程可能多活几秒。
         SpiderRuntime.shutdown();

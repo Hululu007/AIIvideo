@@ -237,7 +237,30 @@ final class SiteRepository {
         file.mkdirs();
     }
 
+    /**
+     * 空封面地址 = 这个条目没有封面，不是故障。
+     *
+     * 抽成静态只是为了让单测打得到 —— {@link #coverData} 的实例要 Context，
+     * 在纯 JVM 单测里造不出来。
+     */
+    static boolean isBlankCover(String str) {
+        return str == null || str.trim().isEmpty();
+    }
+
     String coverData(String str) throws Exception {
+        // 空地址 = 这个条目没有封面，不是故障。
+        //
+        // 前端 cover.js 的 cover.get(url) 是这条路的唯一入口，而 hero 轮播那条
+        // （app.js 的 setHero）没有判空 —— adapters.js 的选集适配器会给条目
+        // cover: ''。以前空串一路走到 coverUrl('')，new URI("") 的 scheme 是
+        // null，当场抛「无效封面地址：」（冒号后面什么都没有），被算成一次失败。
+        // 线上 2.0.23 里 13 台设备 15 条，ms 全是 0~3 —— 压根没到网络。
+        //
+        // 前端那侧也补了判空。两层都要有：前端哪天再漏一个空值下来，这里仍然
+        // 不该把它当成一场网络/配置故障去上报。
+        if (isBlankCover(str)) {
+            return "";
+        }
         String str2;   // 方法尾部拼 data URI 的 MIME 类型，别删。
         // ── 负缓存查在 coverUrl() **之前** ─────────────────────────────
         // coverUrl() 自己会抛「无效封面域名 / 无效封面地址」（配置问题，不是网络问题）。

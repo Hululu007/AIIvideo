@@ -103,6 +103,32 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     private boolean errorShown = false;
     private String errorText = "";
     private long savedPosition = 0;
+
+    // ── 播放埋点 ──────────────────────────────────────────────────────
+    //
+    // 这条链路以前一条数据都没有：全库 15,932 条事件里 kind='play' 是 **0**
+    // 条。「播不了」是最常见的用户抱怨，而我们连「尝试了多少次、失败了几次、
+    // 起播多慢」都答不出来 —— 报错表里只有 bridge/spider 那些上游 HTTP 错误，
+    // 播放器自己一声不吭。
+    //
+    // 四个事件把这条链路补齐：
+    //   play_start        进了 startPlayback（用户点了播放，且走到了原生）
+    //   play_first_frame  出第一帧，带耗时。这是「卡不卡」唯一客观的数
+    //   play_error        失败。stage 说明死在哪一环，是归因的唯一依据
+    //   play_end          退出播放页，带时长和位置
+    //
+    // URL / 标题 / id 一律不上报：URL 里带 token，标题是用户内容。只留 host。
+    private long playStartedAt;
+    private boolean firstFrameReported;
+    private boolean playErrorReported;
+    /**
+     * 这一场里至少有一集播到了 EndReached。
+     *
+     * 不能直接用 {@code ended}：feed 模式在 EndReached 里是「置 true → 落进度 →
+     * 立刻置回 false」（紧接着要自动滑下一集），所以退出时报的是 false 就算播完了
+     * 一整集也看不出来。单集模式的 ended 会一直留着，两者取或。
+     */
+    private boolean sawEnd;
     private boolean hwDecode = true;
 
     private FrameLayout root;
@@ -354,16 +380,34 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     }
 
     private void startPlayback() {
+        playStartedAt = System.currentTimeMillis();
+        firstFrameReported = false;
+        playErrorReported = false;
+        JSONObject opening = new JSONObject();
+        try {
+            opening.put("mode", feedMode ? "feed" : "single");
+            // 从 payload 读而不是读 hwDecode：hwDecode 要等 startVlc 才定下来，
+            // 而 play_start 必须比任何一个失败分支都早 —— 否则「连 startVlc 都没
+            // 走到」这种失败就没有 play_start 跟它配对了。
+            opening.put("decode", "sw".equals(payload.optString("decode")) ? "sw" : "hw");
+            opening.put("host", hostOf(payload.optString("url", "")));
+            org.json.JSONArray alts = payload.optJSONArray("alts");
+            org.json.JSONArray epsJson = payload.optJSONArray("eps");
+            opening.put("alts", alts == null ? 0 : alts.length());
+            opening.put("eps", epsJson == null ? 0 : epsJson.length());
+        } catch (Throwable ignored) {}
+        reportPlay("play_start", opening);
+
         if (feedMode) {
             if (!available(this)) {
-                showError("这个安装包没有带内置播放器（只带了 arm64-v8a）。可以在设置里换回网页播放器。");
+                showError("unavailable", "这个安装包没有带内置播放器（只带了 arm64-v8a）。可以在设置里换回网页播放器。");
                 return;
             }
             try {
                 initFeedVlc();
             } catch (Throwable e) {
-                showError("内置播放器起不来：" + e.getClass().getSimpleName()
-                        + (e.getMessage() == null ? "" : " " + e.getMessage()));
+                showError("init-throw", e.getClass().getSimpleName(), "内置播放器起不来："
+                        + AiiHttp.describe(e));
                 return;
             }
             activate(curPos);
@@ -371,19 +415,19 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         }
         final String url = payload.optString("url", "");
         if (url.length() == 0) {
-            showError("没有拿到播放地址");
+            showError("no-url", "payload 里没有播放地址 —— 解析链上游就没拿到。");
             return;
         }
         if (!available(this)) {
-            showError("这个安装包没有带内置播放器（只带了 arm64-v8a）。可以在设置里换回网页播放器。");
+            showError("unavailable", "这个安装包没有带内置播放器（只带了 arm64-v8a）。可以在设置里换回网页播放器。");
             return;
         }
         try {
             startVlc(url);
         } catch (Throwable e) {
             // libVLC 在加载 so 或建实例时抛的都是 native 的错，能读到的只有消息。
-            showError("内置播放器起不来：" + e.getClass().getSimpleName()
-                    + (e.getMessage() == null ? "" : " " + e.getMessage()));
+            showError("init-throw", e.getClass().getSimpleName(), "内置播放器起不来："
+                    + AiiHttp.describe(e));
         }
     }
 
@@ -592,6 +636,22 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
     }
 
     @Override protected void onDestroy() {
+        // 报在 persist 之前：persist 有 1.5 秒节流，会被提前 return 掉，
+        // 而 play_end 是一次性的，不能跟着被吞。
+        if (playStartedAt > 0) {
+            JSONObject closed = new JSONObject();
+            try {
+                long now = System.currentTimeMillis();
+                closed.put("ms", (int) Math.min(Math.max(0, now - playStartedAt), 86400000L));
+                closed.put("pos", (int) Math.max(0, Math.min(currentPosition(), 86400000L)));
+                closed.put("dur", (int) Math.max(0, Math.min(durationMs, 86400000L)));
+                closed.put("finished", ended || sawEnd);
+                closed.put("err", errorShown);
+                closed.put("frame", firstFrameReported);
+                closed.put("mode", feedMode ? "feed" : "single");
+            } catch (Throwable ignored) {}
+            reportPlay("play_end", closed);
+        }
         if (feedMode) {
             // 顺序要紧：先落盘再释放。反过来 getTime() 全是 0。
             persistFeedProgress();
@@ -1078,13 +1138,105 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         return text;
     }
 
-    private void showError(String text) {
+    /**
+     * 播放失败的唯一收口。
+     *
+     * stage 说明死在哪一环，是这些报错里唯一能拿来做归因的东西：
+     *   no-url          没有地址（上游解析链就没拿到）
+     *   unavailable     这个包没带内置播放器（32 位机 / so 缺失）
+     *   init-throw      libVLC 起不来（so 加载、建实例时 native 抛错）
+     *   vlc-error       起来了但解不了（EncounteredError）
+     *   alts-exhausted  feed 模式备选线路全试完了
+     */
+    private void showError(String stage, String code, String text) {
         errorText = text;
         errorShown = true;
         controls.setSpinnerVisible(false);
         controls.setError(text + "\n\n点返回可以换一个源试试。");
-        controls.setError(text + "\n\n点返回可以换一个源试试。");
         controls.setMeta("播放失败");
+        reportPlayFailure(stage, code, text);
+    }
+
+    private void showError(String stage, String text) {
+        showError(stage, "", text);
+    }
+
+    private void reportPlay(String name, JSONObject props) {
+        try {
+            Report.event("play", name, props);
+        } catch (Throwable ignored) {}
+    }
+
+    /**
+     * 一次播放会话只报第一条失败。
+     *
+     * EncounteredError 会重复触发（VLC 自己会重试），逐条上报的话一台设备能刷出
+     * 几十条同一件事 —— 2.0.20~2.0.21 那 1407 条「封面解密结果无效」里 1359 条
+     * 就是这么来的。要答的问题是「有没有失败」，不是「失败了几回合」。
+     */
+    private void reportPlayFailure(String stage, String code, String text) {
+        if (playErrorReported) return;
+        playErrorReported = true;
+        JSONObject props = new JSONObject();
+        try {
+            props.put("stage", stage);
+            if (code != null && code.length() > 0) props.put("code", code);
+            props.put("msg", text == null ? "" : text);
+            props.put("mode", feedMode ? "feed" : "single");
+            props.put("ms", (int) Math.min(Math.max(0, System.currentTimeMillis() - playStartedAt), 600000L));
+            // 上游状态码：它把「源站这一集的地址没了」和「播放器解不了」分成两件事。
+            // playbackFailureText() 一直在用这个值说话，但从来没有作为数据留下过。
+            int up = VlcRelay.recentUpstreamFailure();
+            if (up > 0) props.put("up", up);
+        } catch (Throwable ignored) {}
+        reportPlay("play_error", props);
+    }
+
+    /** 出第一帧。单集模式认 Playing，feed 模式认 Vout（Playing 时一帧都还没解）。 */
+    private void reportFirstFrame() {
+        if (firstFrameReported) return;
+        firstFrameReported = true;
+        JSONObject props = new JSONObject();
+        try {
+            long now = System.currentTimeMillis();
+            props.put("ms", (int) Math.min(Math.max(0, now - playStartedAt), 600000L));
+            if (tPlay > 0) props.put("submit", (int) Math.min(Math.max(0, now - tPlay), 600000L));
+            props.put("hw", hwDecode);
+            props.put("mode", feedMode ? "feed" : "single");
+        } catch (Throwable ignored) {}
+        reportPlay("play_first_frame", props);
+    }
+
+    /**
+     * 退出播放页时的真实位置。
+     *
+     * **不能直接读 savedPosition。** feed 模式（现在的主路径）根本不写它 ——
+     * TimeChanged 走的是 handleFeedEvent，写 savedPosition 的是单集模式那条
+     * handleEvent。真机实测：feed 模式播了 41 秒，play_end.pos 报的是 0，
+     * 看着像「一秒都没播」。
+     *
+     * 所以这里现读活着的那个 player。onDestroy 里这段跑在 persist /
+     * releaseFeedPlayers 之前，player 还活着。
+     */
+    private long currentPosition() {
+        try {
+            MediaPlayer mp = feedMode ? activeFeedPlayer : player;
+            if (mp == null) return savedPosition;
+            long live = mp.getTime();
+            return live > 0 ? live : savedPosition;
+        } catch (Throwable ignored) {
+            return savedPosition;
+        }
+    }
+
+    /** 只留主机名 —— 完整 URL 带 token，标题是用户内容，都不进埋点。 */
+    private static String hostOf(String url) {
+        try {
+            String host = android.net.Uri.parse(url == null ? "" : url).getHost();
+            return host == null ? "" : host;
+        } catch (Throwable ignored) {
+            return "";
+        }
     }
 
     // ── libVLC 回调（跑在 VLC 自己的线程上） ──────────────────────────
@@ -1121,6 +1273,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             controls.setSpinnerVisible(false);
             controls.setPlayIcon(VlcControlsView.IconButton.PAUSE);
             describeTrack();
+            reportFirstFrame();
         } else if (type == MediaPlayer.Event.Buffering) {
             if (event.getBuffering() < 100f && !player.isPlaying()) controls.setSpinnerVisible(true);
             else controls.setSpinnerVisible(false);
@@ -1136,7 +1289,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             // 视频输出就绪：这才是「画面能出来了」的时刻，把声音放开。
             unmute();
         } else if (type == MediaPlayer.Event.EncounteredError) {
-            showError(playbackFailureText());
+            showError("vlc-error", "EncounteredError", playbackFailureText());
         }
     }
 
@@ -1796,6 +1949,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
             setControlsVisible(true);
         } else if (type == MediaPlayer.Event.EndReached) {
             ended = true;
+            sawEnd = true;
             persistFeedProgress();
             ended = false;
             // 抖音流的规矩：播完自动滑到下一集
@@ -1808,6 +1962,7 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
         } else if (type == MediaPlayer.Event.Vout) {
             // 视频输出就绪：这才是「画面能出来了」的时刻，把声音放开。
             unmute();
+            reportFirstFrame();
         } else if (type == MediaPlayer.Event.EncounteredError) {
             controls.setSpinnerVisible(false);
             tryNextAlt();
@@ -1855,6 +2010,9 @@ public class VlcPlayerActivity extends Activity implements MediaPlayer.EventList
                 pv.error.setVisibility(View.VISIBLE);
                 pv.error.setText("第 " + eps[curPos] + " 集" + playbackFailureText());
             }
+            // feed 模式不走 showError（每一页有自己的错误文案），所以单独报一条。
+            reportPlayFailure("alts-exhausted", "EncounteredError",
+                    "第 " + eps[curPos] + " 集" + playbackFailureText());
             return;
         }
         // 幂等判断认的是「这个 player 上挂着哪条地址」，所以换代选之前必须先把

@@ -56,7 +56,12 @@
         const m = html.match(new RegExp('var\\s+' + k + '\\s*=\\s*"([^"]*)"'));
         return m ? m[1] : '';
       };
-      const ids = [...html.matchAll(/<meta[^>]*\sid="([^"]+)"/g)].map(m => m[1]);
+      // matchAll 是 Chrome 73。这里就一段 HTML、两个 meta，exec 循环足够 ——
+      // 旧 WebView 上「一个方法不存在」就会让整条播放地址解析失败。
+      const ids = [];
+      const metaRe = /<meta[^>]*\sid="([^"]+)"/g;
+      let metaHit;
+      while ((metaHit = metaRe.exec(html))) ids.push(metaHit[1]);
       const Vurl = gv('Vurl');
       // 服务端认得 token 时给的 Vurl 是「加密后的 token」，长度是 32 的整数倍且 >= 96；
       // 认不出来时丢一个 32 位的占位符回来 —— 那种重试有意义，它自己会换节点重算。

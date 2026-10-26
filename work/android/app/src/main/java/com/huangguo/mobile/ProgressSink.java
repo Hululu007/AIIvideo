@@ -57,7 +57,7 @@ final class ProgressSink {
             out.put("ok", true);
             return out;
         } catch (Throwable e) {
-            return UserSource.fail(out, "记进度失败：" + e.getClass().getSimpleName() + " " + e.getMessage());
+            return UserSource.fail(out, "记进度失败：" + AiiHttp.describe(e));
         }
     }
 }

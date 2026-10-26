@@ -204,7 +204,7 @@ public final class UserSource {
                 return entry.getValue().run(context, profile,
                         command.substring(prefix.length()).trim(), out);
             } catch (Throwable e) {
-                return fail(out, "指令失败：" + e.getClass().getSimpleName() + " " + e.getMessage());
+                return fail(out, "指令失败：" + AiiHttp.describe(e));
             }
         }
         // 说不认识的时候把前缀列出来 —— 老代码只说「不是源设置指令」，

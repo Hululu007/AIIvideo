@@ -10,6 +10,224 @@
 > 历史。看的时候注意每段的日期。哪份文档是现行口径、哪份只剩历史价值，
 > 看 [`docs/README.md`](docs/README.md)。
 
+## 2026-10-26：2.0.24 —— 旧 WebView 白屏的根因，和播放链路上那个一直没有数据的洞
+
+2.0.23 发出去 21 小时，库里多了一天数据。翻的时候先看到的是这个：
+
+```
+js_error  Unexpected token .      168 条 / 1 台   app.js:14:42 等
+js_error  Unexpected token '='      4 条 / 2 台   app.js:2982:21
+```
+
+两台设备（`SM-G9860` / Android 9、`V2164PA` / Android 11）的**全部**事件就是
+`app_open` 加 `js_error`，一个业务事件都没有。`where` 列里是 15 个不同的文件，
+每个都停在它的第一处 `?.`：
+
+```
+app.js:14:42 · app-nav.js:28:18 · app-route.js:36:17 · app-render.js:23:19
+app-list.js:27:10 · app-detail.js:21:47 · app-search.js:80:38 · app-update.js:72:21
+card-transition.js:16:31 · cover.js:120:34 · feed-player.js:66:47 · proxy-panel.js:364:72
+setup.js:52:36 · source-market.js:252:30        + app.js:2982:21（`||=`）
+```
+
+`?.` 要 Chrome 80（2020-04），`||=` 要 Chrome 85（2020-09）。`minSdk 26` 是
+Android 8.0，出厂 WebView 是 Chrome 58；国内没有 Play 商店，一大批机器的
+WebView 就停在出厂版本，永远不会更新。所以这不是「报错多」，是**那部分用户
+根本用不了** —— App 起来了、页面也加载了，然后每个脚本在解析阶段就死，
+`app.js` 一行都没执行过。
+
+用 acorn 对着源码验了一遍，和机型上报的坐标差 1（acorn 列 0 起、浏览器 1 起），
+一个字都不差：
+
+```
+app.js  ES2017 FAIL Unexpected token (14:41)      ← 对应上报 app.js:14:42
+app.js  ES2020 FAIL Unexpected token (2982:20)    ← 对应上报 app.js:2982:21
+```
+
+### 真机实测：把源装上、真播了一集
+
+模拟器里配真源（VPS 那台 `/srv/cfg` 托管着现成的源，`handle` 直接 file_server，
+所以 `https://149.104.21.177.sslip.io/spiders/dozagonza.json` 就是一份能用的配置）。
+走的是 App 自己的三步（`source set?url` → `source fetch?url` 读回 `web.spider` →
+`spider install`），和 setup.js 里 `addOneSource` 一模一样。
+
+首页正常：精选推荐、分类胶囊、149 张封面全部落地。点进《芳名三九》、点第 1 集，
+内置播放器起来了，VLC 解出 1920×960 并出画面。
+
+库里收到的三段（这台设备的真数据）：
+
+```
+play_start        host=play.hhuus.com  eps=29  alts=0  mode=feed  decode=hw
+play_first_frame  ms=3951   hw=true
+play_end          ms=50960  pos=77680  dur=2638167  frame=true  err=false
+```
+
+**这一轮抓到我自己的一个 bug。** 第一次跑出来的 `play_end` 是
+`pos: 0, finished: false`，而那一场明明放了 41 秒 —— 因为 feed 模式（现在的主路径）
+根本不写 `savedPosition`：写它的是单集模式的 `handleEvent`，feed 走 `handleFeedEvent`。
+`finished` 同理：feed 的 EndReached 是「置 true → 落进度 → 立刻置回 false」（要自动
+滑下一集），所以退出时报的永远是 false。改成 `currentPosition()` 现读活着的那个
+player，`finished` 取 `ended || sawEnd`。修完再跑一集，`pos` 从 0 变成 77680。
+
+顺带记一个**还没有解**的现象：第二次跑的时候第 3 集过盾一直失败，播放页开了但永远
+不出画面。那一场库里只有 `play_start`，后面什么都没有 —— 因为既没出帧（不报
+`play_first_frame`）、VLC 也没报 EncounteredError（不报 `play_error`）。
+**「点了播放、然后什么都没有」这种最像用户抱怨的场景，现在仍然只在库里留一行
+`play_start`。** 该加一个「N 秒没首帧就报 `play_error stage=no-first-frame`」的看门狗，
+这次没做。
+
+### host_start / host_stop 的对账（同一台设备）
+
+```
+host_start  reason=onCreate  pid=12105  ← :spider 进程自己报
+host_start  reason=onCreate  pid=14675
+host_start  reason=onCreate  pid=15479
+host_stop   reason=unbind    pid=6603   ← 主进程报（pid 是主进程的）
+host_stop   reason=unbind    pid=15354
+host_stop   reason=unbind    pid=6603
+```
+
+两处 `host_stop` 都来自真正的 `SpiderClient.shutdown()`（一次 Activity onDestroy、
+一次换源重建）。剩下三次 start 没配上 stop，是因为我用 `am force-stop` 重启——
+那种死法不发任何回调，谁都报不出来。所以**对账口径不能用 pid join**（两边 pid 本来
+就不是同一个进程），要看 `reason`：正常用户退出是 onDestroy，系统回收也是 onDestroy，
+只有强杀才留不下。
+
+### 真机实测（Android 9 / WebView 66）
+
+模拟器上跑了一遍 A/B，只改一个变量：同一个 APK，只把 `assets/app.js` 换回未降级的
+ES2021 源码。设备是 API 28 的 `google_apis` 镜像，WebView **66.0.3359.158** —— 正是
+线上那台 `SM-G9860 / Android 9` 的档位。
+
+```
+                    事件
+降级后（2.0.24）     app_open ×1                        0 js_error  0 boot_fail
+未降级（同一 APK）   app_open ×1  js_error ×2  boot_fail ×1
+                     └─ SyntaxError  Unexpected token .
+                        where = app.js:25:42        （2.0.23 线上是 14:42）
+```
+
+`25:42` 而不是 `14:42`，正好是我在文件头加的那段注释的行数 —— 同一个错误、同一列，
+只是第一处 `?.` 被往下推了。也就是说线上那条报错的签名在真机上**逐字节复现**了。
+
+降级后同一台机器上：整屏正常渲染（头部搜索、底部四格导航、设置源卡片全在），
+零 `js_error`、零 `boot_fail`。
+
+顺带把白屏兜底也在真机上验了：把 `app.js` 弄成解析不了，弹出「界面没能加载出来 /
+这个版本的界面脚本没能运行…」并带上完整 UA，后台同时收到
+`js|boot_fail|stage=parse`。也就是说 2.0.23 那种「只剩 app_open 的白屏」下次会自己
+报出 WebView 版本，不用再靠猜。
+
+**这一轮没验到的**：`play_*` 四个事件和 `host_start/host_stop` 的对账需要先配一个源，
+而源必须从 https 地址装 —— 模拟器里配不了，所以这两条仍然只有代码路径和 jsdom 差分
+的把握，没有真实数据。发版后看第一天数据。
+
+### 改法：构建期降级到 ES2017，而不是加一道版本闸门
+
+版本号判断两头不讨好：降级后的产物在 Chrome 55 就能跑，闸门却会按 60 把能用的
+机器一起拦掉；而且它挡不住下一次别的原因造成的白屏。
+
+所以做成**构建期降级**（`scripts/transpile-assets.js`，vendor 了 Babel
+standalone + acorn，见 `work/android/tools/VENDOR.md`）：
+
+- 首方 19 个 JS 过 Babel，`targets: chrome 58`、`sourceType: script`、
+  `retainLines: true`。`vendor/` 和 `hxm/` 跳过（第三方 + 410KB wasm glue，
+  本来就没有 `?.`，改它只有风险没有收益），但仍然要过 ES2017 解析断言。
+- assets 只从**一个**生成目录取（`build/generated/assets/webview`）。两个 srcDir
+  撞同名文件时谁赢取决于 AGP 的合并顺序 —— 那正是「某个分片没打进包」这类静默
+  故障的温床。
+- `retainLines` 是关键：行号漂移实测一律 `-1`（Babel 吃掉末尾换行），所以
+  `js_error` 的 `where` 和堆栈里的**行**以后仍然对得上源码。列号不保证 ——
+  降级需要临时变量时 Babel 会把几条语句塞进一行。
+
+**光改语法不够。** 顺带查出四处运行期 API 也高于 Chrome 58，而且它们不是解析
+失败、是「用着用着 TypeError」，更难查：
+
+```
+replaceChildren   Chrome 86  4 处   切页/返回/改倍速直接 TypeError
+matchAll          Chrome 73  1 处   agedm 播放地址解析失败
+Element.scrollTo  Chrome 61  1 处   点下一集没反应（feed 分页）
+Object.fromEntries Chrome 73 1 处   卡片转场
+replaceAll        Chrome 85  2 处   活动页文案
+```
+
+### 断言：三处，都在构建期
+
+降级这件事坏了从来不报错，只是某天某台机器白屏。所以：
+
+- `js-target-check.js` 按 ES2017 解析每一份产物；`transpile-assets.js` 自带
+  六条自检（行号漂移、顶层声明不许丢、不许注入 `"use strict"`、ES2017 可解析、
+  残留语法扫描、体积增长）。
+- `check-apk.py` 从**打好的包里**抽出 `assets/**/*.js`，再验一遍。它证明的是
+  「srcDir 真接上了生成目录」和「打进去的字节就是解析得动的字节」——
+  `transpileAssets` 验的是自己产出的目录，这两件事它证明不了。拿它跑 2.0.23 的
+  APK 会当场报 `app.js:14:42`，和生产数据一个坐标。
+- `js-errors-check.js` 加 `--file/--html`，跑**生成目录**里的那份。那三条静默
+  约束（`trace` 键名、不走桥、不带 `source`）验源码等于没验。
+
+另外 `app.html` 里加了块白屏兜底面板：6 秒内 `window.__hgParsed` 没出现就把
+「为什么是空的」说出来（带 UA 和更新 WebView 的指引），同时走
+`AndroidHost.reportJs` 报一条 `boot_fail` —— 白屏设备即使一个业务事件都发不出，
+也留下这一条。判据是**标记在不在**、不是等了多久，慢网络不会误报；那块内联
+脚本必须手写 ES5（它不经过 Babel，出现一个箭头函数兜底自己就成了新的白屏），
+`jscheck` 里有一条断言按 ES5 解析它。
+
+### 第二个洞：播放链路上一条数据都没有
+
+修上面那些的时候顺手核了一件事，结果是全库 15,932 条事件里 **`kind='play'` 是 0
+条**。「播不了」是最常见的用户抱怨，而：
+
+- `VlcPlayerActivity`（2019 行）里一条 `Report` 都没有。它自己的
+  `handleEvent` 认得出 `EncounteredError`，`playbackFailureText()` 甚至能从
+  `VlcRelay.recentUpstreamFailure()` 分出「上游 404」和「解不了」—— 这些话只
+  说给用户看，没有一个字进库。
+- `app.js` 的 `hgNativeResolve()` 收尾是 `.catch(() => {})`，而它恰好罩住了最常见
+  的「播不了」：接口没给地址、给了但不是 http(s)、wasm 解不出来。
+- `feed-player.js` 那三个 `trackPlayError` 只在**网页**播放器生效，而网页播放器
+  现在不是默认路径。
+
+补了四个事件，全部 `Report.event("play", ...)`，URL / 标题 / id 一律不上报
+（URL 里带 token），只留 host：
+
+```
+play_start        {mode, decode, host, alts, eps}
+play_first_frame  {ms, submit, hw, mode}      起播耗时 —— 「卡不卡」唯一客观的数
+play_error        {stage, code, msg, mode, ms, up}
+play_end          {ms, pos, dur, finished, err, frame, mode}
+```
+
+`play_error` 的 stage 是归因的唯一依据：`no-url` / `unavailable` / `init-throw` /
+`vlc-error` / `alts-exhausted` / `resolve`。一次会话只报第一条 —— `EncounteredError`
+会重复触发，逐条上报能让一台设备刷出几十条同一件事（2.0.20~2.0.21 那 1407 条
+「封面解密结果无效」里 1359 条就是这么来的）。
+
+服务端 `stats.py` 的 overview 加了 `play_starts / play_frames / play_errors` 和
+派生出来的 `play_ok_rate`（分母为 0 时给 `None`，不是 0%）。
+
+### 第三个：三个具体缺陷
+
+**`无效封面地址：`（15 条 / 13 台）** —— 冒号后面是空的，`ms` 只有 0~3。
+`adapters.js` 的选集适配器会给条目 `cover: ''`，而 hero 轮播取封面时没判空，
+空串一路走到 `SiteProfile.coverUrl("")`，`new URI("")` 的 scheme 是 null，当场抛。
+每轮 banner 重报一遍。两层都补了。
+
+**`盾后过盾失败（主进程）：null`（19 条 / 16 台）** —— `MainActivity` 那两处裸拼
+`getMessage()`。顺手把原始异常挂成 `cause`（原来拼在字符串里，`isCancellation`
+和事后排查都够不着）。同一个毛病另外四处（`UserSource` / `PlayerControl` /
+`ProgressSink` / `PlaybackHttpBridge`）一并换成 `AiiHttp.describe`。
+
+**`host_stop` 缺 234 条 / 110 台** —— 原来由 `:spider` 自己在 `onDestroy` 写，
+而那个进程 `canFlush=false`；进程被系统杀掉时 `onDestroy` 根本不执行。改成由
+**掌握生命周期的那一方**报：`SpiderClient.shutdown()` 报 `reason=unbind`，
+`onServiceDisconnected` 报 `reason=disconnected`。主进程活得比宿主久、队列也归它发。**进程内那条 `host_stop` 删掉了** —— 两边都写会一次启动配出两个终点，对账反而更乱；终点只由掌握生命周期的那一方说，`host_start` 仍留在 `SpiderService.onCreate`（那是「这个进程真的起来了」的唯一第一手证据）。
+
+**顺带修了取消判定的误判（32 条 / 9 台）**：`CANCEL_WORDS` 是对整条 msg 做无锚点
+`contains`，而 `盾后过盾失败…排队超时。；原始失败：…` 这种包装过的复合文案里也
+带着取消词。改成「带 `；原始失败` 一律不算取消」。取舍方向和这个类里原有的
+「先排掉超时」一致：宁可把一次真取消算成失败，也不要把真失败藏进取消。
+
+---
+
 ## 2026-10-25：2.0.23 —— 接上 JS 异常（C 批那条一直空着）
 
 C 批写了三条，另外两条都落了（`UncaughtExceptionHandler` 在 `HuangGuoApp`，

@@ -63,7 +63,12 @@
     }
 
     function updateRateUi(feed, rate = selectedRate()) {
-      feed.querySelector('.feed-rate-toggle')?.replaceChildren(document.createTextNode(speedLabel(rate)));
+      // 不用 replaceChildren（Chrome 86）：在 Chrome 58 上那是「改倍速就 TypeError」。
+      const rateTag = feed.querySelector('.feed-rate-toggle');
+      if (rateTag) {
+        while (rateTag.firstChild) rateTag.removeChild(rateTag.firstChild);
+        rateTag.appendChild(document.createTextNode(speedLabel(rate)));
+      }
       feed.querySelectorAll('.feed-rate-option').forEach(button => {
         const active = Number(button.dataset.rate) === rate;
         button.classList.toggle('active', active);
@@ -104,7 +109,11 @@
 
     function scrollToPage(feed, page, behavior = 'auto') {
       if (!feed || !page) return;
-      feed.scrollTo({ top: page.offsetTop, left: 0, behavior });
+      // Element.scrollTo 的对象形式是 Chrome 61 才有的。Chrome 58~60 上它根本不存在，
+      // 切集直接 TypeError —— 用户看到的是「点了下一集没反应」。退回 scrollTop。
+      if (typeof feed.scrollTo === 'function') { feed.scrollTo({ top: page.offsetTop, left: 0, behavior }); return; }
+      feed.scrollTop = page.offsetTop;
+      feed.scrollLeft = 0;
     }
 
     // 横屏走「旋转舞台」而不是 Fullscreen API。

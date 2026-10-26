@@ -58,7 +58,7 @@ final class PlayerControl {
             if ("capability".equals(action)) return nativeCapability(context, out);
             return UserSource.fail(out, "不认识的播放指令：" + action);
         } catch (Throwable e) {
-            return UserSource.fail(out, "播放指令失败：" + e.getClass().getSimpleName() + " " + e.getMessage());
+            return UserSource.fail(out, "播放指令失败：" + AiiHttp.describe(e));
         }
     }
     /**

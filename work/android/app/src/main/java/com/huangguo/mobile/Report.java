@@ -152,6 +152,15 @@ final class Report {
         }
         String message = error.getMessage() == null ? "" : error.getMessage().trim();
         String lower = message.toLowerCase(Locale.US);
+        // 「；原始失败：…」= 这条消息是包装出来的复合文案：包装层的话 + 原始异常的话。
+        // 散文匹配在这里不可信 —— 「盾后过盾失败（主进程）：站点侧请求排队超时。；
+        // 原始失败：missav 请求失败 https://…」里带着「排队超时」，可它是一次真失败
+        // （盾没过去，用户没拿到内容），不是生命周期取消。
+        // 线上 2.0.23 有 32 条 / 9 台设备就是这么被洗成「取消」的。
+        //
+        // 碰到复合文案一律不算取消。宁可把一次真取消算成失败，也不要把一次真失败
+        // 藏进取消里 —— 这个取舍和上面「先排掉超时」是同一个立场。
+        if (message.contains("；原始失败")) return false;
         // 先排真超时（含子类，别让 instanceof InterruptedIOException 把它们吃掉）。
         if (error instanceof java.net.SocketTimeoutException) return false;
         if ("timeout".equals(lower) || "timed out".equals(lower)) return false;

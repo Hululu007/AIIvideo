@@ -7,6 +7,12 @@
 import sys
 import zipfile
 
+# 包里的 JS 必须能在 ES2017 引擎上解析。见下面 assert_es2017 的注释。
+import os
+import shutil
+import subprocess
+import tempfile
+
 REQUIRED = [
     "assets/app.html",
     "assets/app.js",
@@ -24,6 +30,60 @@ REQUIRED = [
     # app.html 里那条 <script src> 的对账已经能覆盖，这里再显式钉一条。
     "assets/js-errors.js",
 ]
+
+
+def assert_es2017(z, problems):
+    """包里的每一个 .js 都得能被 ES2017 引擎解析。
+
+    这是 2.0.24 那道「旧 WebView 白屏」的终点断言。
+
+    白屏的成因是 `?.`（Chrome 80）和 `||=`（Chrome 85）出现在源码里，而
+    minSdk 26 的出厂 WebView 是 Chrome 58 —— 脚本在解析阶段就死，`app.js`
+    一行都没执行过，用户看到一片白。线上那两台设备除了 `app_open` 之外
+    一个业务事件都没有，就是这么来的。
+
+    降级由 Gradle 的 `transpileAssets` 做，它自己也断言一遍输出。这里再断言
+    一次，是因为**两件事只有这里能证明**：
+
+      1. sourceSets 真的接上了生成目录（接错就会把没降级的那份打进包，
+         而 transpileAssets 会照常通过 —— 它验的是自己产出的目录）；
+      2. 打进去的字节就是解析得动的字节，不是中间某个环节留下的旧文件。
+
+    验字节而不是验目录，和上面「app.html 引用的每个 src 都要在包里」同一个理由：
+    构建成功、启动也正常，坏的是某类设备上的整个界面。
+    """
+    js = sorted(n for n in z.namelist() if n.startswith("assets/") and n.endswith(".js"))
+    if not js:
+        problems.append("包里没有 assets/*.js")
+        return
+
+    checker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "js-target-check.js")
+    if not os.path.exists(checker):
+        problems.append(f"缺 {checker}，无法断言包里的 JS 是否 ES2017 可解析")
+        return
+
+    tmp = tempfile.mkdtemp(prefix="apk-js-")
+    try:
+        for name in js:
+            dest = os.path.join(tmp, os.path.relpath(name, "assets"))
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(dest, "wb") as handle:
+                handle.write(z.read(name))
+        try:
+            # node 缺失是硬失败，不降级成警告 —— 「验不了」和「验过了」不能长得一样。
+            done = subprocess.run(["node", checker, tmp, "--quiet"],
+                                  capture_output=True, text=True)
+        except FileNotFoundError:
+            problems.append("缺 node，无法断言包里的 JS 是否 ES2017 可解析（transpileAssets 也依赖它）")
+            return
+        if done.returncode != 0:
+            tail = [line for line in (done.stderr or done.stdout).strip().splitlines() if line.strip()]
+            problems.append("包里的 JS 超过 ES2017，旧 WebView 会白屏：\n    "
+                            + "\n    ".join(tail[-8:]))
+        else:
+            print(f"  {len(js)} 个 JS 全部 ES2017 可解析", file=sys.stderr)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def main():
@@ -67,6 +127,12 @@ def main():
             if "assets/" + src not in names:
                 problems.append(f"app.html 引用了不存在的 assets/{src}")
 
+    if problems:
+        for p in problems:
+            print(f"  x {p}", file=sys.stderr)
+        return 1
+
+    assert_es2017(z, problems)
     if problems:
         for p in problems:
             print(f"  x {p}", file=sys.stderr)

@@ -1032,8 +1032,13 @@ public final class MainActivity extends Activity {
                     } catch (ShieldSignal e) {
                         if (round >= SHIELD_RETRY_MAX) throw e;
                         if (shieldPages.has(e.url)) {
+                            // describe 而不是裸 getMessage：异常没有 message 时后者会
+                            // 拼出字面量 "null"，线上 props.msg 恰好等于 "null" 的
+                            // 369 条里，有一批就是这么来的。
+                            // 原始异常同时挂成 cause —— 拼进字符串的话，isCancellation
+                            // 和事后排查都够不着它。
                             throw new IOException("盾后回填无效（同一地址再次被挡）：" + e.url
-                                    + "；原始失败：" + e.getMessage());
+                                    + "；原始失败：" + AiiHttp.describe(e), e);
                         }
                         Log.w("HG.Spider", "cap=" + cap + " 撞盾（" + e.url + "），主进程过盾后重试，第 "
                                 + (round + 1) + " 轮");
@@ -1041,8 +1046,12 @@ public final class MainActivity extends Activity {
                         try {
                             html = SiteFetchWebView.fetchPage(e.url);
                         } catch (Throwable fetchError) {
-                            throw new IOException("盾后过盾失败（主进程）：" + fetchError.getMessage()
-                                    + "；原始失败：" + e.getMessage());
+                            // 这条以前会报出「盾后过盾失败（主进程）：null」——
+                            // 线上 2.0.23 里 16 台设备 19 条。取不到 message 的异常
+                            // （超时、被取消这类）本来就没有 message，裸拼只能拼出
+                            // 一个字面量 null，看着像有信息，实际什么都没说。
+                            throw new IOException("盾后过盾失败（主进程）：" + AiiHttp.describe(fetchError)
+                                    + "；原始失败：" + AiiHttp.describe(e), e);
                         }
                         shieldPages.put(e.url, html);
                         callArgs.put(SpiderRuntime.ARG_SHIELD_PAGES, shieldPages);

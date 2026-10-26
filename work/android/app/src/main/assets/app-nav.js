@@ -520,7 +520,10 @@ async function goSearch(query) {
 }
 
 function sourceItem(id) {
-  const candidates = [state.listing?.items, state.home?.featured, state.home?.homepageRecommend, state.home?.homepageNewest, state.home?.recommend?.items, state.home?.newest?.items, state.category?.items, state.search?.items, state.library?.bookmarks, state.library?.progress].flatMap(asArray);
+  // 不用 flatMap：那是 Chrome 69。这条链上最低要照顾到 Chrome 58 ——
+  // 详情页从列表回推标题就靠它，整句解析失败的话详情页直接白屏。
+  const candidates = [state.listing?.items, state.home?.featured, state.home?.homepageRecommend, state.home?.homepageNewest, state.home?.recommend?.items, state.home?.newest?.items, state.category?.items, state.search?.items, state.library?.bookmarks, state.library?.progress]
+    .reduce((all, group) => all.concat(asArray(group)), []);
   return candidates.find(item => item.id === id) || { id, title: `剧集 ${id}` };
 }
 
@@ -559,7 +562,13 @@ async function goDetail(id, trigger) {
   // 从播放器回来时 content 里可能还留着「正在打开播放器…」的 boot 占位页，
   // 把它当返回目标存下来，返回时就会还原出那一屏残页。占位页不算页面。
   const placeholder = state.route === 'feed' || content.firstElementChild?.classList?.contains('feed-boot');
-  if (placeholder) { content.replaceChildren(); state.route = 'detail'; }
+  if (placeholder) {
+  // replaceChildren 是 Chrome 86 才有的。这条链要照顾到 Chrome 58 ——
+  // 在那些机器上它不是解析失败，是每次切页/返回都 TypeError，
+  // 表现成「点了返回没反应」。等价写法只有这几行。
+    while (content.firstChild) content.removeChild(content.firstChild);
+    state.route = 'detail';
+  }
   rememberScreen();
   state.previous = {
     route: state.route, tab: state.tab, sub: subIndex(state.tab), query: state.query,
@@ -638,7 +647,8 @@ function returnFromDetail() {
   if (previous.route === 'category') state.sub[previous.tab] = previous.sub;
   state.query = previous.query || '';
   state.compactHeld = previous.compactHeld;
-  content.replaceChildren(previous.pageNode);
+  while (content.firstChild) content.removeChild(content.firstChild);
+  content.appendChild(previous.pageNode);
   state.previous = null;
   content.querySelectorAll('.film-row,.filter-row,.home-tag-scroll').forEach((row, index) => {
     row.scrollLeft = previous.horizontalScroll?.[index] || 0;

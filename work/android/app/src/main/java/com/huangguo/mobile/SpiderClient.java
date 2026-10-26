@@ -60,6 +60,15 @@ final class SpiderClient {
     private static volatile boolean disconnected;
     private static volatile boolean bindingDied;
 
+    /**
+     * 这一次宿主生命周期里 host_stop 报过没有。
+     *
+     * 绑上时清零，报过就置位 —— 否则 {@link #shutdown()} 和
+     * {@link ServiceConnection#onServiceDisconnected} 会各报一次，
+     * 一个 start 配出两个 stop，对账反而更乱。
+     */
+    private static volatile boolean hostStopReported;
+
     private SpiderClient() {
     }
 
@@ -118,6 +127,22 @@ final class SpiderClient {
         }
     }
 
+    /**
+     * 报一条 host_stop。一次生命周期只报一次，且只在真的绑过之后才报 ——
+     * 没绑过就报 stop 会造出一堆配不上 start 的孤儿事件。
+     */
+    private static void reportHostStop(String reason) {
+        if (hostStopReported || !bindAttempted) return;
+        hostStopReported = true;
+        try {
+            JSONObject props = new JSONObject();
+            props.put("reason", reason);
+            props.put("pid", android.os.Process.myPid());
+            Report.event("spider", "host_stop", props);
+        } catch (Throwable ignored) {
+        }
+    }
+
     /** 当前源是不是盾后站点；是就顺手把主进程的 clearance 取出来。 */
     private static String cookieHintFor(Context ctx) {
         try {
@@ -136,11 +161,25 @@ final class SpiderClient {
      */
     static void shutdown() {
         final ServiceConnection c = connection;
+        if (c != null) reportHostStop("unbind");
         connection = null;
         channel = null;
         bound = new CountDownLatch(1);
         bindAttempted = false;
         if (c != null && appContext != null) {
+            // 埋点：宿主进程的终点，由**掌握生命周期的那一方**报。
+            //
+            // 原来只有 :spider 自己在 onDestroy 里写一条 host_stop，而那个进程
+            // canFlush=false（只写不发，队列交给主进程统一发）。两个问题叠在一起：
+            //   ① 进程被系统杀掉时 onDestroy 根本不执行，那条事件压根没写；
+            //   ② 就算写了，也要等主进程下一次启动才可能发出去。
+            // 结果是 2.0.23 上 host_start 728 / host_stop 494 —— 110 台设备缺 234 条，
+            // 而且缺的全是「宿主怎么死的」这种最该知道的情况。
+            //
+            // 主进程活得比宿主久，队列也归它发，所以由它来说这句话最可靠。
+            // SpiderService.onDestroy 里那条已经在 2.0.24 删掉了 —— 两边都写的话，
+            // 一次启动会配出两个终点。现在一个 start 对一个 stop：
+            //   count(host_start) == count(host_stop)
             try {
                 appContext.unbindService(c);
                 appContext.stopService(new Intent(appContext, SpiderService.class));
@@ -180,6 +219,8 @@ final class SpiderClient {
         if (bindAttempted && connection != null) return;
         appContext = app;
         bindAttempted = true;
+        // 新的一次绑定 = 新的一次宿主生命周期，host_stop 可以再报一次。
+        hostStopReported = false;
         disconnected = false;
         bindingDied = false;
         bound = new CountDownLatch(1);
@@ -196,6 +237,9 @@ final class SpiderClient {
                 // 它只在 ensure 的等待窗口里被消费，断连时那个窗口早已结束。
                 disconnected = true;
                 channel = null;
+                // 这条路径比 shutdown() 重要得多：它才是「宿主自己死了」的那种死法，
+                // 而进程内的 onDestroy 在这种情况下一个字都写不出来。
+                reportHostStop("disconnected");
             }
 
             @Override

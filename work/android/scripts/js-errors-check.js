@@ -21,8 +21,16 @@
  *
  * ## 用法
  *
- *   node scripts/js-errors-check.js           # 跑全部断言
+ *   node scripts/js-errors-check.js           # 跑全部断言（对着源码树）
  *   node scripts/js-errors-check.js --dump    # 顺手打出第一份载荷
+ *
+ *   node scripts/js-errors-check.js \
+ *        --file app/build/generated/assets/webview/js-errors.js \
+ *        --html app/build/generated/assets/webview/app.html
+ *
+ * **构建链上必须传 --file / --html 指向生成目录。** 那三条约束（trace 键名、
+ * 不走桥、不带 source）验的是「打进包的那份」，而降级之后包里的是 Babel 的输出，
+ * 不是 `src/main/assets` 里这份。验源码等于没验 —— 而这三条失效全是静默的。
  *
  * 退出码：0 全过 / 1 有断言失败 / 2 环境问题（文件缺失、沙箱起不来）
  */
@@ -31,10 +39,26 @@
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+// app.html 的内联脚本要按 ES5 验，见断言 13。
+const acorn = require(path.resolve(__dirname, '../tools/acorn.js'));
 
 const HERE = __dirname;
-const TARGET = path.resolve(HERE, '../app/src/main/assets/js-errors.js');
-const APK_HTML = path.resolve(HERE, '../app/src/main/assets/app.html');
+
+/** `--flag value` 取值。缺值就是环境问题，不要静默回落。 */
+function arg(flag) {
+  const index = process.argv.indexOf(flag);
+  if (index < 0) return null;
+  const value = process.argv[index + 1];
+  if (!value || value.startsWith('--')) {
+    console.error(flag + ' 后面要跟路径');
+    process.exit(2);
+  }
+  return path.resolve(value);
+}
+
+const TARGET = arg('--file') || path.resolve(HERE, '../app/src/main/assets/js-errors.js');
+const APK_HTML = arg('--html') || path.resolve(HERE, '../app/src/main/assets/app.html');
+const usingSource = !process.argv.includes('--file');
 
 const dump = process.argv.includes('--dump');
 
@@ -44,6 +68,12 @@ function fail(message) {
 }
 
 if (!fs.existsSync(TARGET)) fail('js-errors.js 不存在: ' + TARGET);
+if (!fs.existsSync(APK_HTML)) fail('app.html 不存在: ' + APK_HTML);
+
+// 对着源码树跑的时候提醒一句：包里那份是降级后的，别以为这就验过了。
+if (usingSource) {
+  console.log('（对着 src/main/assets 跑。构建链上要传 --file/--html 指向生成目录）');
+}
 
 let passed = 0;
 function check(name, condition, detail) {
@@ -326,6 +356,30 @@ console.log('js-errors.js 离线回归');
   const hookAt = html.indexOf('js-errors.js');
   check('排在 head 那个内联主题脚本之前', hookAt > 0 && hookAt < inlineAt,
     'inline@' + inlineAt + ' hook@' + hookAt);
+}
+
+// 13. app.html 里的内联 <script> 必须是 ES5
+//
+// 那块白屏兜底要照顾的正是「旧 WebView 连 app.js 都解析不了」的机器 —— 内联脚本
+// 不经过 Babel（transpileAssets 只处理 .js 文件），所以它自己必须是最保守的语法。
+// 这里出现一个箭头函数或者 const，兜底自己就成了新的白屏，而且是在最该说话的那种
+// 机器上。按 ES5 解析，不按 ES2017：内联脚本的约定就是「引擎再老也读得动」。
+{
+  const html = fs.readFileSync(APK_HTML, 'utf8');
+  const inline = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]);
+  check('app.html 里有内联脚本（白屏兜底 + 主题）', inline.length >= 2, '找到 ' + inline.length + ' 段');
+  let es5 = true;
+  let detail = '';
+  for (const code of inline) {
+    try {
+      acorn.parse(code, { ecmaVersion: 5, sourceType: 'script' });
+    } catch (error) {
+      es5 = false;
+      detail = error.message.slice(0, 80);
+      break;
+    }
+  }
+  check('内联脚本全部是 ES5（兜底不能自己白屏）', es5, detail);
 }
 
 if (process.exitCode) {

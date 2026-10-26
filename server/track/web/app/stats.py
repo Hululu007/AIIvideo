@@ -95,6 +95,12 @@ def overview(days: int = 7) -> dict:
                    count(*) filter (where """ + NOISE_SQL + """)::int as noise,
                    count(*) filter (where """ + FAIL_SQL + """)::int as fails,
                    count(*) filter (where kind = 'js')::int         as js,
+                   -- 播放链路的三段。这一组以前恒为 0：VlcPlayerActivity 里
+                   -- 一条 Report 都没有，全库 kind='play' 是 0 条 —— 「播不了」
+                   -- 这个最常见的抱怨，后台连分子分母都拿不到。
+                   count(*) filter (where name = 'play_start')::int       as play_starts,
+                   count(*) filter (where name = 'play_first_frame')::int as play_frames,
+                   count(*) filter (where name = 'play_error')::int       as play_errors,
                    to_char(min(at) at time zone %(tz)s, 'MM-DD HH24:MI') as since,
                    to_char(max(at) at time zone %(tz)s, 'MM-DD HH24:MI') as latest
             from events
@@ -180,9 +186,20 @@ def overview(days: int = 7) -> dict:
             params,
         ).fetchall()
 
+    # 出帧率 = 出过第一帧的会话 / 尝试过的会话。
+    #
+    # 分子分母都按事件数算，不按会话：play_start 和 play_first_frame 各自带 mode，
+    # 想按会话归并还得先有 session_id 对齐，而 session_id 在 :spider 和主进程之间
+    # 不是同一个 —— 这个口径已经够回答问题（「有多大比例的播放没能出画面」）。
+    # 分母为 0 时给 None，让前端显示「还没有数据」而不是 0%。
+    play_starts = int(total["play_starts"] or 0)
+    play_frames = int(total["play_frames"] or 0)
+    play_rate = round(play_frames * 100.0 / play_starts, 1) if play_starts else None
+
     return {
         "days": days,
         "tz": tz,
+        "play_ok_rate": play_rate,
         "daily": daily,
         "total": total,
         "kinds": kinds,
