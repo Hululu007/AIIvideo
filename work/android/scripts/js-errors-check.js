@@ -382,6 +382,25 @@ console.log('js-errors.js 离线回归');
   check('内联脚本全部是 ES5（兜底不能自己白屏）', es5, detail);
 }
 
+// 14. 订阅流程不许预置 subTesting / freeTesting = true
+//
+// 2.0.24 及以前，「更新订阅 → 拉完顺手测一次」这条流程是**永久卡死**的：
+// 订阅那个 handler 把 subTesting 预置成 true，紧接着调 runSpeedTest()，
+// 而它第一句就是「已经在测就直接 return」—— 于是一次都不跑，finally 不执行，
+// 按钮永远「测速中…」且 disabled，只有刷新页面才解得开。用户实测挂了近一小时，
+// 还以为是在测速。
+//
+// 这条断言只认一件事：测速开关只归 runSpeedTest 自己管。别人预置就是死锁。
+{
+  const src = fs.readFileSync(path.resolve(HERE, '../app/src/main/assets/app.js'), 'utf8');
+  // 先剥注释：这条不变量的说明文字里本身就写着 `subTesting: true`，
+  // 不剥的话断言会被自己的注释判失败。
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  const bad = code.match(/subTesting:\s*true|freeTesting:\s*true/g) || [];
+  check('没有别处预置测速开关（会和 runSpeedTest 的守卫死锁）', bad.length === 0,
+    bad.join(', ') + ' —— 删掉它，让 runSpeedTest 自己置位');
+}
+
 if (process.exitCode) {
   console.error('\n有断言没通过');
 } else {

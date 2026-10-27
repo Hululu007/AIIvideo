@@ -10,6 +10,52 @@
 > 历史。看的时候注意每段的日期。哪份文档是现行口径、哪份只剩历史价值，
 > 看 [`docs/README.md`](docs/README.md)。
 
+## 2026-10-27 傍晚：2.0.26 —— 「更新订阅」那个转不完的圈
+
+用户发来一张截图：「测速转了**一个小时**还是这样」。第一反应是测速慢，但直接在
+他手机上打那次桥命令，1.9 秒就回来了：
+
+```
+speed?batch=0&source=subscription   1866ms   done=true  usable=1
+  bwh-usca6-reality  90ms  ok
+免费 7 个节点  3 批共 2961ms  7 个全通
+```
+
+所以不是慢，是**根本没跑**。
+
+真凶在 `app.js` 订阅那个 handler 里：
+
+```js
+state.proxySub = Object.assign({}, prev, {
+  ...
+  subNote: '订阅已拉到 N 个节点，正在测速…',
+  subTesting: true,          // ← 先置上
+});
+renderProxySettingsKeepScroll();
+runSpeedTest('subscription');   // ← 而它第一句是：
+                                //   if (isSub ? sub.subTesting : ...) return;
+```
+
+**它一次都不会跑。** `finally` 不执行，`subTesting` 永远停在 true，按钮永久
+「测速中…」且 disabled，只有刷新页面解得开。所以那一屏挂一个小时不是夸张 ——
+它本来就不会自己好。
+
+这条「拉完顺手测一次」从 2.0.24 及以前一直是坏的。拉取本身是好的，坏的是那句
+「正在测速」的承诺从来没兑现过 —— 而它长得和「真的在跑」一模一样，所以一直没人发现。
+
+改两处：置 `subTesting: false`，让 `runSpeedTest` 自己管这个开关；把「置位 → 渲染」
+之间那次 `renderProxySettingsKeepScroll()` 挪进 `try`（渲染一抛，标志位同样回不来，
+是同一类故障）。
+
+**加了一条构建期断言**（`js-errors-check.js` 第 14 条）：剥掉注释后，`app.js` 里
+不许出现 `subTesting: true` / `freeTesting: true`。反证过 —— 改回 `true` 立刻红。
+这一条不写下来，下次谁再"顺手"预置一下就会原样复发。
+
+教训和 2.0.25 那条是同一个形状：**状态标志在 try 之前置位，就等于把「会不会卡死」
+交给了一次可能抛异常的调用**；而一个永远转圈的按钮，看起来和「正在忙」没法区分。
+
+---
+
 ## 2026-10-27 下午：2.0.25 —— 一条会把真因吃掉的路由重试
 
 用户手机上 pornhub 打不开，界面给的是：

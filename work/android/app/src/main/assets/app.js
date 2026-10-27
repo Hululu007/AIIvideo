@@ -2614,7 +2614,16 @@ document.addEventListener('submit', async event => {
         // 拉到了就已经有节点数了，这句比「正在测速，最多 20 秒」有信息量：
         // 慢的是下载那一步（机场 TTFB 能到 10 秒），测本身一两秒。
         subSpeed: [], subNote: '订阅已拉到 ' + (result.count || 0) + ' 个节点，正在测速…',
-        subTesting: true, subBad: false,
+        // **不能**在这里预置 subTesting: true。
+        //
+        // 下面紧接着就是 runSpeedTest('subscription')，而它的第一句是
+        // 「已经在测就直接 return」。于是它一次都不会跑：finally 不执行、
+        // subTesting 永远停在 true、按钮永久「测速中…」且 disabled，只有刷新
+        // 页面才解得开。用户实测这一屏挂了快一小时，还以为是测速慢。
+        // 2.0.24 及以前这条「拉完顺手测一次」一直是坏的 —— 拉取本身是好的，
+        // 坏的是那句「正在测速」的承诺从来没兑现过。
+        // 让 runSpeedTest 自己管这个开关：它会立刻置 true 并重画。
+        subTesting: false, subBad: false,
         freeTesting: false,
       });
       renderProxySettingsKeepScroll();

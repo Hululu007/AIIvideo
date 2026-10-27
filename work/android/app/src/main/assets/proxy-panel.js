@@ -267,7 +267,6 @@ async function runSpeedTest(source) {
   }
   if (isSub) { sub.subTesting = true; sub.subSpeed = []; sub.subNote = '正在测速…'; sub.subBad = false; }
   else { sub.freeTesting = true; sub.freeSpeed = []; sub.freeNote = '正在测速…'; sub.freeBad = false; }
-  renderProxySettingsKeepScroll();
 
   const setSpeed = list => { if (isSub) sub.subSpeed = list; else sub.freeSpeed = list; };
   const setNote = (text, bad) => {
@@ -277,6 +276,9 @@ async function runSpeedTest(source) {
 
   let batch = 0;
   try {
+    // 这次渲染放进 try：标志位上面已经置上了，它要是抛出去，finally 之前就
+    // 已经离开函数，subTesting 同样永远回不来（和「订阅流程预置 true」同一类）。
+    renderProxySettingsKeepScroll();
     // 上限 10 批只是保险：正常 12 个 / 每批 3 个 = 4 批就结束。
     // 后端 done=true 或返回空就停，不会真的跑满 10 轮。
     while (batch < 10) {
