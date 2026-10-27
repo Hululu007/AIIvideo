@@ -10,6 +10,102 @@
 > 历史。看的时候注意每段的日期。哪份文档是现行口径、哪份只剩历史价值，
 > 看 [`docs/README.md`](docs/README.md)。
 
+## 2026-10-27 夜里：手机端的代理一直是死的 —— `libv2ray.aar` 不是 Xray，没有 REALITY
+
+用户截图 `51吃瓜 请求失败 https://51cg1.com/：net 失败：connection closed`。一开始
+当成站点问题，绕开 App 直接在手机上用系统自带的 `curl` 打本地 SOCKS 端口：
+
+```
+socks5h://127.0.0.1:<core 端口>
+  https://www.google.com/    000   0.487s
+  https://51cg1.com/         000   0.461s
+  http://example.com/        empty reply 0.655s
+直连对照
+  https://www.google.com/    timeout 8.0s
+  https://www.gstatic.com/   204   0.226s（联通缓存 114.250.69.34）
+```
+
+**所有走代理的请求全挂**，不是某一个站点。而节点是好的：在 VPS 上用同一份参数
+（uuid / flow / pbk / sid / sni 全同）起 Xray 客户端连自己，`51cg1.com` 回 200 / 1.82s。
+手机那条链接也逐字段核对过，没错。
+
+抓包（`tcpdump -i eth0 'tcp port N'`）把差别摊开了，同一个手机核心、两个节点：
+
+```
+trojan :8443（普通 TLS）   手机→1527B（1440+87）  服务器→2438B   手机→30B+FIN（TLS alert）
+reality :20999             手机→289B  一次        服务器→0B      服务器直接 FIN
+```
+
+289 字节不是 ClientHello。服务端 `error.log` 对应那行：
+
+```
+REALITY: processed invalid connection from …: failed to read client hello
+```
+
+**手机根本没跑 TLS。** 把核心拆出来看：
+
+```
+libgojni.so → github.com/v2fly/v2ray-core/v5（还有 v2fly/hysteria、VSign、BrowserBridge）
+strings "reality" 全文件命中 1 次，且是这段单词沙拉里的碎片：
+  …certainrealitystorageanotherdesktopofferedpattern…
+strings "xtls-rprx-vision" 命中 0 次
+```
+
+`app/libs/libv2ray.aar` 是 v2fly 的 v2ray-core v5，**REALITY 是 Xray 独有的协议**。
+v2ray 读到 `"security":"reality"` 不认识，静默按 `none` 处理 —— 于是 reality 节点被
+当成裸 VLESS 去连 443。`XrayConfig` 里那句「libgojni.so 里 reality 只有 1 处字符串
+命中，八成是残缺实现」早就摸到边了，但当时只是写了注释，没验证。
+
+**这也解释了测速为什么一直给绿灯。** `Libv2ray.measureOutboundDelay` 走的是同一个
+核心，reality 一样被降级，它报的 `80ms ok` 从来没到过服务器。上一轮我据此说「隧道
+是通的」，是错的。
+
+### 处置：换协议，不动核心
+
+v2ray v5 认识 VLESS + WS + TLS。VPS 上本来就有 `vless-ws-in`（`127.0.0.1:8445`），
+nginx 在 8444 上有该域名的 Let's Encrypt 证书（订阅就是从那儿拉的），所以只加了一段：
+
+```nginx
+location = /ws {
+    proxy_pass http://127.0.0.1:8445;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_read_timeout 3600s;
+}
+```
+
+订阅 `clash/XGl1wBMRf7QwfWj7.yaml` 里多一条 `bwh-ws-tls`（**排在 reality 后面**，
+PC 的 select 分组默认还选第一条，不受影响）。手机实测：
+
+```
+gstatic 204 / 0.263s     51cg1 200 / 2.064s     youtube 200 / 2.823s
+VPS access.log:  accepted tcp:51cg1.com:443 [vless-ws-in >> direct]
+测速：bwh-ws-tls 82ms ok ／ bwh-usca6-reality -1 超时   ← 这才诚实
+```
+
+### 顺带修掉：51吃瓜 封面全空
+
+站点改版，卡片封面从 `<script>loadBannerDirect('URL')</script>` 换成了声明式懒加载
+`<div class="blog-background" z-bg-loader-url="URL">`（站点源码注释自己写的）。老正则
+一次都不命中，`cover` 全空串，前端只能显示占位块。改法：逐条扫 `z-bg-loader-url`，
+跳过广告卡那种 `…/uploads/default/other/xxx.gif` 占位图。离线跑一遍首页 21 条，
+**21/21 有封面**；真机 今日吃瓜 25 张图全出。
+
+### 还没修的
+
+- **首页「精选推荐」的封面仍是占位。** 图片请求发出去了（`[http] GET pic.gyezbp.cn/…`
+    十一条），但 `div.poster` 还是 `fallback` 状态 —— 同一个 `cover.get` 在分类页是
+    好的，所以是首页那条渲染路径的问题（多半是渲染后又重渲染，把 await 回来的封面
+    覆盖掉了），跟代理无关。
+- **直连路径会把被污染的 IPv6 地址拿去连。** `source set` 那次失败是
+    `failed to connect to 51cg1.com/2001::9df0:332 … after 12000ms` —— 手机有公网
+    IPv6，`51cg1.com` 的 AAAA 是被投毒的假地址，直接拨就是 12 秒超时。`AiiHttpDns`
+    该把这族 AAAA 挡掉。
+- 想根治还是得换 `AndroidLibXrayLite`（真 Xray），但那要重写
+    `ProxyCore` / `CoreController` / `measureOutboundDelay` 那一套。
+
 ## 2026-10-27 傍晚：2.0.26 —— 「更新订阅」那个转不完的圈
 
 用户发来一张截图：「测速转了**一个小时**还是这样」。第一反应是测速慢，但直接在
