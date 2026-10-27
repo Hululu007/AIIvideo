@@ -8,7 +8,7 @@
 // ── 卡片 ────────────────────────────────────────────────────────────
 // 列表（首页 / 分类 / 搜索）用同一套卡：
 //   <div class="post-card" id="post-card-279391">
-//     <script>loadBannerDirect('https://pic.gyezbp.cn/…jpeg', '', document.querySelector(…))</script>
+//     <div class="blog-background" z-bg-loader-url="https://pic.gyezbp.cn/…jpeg"></div>
 //     <h2 class="post-card-title" itemprop="headline">
 //       标题…
 //       <div class="wrap"><span class="wraps">热搜 HOT</span></div>     ← 角标，得剥掉
@@ -16,8 +16,10 @@
 //     <div class="post-card-info">…<span itemprop="datePublished" content="2026-10-19T10:51:00+00:00">…</span></div>
 //   </div>
 //
-// **封面是写在 <script> 里的**（`loadBannerDirect('URL'`），不是 <img src> ——
-// 站点自己那套背景图是懒加载的，DOM 里没有可直接取的 src。所以正则抓的是脚本参数。
+// **封面不是 <img src>**：站点用一套声明式懒加载，把地址写在属性
+// `z-bg-loader-url="URL"` 上，由 image.20260416.js 在滚动时套成背景图。
+// 2026-10-27 之前这里是 `<script>loadBannerDirect('URL'…)</script>`，站点改版后
+// 那个函数被去掉，老正则一次都不命中 —— 封面全空，前端只剩占位块。
 //
 // 标题里嵌着那个 `<div class="wrap">` 角标，直接 stripTags 会把「热搜 HOT」
 // 粘到标题尾巴上。所以先把 wrap 整块删掉再剥标签。
@@ -106,7 +108,27 @@
   // ── 列表解析 ────────────────────────────────────────────────────────
 
   var RE_CARD_ID = /<div class="post-card" id="post-card-(\d+)"/;
-  var RE_BANNER = /loadBannerDirect\(\s*'([^']+)'/;
+  // 2026-10-27 站点改版：卡片封面从 `loadBannerDirect('...')` 换成了声明式
+  // 背景加载 `<div class="blog-background" z-bg-loader-url="https://...">`
+  // （站点源码里那句注释：“封面改用 image.20260416.js 的 z-bg-loader-url，
+  // 去掉 loadBannerDirect”）。老正则在新页面上一次都不命中 —— 症状是列表能
+  // 出来、封面全是空串，前端只能显示占位块。
+  //
+  // 广告卡（id="ad-card-0"）夹在两张真卡之间，也落在同一个 blk 里，它的背景图
+  // 是 .../uploads/default/other/xxx.gif 这种占位动图。所以逐条扫、跳过广告图；
+  // 只剩广告图时返回空串 —— 宁可不给封面，也别把广告占位图当封面。
+  var RE_BANNER_URL = /z-bg-loader-url="([^"]+)"/g;
+
+  function coverInBlock(blk) {
+    var re = new RegExp(RE_BANNER_URL.source, 'g');
+    var m;
+    while ((m = re.exec(blk)) !== null) {
+      var url = decodeEntities(m[1]);
+      if (url.indexOf('/uploads/default/other/') >= 0) continue;
+      if (/^https?:\/\//.test(url)) return url;
+    }
+    return '';
+  }
   var RE_TITLE = /<h2 class="post-card-title"[^>]*>([\s\S]*?)<\/h2>/;
   var RE_DATE = /itemprop="datePublished"[^>]*content="([^"]+)"/;
   var RE_WRAP = /<div class="wrap">[\s\S]*?<\/div>/;
@@ -136,13 +158,12 @@
       var title = clean(decodeEntities(stripTags(tm[1].replace(RE_WRAP, ''))));
       if (!title) continue;
 
-      var bm = RE_BANNER.exec(blk);
       var dm = RE_DATE.exec(blk);
 
       out.push({
         id: marks[i].id,
         title: title,
-        cover: bm ? decodeEntities(bm[1]) : '',
+        cover: coverInBlock(blk),
         playAt: dm ? String(dm[1]).slice(0, 10) : '',
         tags: []
       });
