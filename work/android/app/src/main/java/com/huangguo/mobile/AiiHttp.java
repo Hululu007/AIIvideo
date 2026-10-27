@@ -599,6 +599,8 @@ public final class AiiHttp {
         String route = initialRoute(url);
         final String startedRoute = route;
         IOException first = null;
+        boolean proxyWakeRetried = false;
+        String triedRoutes = route;
         for (int attempt = 0; attempt < 2; attempt++) {
             final OkHttpClient client = clientFor(http, route, profile);
             try {
@@ -624,9 +626,18 @@ public final class AiiHttp {
                 // 走代理这条路失败，而代理是本机那个端口 —— 多半是核心刚起/刚重启，
                 // 入站还没 listen（connect refused）。给它 2 秒，同一条路再试一次，
                 // 比立刻「换路」正确：换直连对一个必须走代理的域名只会再失败一次。
-                if (isConnectFailure(e) && RouteMemory.ROUTE_PROXY.equals(route)
+                //
+                // **只能重试一次。** 原来这个口子没有上限，而循环只有两轮 ——
+                // 两轮都从这里 continue 出去，换路那条支路一次都不走、异常也一次
+                // 都不记，最后抛的是「两条路由都没走通，且没有留下异常」。
+                // 那句话是假的：直连根本没试过，真正的原因（代理侧 reset / TLS 失败）
+                // 被丢了两次。2.0.24 第一天就撞上：pornhub、porn91 各两次，库里只剩
+                // 这一句没法归因的话。所以先留证据，再决定还重不重试。
+                if (!proxyWakeRetried && isConnectFailure(e) && RouteMemory.ROUTE_PROXY.equals(route)
                         && awaitLocalProxy(effectiveProxy(), 2000)) {
-                    log("本机代理刚就绪，重试一次 " + host);
+                    proxyWakeRetried = true;
+                    if (first == null) first = e;
+                    log("本机代理刚就绪，重试一次 " + host + "（" + describe(e) + "）");
                     continue;
                 }
                 final String flipped = flipRoute(route);
@@ -637,11 +648,11 @@ public final class AiiHttp {
                     throw e;
                 }
                 if (first == null) first = e;
-                log("路由自愈 " + host + "：" + route + " 失败（"
-                        + (e.getMessage() != null ? e.getMessage() : e.toString()) + "），改走 " + flipped + " 重试");
+                log("路由自愈 " + host + "：" + route + " 失败（" + describe(e) + "），改走 " + flipped + " 重试");
                 // 换路要用「新鲜」的请求体：上一次 execute 消费不掉的话 OkHttp 自己
                 // 会重建，Request 本身无状态，直接复用是安全的。
                 route = flipped;
+                triedRoutes = triedRoutes + "→" + flipped;
             }
         }
         // 两条路都失败到「换路也上不去」：学不了（不知道哪条对），把可能过时的
@@ -651,7 +662,9 @@ public final class AiiHttp {
         // 原来这里只写一句「请求失败：URL」，线上 313 条无法归因的失败有一半是它。
         RouteMemory.forget(host);
         if (first != null) throw first;
-        throw new IOException("请求失败：" + url + "（两条路由都没走通，且没有留下异常）");
+        // 走到这里说明两次都「成功返回却没 return」，理论上不可能。真出现也不许
+        // 再冒充「两条路都试过了」—— 把试过哪几条写进去，别再让一句话吃掉整次排查。
+        throw new IOException("请求失败：" + url + "（试过的路由：" + triedRoutes + "，且没有留下异常）");
     }
 
     /**

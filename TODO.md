@@ -10,6 +10,66 @@
 > 历史。看的时候注意每段的日期。哪份文档是现行口径、哪份只剩历史价值，
 > 看 [`docs/README.md`](docs/README.md)。
 
+## 2026-10-27 下午：2.0.25 —— 一条会把真因吃掉的路由重试
+
+用户手机上 pornhub 打不开，界面给的是：
+
+```
+pornhub 请求失败 https://cn.pornhub.com/video：net 失败：请求失败：
+https://cn.pornhub.com/video（两条路由都没走通，且没有留下异常）
+```
+
+**那句话是假的，而且是它自己造成的。**
+
+`AiiHttp.routeAndSend` 里有一条「本机代理刚就绪，重试一次」的分支：
+
+```java
+if (isConnectFailure(e) && ROUTE_PROXY.equals(route) && awaitLocalProxy(...)) {
+    log("本机代理刚就绪，重试一次 " + host);
+    continue;          // ← first 没记，异常丢了
+}
+```
+
+循环只有两轮。两轮都从这个口子 `continue` 出去，于是：
+换路那条支路**一次都没走**（直连根本没试过），`first` 一直是 null，
+最后落到兜底那句「两条路由都没走通，且没有留下异常」。
+
+真机 logcat 是直接证据 —— 同一秒里那条日志出现了两次：
+
+```
+15:15:18.372  net cn.pornhub.com → 代理 profile=有 mode=builtin proxy=有
+15:15:18.838  本机代理刚就绪，重试一次 cn.pornhub.com
+15:15:19.286  本机代理刚就绪，重试一次 cn.pornhub.com
+```
+
+改三处：只能重试一次（`proxyWakeRetried`）；`continue` 之前先把异常记进 `first`；
+兜底文案改成如实报告「试过的路由：proxy」。修完同一次失败报出来的是真因 ——
+`net 失败：connection closed`。
+
+顺带记一个**没动**的地方：`isConnectFailure` 的判据是「message 不以 `HTTP ` 开头就算
+连接失败」，SSL 握手失败、connection reset、DNS 失败全算。它同时是「换路」的触发条件，
+收紧会削弱直连自愈（`路由自愈` 那条），所以这次只补证据不动判据，等有数据再谈。
+
+### 同一天的另一件事：代理节点发的是旧 IP
+
+用户问「是代理不对吗」。是。订阅 `https://64.64.239.223.sslip.io:8444/sub` 能拉、
+返回 200、解开 4 条 —— 但 4 条的地址全是 `64.64.224.121`，而那个 IP 从 10-26 起
+被墙（`nc -z 64.64.224.121 443` 不通，`64.64.239.223:443` 通）。
+
+根因在服务器：`/opt/sublink.py` 第 18 行 `HOST = '64.64.224.121'` 是写死的常量。
+换 IP 时证书和 nginx 的 `server_name` 都跟着换了，唯独这一行没换 —— 而那个脚本
+自己的注释还写着「为什么从 config.json 生成而不是写死：改了之后这里会自动跟上」。
+
+修法不写死新的：`HOST` 改成从请求的 `Host` 头渲染（nginx 转的是 `Host $host`），
+`<IP>.sslip.io` 再剥成裸 IP，客户端仍用裸 IP、不多一次 DNS 依赖。以后换 IP 或加域名
+都不用再动它。同一天漏掉的 `/opt/light-status/clash.yaml`、`surfboard.conf`、
+`/root/light-status-url.txt` 一起换掉，都留了 `.bak-20261027-ip`。
+
+**这条教训值得单独立住：写死的常量不会报错，它只是让客户端「连上了但每个请求都死」。**
+App 侧看到的是代理故障，服务器侧一切 `systemctl is-active` 都是 active。
+
+---
+
 ## 2026-10-26：2.0.24 —— 旧 WebView 白屏的根因，和播放链路上那个一直没有数据的洞
 
 2.0.23 发出去 21 小时，库里多了一天数据。翻的时候先看到的是这个：
