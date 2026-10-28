@@ -10,6 +10,89 @@
 > 历史。看的时候注意每段的日期。哪份文档是现行口径、哪份只剩历史价值，
 > 看 [`docs/README.md`](docs/README.md)。
 
+## 2026-10-28 夜里：发版之后，日志自己说出来的三件事
+
+`v2.0.26` 已经上架（GitHub release，含 2.0.24 / 2.0.25 的全部内容）。24 小时后的
+数据：**9259 条事件 / 210 台设备**，其中 2.0.26 占 **171 台**（昨天是 85 台 / 10 台）。
+
+`js_error` 从 51 条掉到 **17 条 / 4 台**，且全是 2.0.23 及以前 —— ES2017 降级那一刀
+是有效的。`boot_fail` 昨天那 2 条是模拟器（`sdk_gphone64_arm64`、`Android SDK built
+for arm64`），真用户 0 条。
+
+### 一、订阅里加了 ws 节点 ≠ 用户会用
+
+昨天判断「reality 在手机上根本跑不起来」，处置是在订阅里加了一条 `bwh-ws-tls`。
+但 App 存的是**旧的那条 reality 链接**，冷启动照着存的链接起核心，不会去订阅里重新
+挑节点。结果就是：除了手动切过一次的那台，所有人的隧道照旧是死的。
+
+10-28 全天 `connection closed` 按主机摊开：
+
+```
+（主机名在 msg 里被截断的那批）  165 条 / 43 台
+hanime1.me                        87 条 / 27 台
+51cg1.com                         83 条 / 23 台
+www.mrds66.com                    62 条 / 17 台
+cn.pornhub.com                    50 条 / 13 台
+901.26702.app                     46 条 / 15 台
+yhdm.one                          31 条 /  9 台
+api.apibdzy.com                   22 条 / 10 台
+```
+
+全是 2.0.26。**这不是某一台设备坏了，是全网同一条死隧道。** 昨晚那份「8 台设备、
+57 条」现在是一百多台、五百多条。
+
+两条待办，缺一条都不算修好：
+
+1. 把 `bwh-ws-tls` 提到 `clash/XGl1wBMRf7QwfWj7.yaml` 的**第一位**。现在它排在
+   reality 后面，新装的、没选过节点的仍会落到 reality。
+2. App 侧：存的节点连不上时，自己从订阅里换下一个可用的。现在 `proxyBoot` 只认
+   `proxyStore` 里那条链接，「当前节点不行」这件事没有任何出口。
+
+### 二、「滑得快就加载失败」—— 后台预取把前台翻页杀了
+
+用户报「滑得快容易出『加载失败，点击重试』」。不是网络，也不是滑太快本身：
+
+```
+16:30:35.061  [spider-api] detail → ref=2026595207      ← 手指按下卡片触发的详情预取
+16:30:35.163  [spider-api] detail → ref=2026593369      ← 又一次
+16:30:35.186  [spider-api] category → slug=cn page=11   ← 用户真正在等的翻页
+16:30:36.299  E spider failed: java.io.IOException: 被更新的请求取代
+```
+
+两个地方坏在一起：
+
+- `content.addEventListener('pointerdown', …)` 在手指按下瞬间就发 `fetchDetail`（注释
+  里写的是「滑列表时顺手按到的卡片」）。而 `SpiderClient.call` 每调一次就
+  `GENERATION.incrementAndGet()`，宿主只有一条串行通道，**后到者把前面的判死**。
+  一个后台预取因此能杀掉用户正在看的那次翻页。
+- `loadMoreListing` 的 `catch` 不分类别一律 `listing.error = true`，于是「被自己人
+  取消」在界面上变成「加载失败，点击重试」，而且这个 catch 一行日志都没有 ——
+  第一次复现时 logcat 里 `AIIvideo` 是 0 条，完全查不到原因。
+
+修法方向：给 `SpiderClient.call` 分优先级（预取不许作废旧请求、抢不到锁就静默放弃），
+JS 侧把「被更新的请求取代」当取消处理、不置错误态，必要时静默重试一次。
+
+### 三、播放埋点第一次给出能用的数
+
+```
+play_start 518（85 台）  play_first_frame 381（73 台）  play_end 496  play_error 124
+首帧均值 1312ms   播完均值 22s
+play_error 分阶段：vlc-error 94 / alts-exhausted 16 / resolve 13 / no-url 1
+```
+
+**首帧率 381/518 = 73.6%。** 起播没出画面的那 137 次里 124 次报了错，剩下 13 次既
+没报错也没出画面 —— 这就是之前说过的「起了但一直没画面」的洞，需要一个看门狗
+（`play_start` 后 N 秒没有 first_frame 就报一条 `stage=no-first-frame` 并降级/换集）。
+
+顺带一条 crash，今天唯一一条：`com.parse.ParseRequest$ParseRequestException: session
+无效或已过期`（2505APX7BC / 2.0.26）。会话过期抛到了顶层，应该被捕获成「重新登录」。
+
+### 还开着的
+
+- **黄果 `/api/home` 的重定向环**：`Too many follow-up requests: 21`，2.0.26 上仍在报。
+  2.0.23 只加了「看清往哪绕」的观测，环本身没解。
+- **missav 分类 0 张卡**（`/dmN/cn/fc2`）：源侧 slug 变了，改 js 即可，不发版。
+
 ## 2026-10-27 夜里：手机端的代理一直是死的 —— `libv2ray.aar` 不是 Xray，没有 REALITY
 
 用户截图 `51吃瓜 请求失败 https://51cg1.com/：net 失败：connection closed`。一开始
