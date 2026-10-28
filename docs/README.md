@@ -23,7 +23,7 @@
 | [真机WebView调试](真机WebView调试.md) | 要在真机上调页面、调桥 | 现行。CDP 端口 9333 |
 
 构建与测试不在 docs 里，在 [`work/android/README.md`](../work/android/README.md)：
-`./scripts/build.sh verify`（236 个单测）、`spider-all-check.js` / `model-check.js` /
+`./scripts/build.sh verify`（294 个单测）、`spider-all-check.js` / `model-check.js` /
 `market-check.js` 三条回归。
 
 ## 二、历史（`history/`，29 篇）
