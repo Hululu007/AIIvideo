@@ -946,7 +946,11 @@ public final class MainActivity extends Activity {
                         try {
                             s.account.sync();
                         } catch (Exception e) {
-                            throw new RuntimeException(e);
+                            // 会话过期（Parse 209）或网络抖动都不该让「清空收藏」把 App 崩掉：
+                            // 本地已经清完了，云端同步是顺带的事（logout() 里同样是「失败就放弃」）。
+                            // 原来这行是 throw new RuntimeException(e)，线上 2026-10-28 18:45
+                            // 那条唯一的真崩溃就是它 —— 用户点了个清空，被 session 过期崩掉。
+                            UserSource.log("clear-bookmarks 后同步失败：" + AiiHttp.describe(e));
                         }
                     }
                 });
@@ -1088,7 +1092,8 @@ public final class MainActivity extends Activity {
                         try {
                             s.account.sync();
                         } catch (Exception e) {
-                            throw new RuntimeException(e);
+                            // 同上：清本地历史不该因为云端会话过期而抛到未捕获处理器。
+                            UserSource.log("clear-history 后同步失败：" + AiiHttp.describe(e));
                         }
                     }
                 });

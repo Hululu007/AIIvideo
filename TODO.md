@@ -10,6 +10,111 @@
 > 历史。看的时候注意每段的日期。哪份文档是现行口径、哪份只剩历史价值，
 > 看 [`docs/README.md`](docs/README.md)。
 
+## 2026-10-29 凌晨：埋点归因 → 两个真 bug + hanime1 改盾后
+
+数据在 [`server/track/reports/2026-10-28-读数.md`](server/track/reports/2026-10-28-读数.md)。
+六天 35,124 条事件 / 640 个 device_id，10-28 一天 210 台设备、9,303 条，创上线以来新高。
+真失败率 23.9%（昨天 24.1%，稳住了），但**出帧率从 81.6% 掉到 73.5%**。
+
+逐条对着看下来，能归因的分三类，这一轮把「我们这边能动的」都动了。
+
+### 一、reconcile 对没有 origin 的源硬拼相对路径（前端，已修）
+
+线上 56 条 / 5 台，**跨 2.0.21 / 2.0.23 / 2.0.26 三个版本都在报** —— 从来没修过：
+
+```
+Expected URL scheme 'http' or 'https' but no scheme was found for /api/reconcile?ids=…
+```
+
+`app.js` 的 `reconcileCards()` 分两支：spider 源走 `spider call cap=reconcile`，
+REST 源走 `bridgeCall('detail', { id: '/api/reconcile?ids=…' })`。后者给的是**纯路径**，
+得靠 `origin` 拼成地址。而 2026-10-16 起允许「`origin` 留空、paths 全写绝对地址」这种
+配置形态（接口开在另一个域名的那类源，比如 AGE 的 `api.agedm.io`），这种源拼不出来，
+OkHttp 当场抛。
+
+后果比多一条错误严重：`catch` 里是 `return`，所以这批源的卡片标题/封面错位
+**永远不校正**；而且它不是「源没有实现 reconcile」（进不了 `reconcileUnsupported`），
+是个确定性失败，于是每次进网格页重报一遍。这批事件的 `source_id` 也是空的 ——
+源身份都没建立起来，在更早一步就失败了。
+
+修法：`restReconcileBroken` 会话级开关。撞上 `Expected URL scheme` / `no scheme was found`
+就置位，之后 REST 那条路直接 `return`，不再发注定失败的请求、也不再刷错误。
+治本（给 reconcile 传绝对基址）要前端先拿到 origin，那是加一个桥命令的事，
+这轮不做 —— 这批源本来就没有 `/api/reconcile` 可问，跳过就是正确行为。
+
+### 二、清空收藏/历史时同步失败会把 App 崩掉（Java，已修）
+
+`MainActivity` 的 `clear-bookmarks` 和 `clear-history` 在后台线程里同步账号，
+而 catch 是 `throw new RuntimeException(e)` —— 直接抛到 `UncaughtExceptionHandler`。
+线上 2.0.26 唯一一条真崩溃就是它（10-28 18:45）：
+
+```
+com.parse.ParseRequest$ParseRequestException: session 无效或已过期
+  at MainActivity$15.run(MainActivity.java:1091)   ← clear-history 的 Runnable
+```
+
+用户点了个「清空历史」，因为会话过期被崩掉。本地历史早就清完了，云端同步是顺带的事
+（`AccountService.logout()` 里本来就是「失败就放弃」）。两处都改成记录日志、不重抛。
+
+### 三、hanime1 改盾后源（配置，已改）
+
+**这是这一轮唯一的功能性修复，也是最严重的问题**：568 条 / 68 台（32% 的设备），
+今天还有 180 条 / 18 台。
+
+四个版本一样多（2.0.26 236 / 2.0.23 151 / 2.0.21 104 / 2.0.20 77）—— **跨版本一致
+就不是哪一版改坏的**。2026-10-17 那次实测 okhttp 是过的（Conscrypt 和 Chrome 同族的
+TLS 指纹），现在从境外机房带完整安卓 Chrome 头复测是 **403 / 0.06 秒秒拒**，换 UA 无效。
+CF 那侧收紧了，绑的是 JA3/JA4，okhttp 那层改不了。
+
+所以照 missav / iwara 的样子声明盾后：
+
+```json
+"web": { "spider": "…/hanime1.js",
+  "shield": { "warmup": "https://hanime1.me/",
+              "hosts": ["hanime1.me"], "cookie": "https://hanime1.me/" } }
+```
+
+机制在 `SpiderRuntime` 的 net 里：`isShielded(url)` 为真就**跳过 okhttp**，
+抛 `ShieldSignal` 给主进程，`SiteFetchWebView.fetchPage()` 用真 WebView 过挑战，
+把 HTML 回填进 `__shieldPages`，然后重跑整个 cap —— 回填表里命中的请求直接吃正文。
+所以 **hanime1.js 一行都不用改**，拦截和回填都在同一条 `ctx.call('net')` 上。
+
+过盾判据是「页面里 `a[href]` 数量 ≥ 8，且不含 Just a moment / _cf_chl_opt」，
+hanime1 首页 144 张卡，够了。`passed` 是进程级的，过一次之后同会话的导航都带
+`cf_clearance`，不会每个请求都过一遍。
+
+`srv/cfg/spiders/hanime1.json` + `hanime1.js`（只改文件头 ① 的说明），
+备份 `*.bak-20261028-160541` 和 `*.bak-20261028-1605xx`。**用户要重装一次源才生效**，
+而且 shield 是 2.0.21 才有的机制 —— 2.0.20 及以前的 97 台设备装了新配置也不会过盾
+（它们现在本来就 403，不会更坏）。
+
+### 真机验过了（23113RKC6C / 7f8f5254 / Android 16）
+
+装的是带本轮修复的 2.0.26。hanime1 从首页到播放全程通了：
+
+```
+cap=home   撞盾（https://hanime1.me/）→ 过盾 1825ms → 回填 219054 字节 → ok ms=146
+cap=detail 撞盾（…watch?v=408878）    → 过盾 1809ms → 回填 345002 字节 → ok ms=160
+play_start / play_first_frame(1589ms) / play_end(21157ms)，source 全是 hanime1
+```
+
+切走再切回来照样过（缓存配置里带着 `web.shield`），说明不是一次性的。
+porn91 的 `cap=reconcile netAll n=24 conc=8` 也照常工作 —— 改的是 REST 那条分支，
+spider 分支一行没动。
+
+两件没在真机上验到：mrds66 的白名单（切源时点偏了，落到 yhdm / porn91；图能解密是实测过的）、
+清空历史不崩（这台设备没登录，`ParseUser.getCurrentUser()` 是 null，那个 Runnable 不执行）。
+
+### 没动的
+
+- **`play_error / resolve` 的 source 标签还是假源**：24 条 / 11 台，全在 2.0.26，
+  只有 `resolve` 这一支还挂着 `contentSource`（恒为 `'hongguo'`）。别的阶段 811 条
+  已经是对的。这是 2026-10-25 那条已知 bug 的残留尾巴 —— 修它要动 `contentSource`
+  那个状态机（私密库 / 用户源双态），单独一轮，别和别的混。
+- **missav / 51cg / mrds66 的 `vlc-error`**：要真机 logcat 看 VLC 的详细错误，
+  光看库判断不了（51cg 的 `ms` 只有 76~294，像是地址本身不能用）。
+- **51cg 的 523**：17 条 / 8 台，10-28 才出现，Cloudflare 报「源站不可达」，纯上游。
+
 ## 2026-10-28 夜里：发版之后，日志自己说出来的三件事
 
 `v2.0.26` 已经上架（GitHub release，含 2.0.24 / 2.0.25 的全部内容）。24 小时后的

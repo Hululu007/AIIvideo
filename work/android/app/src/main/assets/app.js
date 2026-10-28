@@ -1197,6 +1197,14 @@ const reconciledFixes = new Map();
 // 试过一次「源没有 reconcile 能力」就记住，别再对同一个源反复问。
 // 不为这个加一套能力协商：一次失败的调用换来本会话的静默，够了。
 const reconcileUnsupported = new Set();
+// REST 那条路（下面 else 分支）拼 `/api/reconcile` 时用的是**纯路径**，要靠源的
+// origin 才能变成地址。2026-10-16 起允许「origin 留空、paths 全写绝对地址」这种
+// 配置形态（接口开在另一个域名的那类源），这种源拼不出来，OkHttp 当场抛
+//   Expected URL scheme 'http' or 'https' but no scheme was found for /api/reconcile?ids=…
+// 线上跨 2.0.21 / 2.0.23 / 2.0.26 三个版本都在报（56 条 / 5 台），而且每次进网格页
+// 重报一遍 —— 因为它既不是「源没有实现 xxx」（进不了 reconcileUnsupported），
+// 又是个确定性失败。这类源的卡片错位校正本来就不该走这条路，直接关掉。
+let restReconcileBroken = false;
 
 // ── 校正结果落盘 ────────────────────────────────────────────────
 //
@@ -1315,13 +1323,20 @@ async function reconcileCards(items, onPatched) {
       return;                       // 整批失败：什么都不记，下次进来还能重试
     }
   } else {
+    // 源没有 origin（paths 全写绝对地址那种）就拼不出地址，见 restReconcileBroken。
+    if (restReconcileBroken) return;
     let data = null;
     try {
       const reply = await bridgeCall('detail', { id: '/api/reconcile?ids=' + encodeURIComponent(missing.join(',')) });
       const result = typeof reply === 'string' ? JSON.parse(reply) : reply;
       data = (result && (result.data || result)) || null;
     } catch (error) {
-      return;                       // 整批失败：什么都不记，下次进来还能重试
+      const why = String((error && error.message) || error);
+      // 这个错误是配置形态决定的，不是网络抖动 —— 重试只会一遍遍刷同一条。
+      if (why.indexOf('no scheme was found') >= 0 || why.indexOf('Expected URL scheme') >= 0) {
+        restReconcileBroken = true;
+      }
+      return;                       // 整批失败：什么都不记（除非上面那条确定性的）
     }
     fixed = asArray(data && data.items);
   }
