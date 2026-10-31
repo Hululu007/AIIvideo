@@ -8,7 +8,7 @@
 
 ```bash
 cd work/android
-./gradlew :app:assembleRelease      # 出 app-arm64-v8a-release.apk（2026-10-21 实测 42.9 MB）
+./gradlew :app:assembleRelease      # 出 app-arm64-v8a-release.apk（2026-10-31 的 2.0.28 实测 39.1 MB）
 ./gradlew :app:assembleDebug        # debug 包
 ./gradlew :app:compileDebugJavaWithJavac   # 只验编译，秒级
 ./gradlew :app:testDebugUnitTest           # 单元测试，236 个用例
