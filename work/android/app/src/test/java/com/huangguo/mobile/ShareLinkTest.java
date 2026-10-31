@@ -162,16 +162,17 @@ public class ShareLinkTest {
 
     /** 认不出的协议要说清楚支持哪些，而不是一句「看不懂」。 */
     @Test
-    public void 未知协议列出支持的四种() throws Exception {
+    public void 未知协议列出支持的几种() throws Exception {
         try {
-            XrayConfig.parseShareLink("hysteria2://x@1.2.3.4:443");
-            fail("hysteria2 不在支持列表里");
+            XrayConfig.parseShareLink("tuic://x@1.2.3.4:443");
+            fail("tuic 不在支持列表里");
         } catch (IllegalArgumentException expected) {
             String m = expected.getMessage();
             assertTrue("应提到 vmess：" + m, m.contains("vmess"));
             assertTrue("应提到 vless：" + m, m.contains("vless"));
             assertTrue("应提到 trojan：" + m, m.contains("trojan"));
             assertTrue("应提到 ss：" + m, m.contains("ss"));
+            assertTrue("应提到 hy2（2.0.28 起支持）：" + m, m.contains("hy2"));
         }
     }
 

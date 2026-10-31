@@ -286,8 +286,13 @@ final class Subscription {
         // 于是一份**全是 https 代理**的节点池会被当成「不是节点列表」，
         // 走 base64 解码那条路然后报「内容既不是节点列表也不是 base64」。
         // 2026-10-18 把免费节点全换成 https 代理之后当场踩中。
+        //
+        // 这份名单和 looksLikeLink()、XrayConfig.parseShareLink() 三处必须同步。
+        // 2026-10-31 加 hy2 时就漏了后两处，一份只有 hy2 的订阅被判成
+        // 「内容既不是节点列表也不是 base64」。
         return t.contains("vmess://") || t.contains("vless://")
                 || t.contains("trojan://") || t.contains("ss://")
+                || t.contains("hy2://") || t.contains("hysteria2://")
                 || t.contains("socks5://") || t.contains("http://")
                 || t.contains("https://");
     }
@@ -304,10 +309,19 @@ final class Subscription {
         return scheme;
     }
 
+    /**
+     * 这一行是不是一条**我们认得并能解析**的节点链接。
+     *
+     * <p>它和 {@link XrayConfig#parseShareLink} 的支持列表必须同步 —— 不同步
+     * 的症状是「协议明明支持了，订阅里却还是被算成不支持」。2026-10-31 就踩了
+     * 一次：`hy2://` 加进了解析器，忘了加这里，于是那条 hy2 节点在
+     * {@code looksLikeLink} 就被判掉，连解析器都没进，界面上写「1 个不支持（hy2）」。
+     */
     private static boolean looksLikeLink(String line) {
         String t = line.toLowerCase(Locale.ROOT);
         return t.startsWith("vmess://") || t.startsWith("vless://")
                 || t.startsWith("trojan://") || t.startsWith("ss://")
+                || t.startsWith("hy2://") || t.startsWith("hysteria2://")
                 || t.startsWith("socks5://") || t.startsWith("http://")
                 || t.startsWith("https://");
     }
@@ -360,6 +374,12 @@ final class Subscription {
             if (colon <= 0) continue;
             String key = t.substring(0, colon).trim();
             String value = t.substring(colon + 1).trim();
+            if (value.startsWith("{")) {
+                // 行内写法（YAML flow mapping）：ws-opts: {path: /ws, headers: {Host: x}}
+                // 不展开的话这一行只有一个键 `ws-opts`，pick(p,"path") 拿不到东西。
+                putFlow(cur, key, value);
+                continue;
+            }
             if (value.length() >= 2 && ((value.startsWith("'") && value.endsWith("'"))
                     || (value.startsWith("\"") && value.endsWith("\"")))) {
                 value = value.substring(1, value.length() - 1);
@@ -368,6 +388,82 @@ final class Subscription {
         }
         if (cur != null) addClashLink(out, cur, result);
         return out;
+    }
+
+    /**
+     * 摊平一行里的**行内**映射（YAML flow mapping）。
+     *
+     * <p>上面的循环只认「整行 key: value」，所以
+     * {@code ws-opts: {path: /ws, headers: {Host: zhaoruizhe.site}}} 这行进去只有
+     * 一个键 {@code ws-opts}，值是那整段花括号文本 —— {@code pick(p, "path")} 自然
+     * 取不到，{@code vlessOrVmessLink} 于是不写 {@code &path=}，Xray 按默认的
+     * {@code /} 去拨 {@code wss://host/}。
+     *
+     * <p>2026-10-31 真机就是栽在这里：订阅里 8 条节点全是
+     * {@code ws-opts: {path: /ws, …}}，nginx 上只有 {@code location = /ws}，
+     * 于是**每一条出站都 404**，而测速因为另一个 bug 一直给绿灯。
+     *
+     * <p>摊平规则：叶键名进顶层（{@code path} / {@code Host}），带父键的全名也进
+     * 一份（{@code ws-opts.path} / {@code headers.Host}）—— {@link #pick} 两种
+     * 写法都在试，两边都给最省事。递归深度不设限，切逗号时看花括号/方括号深度，
+     * 所以 {@code {path: /ws, headers: {Host: x}}} 里那个逗号不会被切坏。
+     */
+    private static void putFlow(java.util.Map<String, String> into, String prefix, String value) {
+        String v = value.trim();
+        while (v.startsWith("{")) v = v.substring(1);
+        while (v.endsWith("}")) v = v.substring(0, v.length() - 1);
+        for (String part : splitTopLevel(v)) {
+            int colon = part.indexOf(':');
+            if (colon <= 0) continue;
+            String k = unquoteSimple(part.substring(0, colon));
+            if (k.isEmpty()) continue;
+            String val = part.substring(colon + 1).trim();
+            if (val.startsWith("{")) {
+                putFlow(into, prefix.isEmpty() ? k : prefix + "." + k, val);
+                continue;
+            }
+            val = unquoteSimple(val);
+            into.put(k, val);
+            if (!prefix.isEmpty()) into.put(prefix + "." + k, val);
+        }
+    }
+
+    /** 按顶层逗号切，忽略花括号/方括号里的那些。 */
+    private static java.util.List<String> splitTopLevel(String s) {
+        java.util.List<String> out = new ArrayList<String>();
+        int depth = 0;
+        int start = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '{' || c == '[') depth++;
+            else if (c == '}' || c == ']') depth--;
+            else if (c == ',' && depth == 0) {
+                out.add(s.substring(start, i));
+                start = i + 1;
+            }
+        }
+        out.add(s.substring(start));
+        return out;
+    }
+
+    private static String unquoteSimple(String s) {
+        String t = s == null ? "" : s.trim();
+        if (t.length() >= 2) {
+            char a = t.charAt(0);
+            char b = t.charAt(t.length() - 1);
+            if ((a == '\'' && b == '\'') || (a == '"' && b == '"')) {
+                return t.substring(1, t.length() - 1);
+            }
+        }
+        return t;
+    }
+
+    /** {@code "50 Mbps"} → {@code "50"}；认不出返回空串（调用方据此不写这个键）。 */
+    private static String leadingDigits(String value) {
+        String t = value == null ? "" : value.trim();
+        int end = 0;
+        while (end < t.length() && Character.isDigit(t.charAt(end))) end++;
+        return end == 0 ? "" : t.substring(0, end);
     }
 
     private static void addClashLink(List<String> out, java.util.Map<String, String> p, Result result) {
@@ -393,6 +489,33 @@ final class Subscription {
         }
         if ("socks5".equals(type) || "socks".equals(type)) {
             out.add("socks5://" + cred + server + ":" + port + hash);
+            return;
+        }
+        if ("hysteria2".equals(type) || "hy2".equals(type)) {
+            String password = pick(p, "password", "auth", "auth-str");
+            if (password.isEmpty()) return;
+            // 核心（v2fly v5 的 transport/internet/hysteria2）没有 obfs 实现，
+            // Config 只有 password / congestion / ignore_client_bandwidth /
+            // use_udp_extension 四项。带 salamander 的节点转出去也连不上，还会
+            // 让用户看着「测得通」却上不了网 —— 明确记账，别静默吞掉。
+            String obfs = lower(pick(p, "obfs", "obfs-type"));
+            if (!obfs.isEmpty() && !"none".equals(obfs)) {
+                result.unsupported++;
+                if (result.unsupportedNames.size() < 3) {
+                    result.unsupportedNames.add("hysteria2(" + obfs + ")");
+                }
+                return;
+            }
+            StringBuilder q = new StringBuilder();
+            String sni = pick(p, "sni", "servername");
+            if (!sni.isEmpty()) q.append("&sni=").append(urlEncode(sni));
+            if ("true".equalsIgnoreCase(pick(p, "skip-cert-verify"))) q.append("&insecure=1");
+            String up = leadingDigits(pick(p, "up", "up-mbps"));
+            String down = leadingDigits(pick(p, "down", "down-mbps"));
+            if (!up.isEmpty()) q.append("&up=").append(up);
+            if (!down.isEmpty()) q.append("&down=").append(down);
+            out.add("hy2://" + urlEncode(password) + "@" + server + ":" + port
+                    + (q.length() == 0 ? "" : "?" + q.substring(1)) + hash);
             return;
         }
         if ("ss".equals(type)) {

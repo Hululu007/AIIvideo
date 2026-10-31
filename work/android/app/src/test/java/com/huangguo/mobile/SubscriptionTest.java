@@ -140,22 +140,22 @@ public class SubscriptionTest {
      */
     @Test
     public void 不支持的协议要单独计数() {
+        // hysteria2 从 2.0.28 起支持了，这里换两个确实没人实现的协议。
         String text = "vmess://eyJ2IjoiMiIsImFkZCI6IjEuMi4zLjQiLCJwb3J0IjoiNDQzIiwiaWQiOiJ1dWlkIiwibmV0IjoidGNwIn0=\n"
-                + "hysteria2://pass@1.2.3.4:443?sni=a.com\n"
-                + "hysteria2://pass@5.6.7.8:443\n"
-                + "tuic://uuid:pw@9.9.9.9:443\n";
+                + "tuic://uuid:pw@9.9.9.9:443\n"
+                + "tuic://uuid:pw@8.8.8.8:443\n"
+                + "ssr://c29tZS1ibG9i\n";
 
         Subscription.Result r = Subscription.parse(text);
         assertEquals(1, r.size());
         assertEquals(3, r.unsupported);
-        assertTrue("应记下 hysteria2：" + r.unsupportedNames, r.unsupportedNames.contains("hysteria2"));
         assertTrue("应记下 tuic：" + r.unsupportedNames, r.unsupportedNames.contains("tuic"));
         // 不支持的项不该被算成「格式坏了」
         assertEquals(0, r.failed);
 
         String summary = Subscription.summary(r);
         assertTrue("摘要要提到不支持：" + summary, summary.contains("不支持"));
-        assertTrue("摘要要说是哪种：" + summary, summary.contains("hysteria2"));
+        assertTrue("摘要要说是哪种：" + summary, summary.contains("tuic"));
     }
 
     // ── 内置节点文件 ───────────────────────────────────────────────────

@@ -37,6 +37,15 @@ final class XrayConfig {
 
     private static final String LISTEN = "127.0.0.1";
 
+    /**
+     * hysteria2 带宽估算的兜底值（Mbps）。订阅里没写时用这个。
+     *
+     * <p>这两个数只影响 BBR 的初始窗口，不是限速；核心只拿它们算初速度
+     * （{@code up_mbps * 125000} 字节/秒）。
+     */
+    private static final int DEFAULT_HY2_UP_MBPS = 50;
+    private static final int DEFAULT_HY2_DOWN_MBPS = 200;
+
     private XrayConfig() {}
 
     // ── 节点 ──────────────────────────────────────────────────────────
@@ -49,7 +58,7 @@ final class XrayConfig {
      * （一行一个字段）直接映射过来时不用做类型判断。
      */
     static final class Node {
-        /** vmess / vless / trojan / shadowsocks / socks / http */
+        /** vmess / vless / trojan / shadowsocks / socks / http / hysteria2 */
         String protocol;
         String server;
         int port;
@@ -100,6 +109,16 @@ final class XrayConfig {
          */
         boolean allowInsecure;
 
+        /**
+         * hysteria2 的上下行估算（Mbps，0 = 不声明）。
+         *
+         * <p>v2fly 的 hysteria2 出站把这个值乘以 125000 直接喂给 BBR
+         * （{@code Congestion.UpMbps * MBps}），给 0 拥塞控制就没有起点。订阅里
+         * 写的是 {@code up: "50 Mbps"} 这种带单位的字符串，解析时取前面的数字。
+         */
+        int upMbps;
+        int downMbps;
+
         Node() {}
 
         Node(String protocol, String server, int port) {
@@ -148,6 +167,50 @@ final class XrayConfig {
         root.put("api", api());
         root.put("routing", routing(declaredProxyHosts));
         return root;
+    }
+
+    /**
+     * 测速/探针专用配置：<b>强制走这个出站</b>，一条分流规则都不加载。
+     *
+     * <p>为什么不复用 {@link #build(Node, int)} 的 routing —— 那里 ③ 是
+     * {@code geosite:cn → direct}，而 {@code ProxyCore.PROBE_URL} 的域
+     * （{@code gstatic.com}）正躺在 geosite 的 cn 分类里（和 {@code gstatic.cn}、
+     * {@code gstaticcnapps.cn} 同一组，属 Google 中国那批）。于是探针请求走的是
+     * 手机直连，报出来的「延迟」跟节点毫无关系。
+     *
+     * <p>2026-10-31 真机证据，8 个节点串行测、6 个连报 84~88ms：
+     * <pre>
+     *   tcp:127.0.0.1:40456 accepted tcp:www.gstatic.com:443 [direct]
+     *   tcp:127.0.0.1:40470 accepted tcp:www.gstatic.com:443 [direct]
+     * </pre>
+     * 同一时刻 missav / googleapis 都是 {@code [proxy]}。直连命中联通缓存
+     * （114.250.64.34，204 只要 0.21~0.23s），AAR 里再取两次往返的较小值、
+     * 第二次复用 keep-alive，落到界面上就是那个 85ms。
+     *
+     * <p>后果不止数字不准：<b>节点全坏也全绿灯</b>。同一分钟测速 6 个全通，
+     * 切过去之后所有出站 {@code wss://…/: 404 Not Found} 一条都过不去。
+     */
+    static JSONObject buildProbe(Node node, int port) throws JSONException {
+        JSONObject root = build(node, port, java.util.Collections.<String>emptyList());
+        // 只留一条：所有流量都交给这个出站。不要 geosite、不要 DirectHosts、
+        // 不要源声明的域名 —— 探针要回答的问题就是「这个节点能不能通」。
+        JSONObject forceProxy = new JSONObject()
+                .put("type", "field")
+                .put("network", "tcp,udp")
+                .put("outboundTag", TAG_OUT);
+        root.put("routing", new JSONObject()
+                .put("domainStrategy", "AsIs")
+                .put("rules", new JSONArray().put(forceProxy)));
+        return root;
+    }
+
+    /** {@link #buildProbe} 的字符串入口，喂给 {@code Libv2ray.measureOutboundDelay}。 */
+    static String buildProbeString(Node node, int port) {
+        try {
+            return buildProbe(node, port).toString();
+        } catch (JSONException e) {
+            throw new IllegalStateException("测速配置序列化失败", e);
+        }
     }
 
     /** 便捷入口：直接拿字符串喂 startLoop。 */
@@ -237,6 +300,7 @@ final class XrayConfig {
             case "shadowsocks": return shadowsocks(node);
             case "socks":       return socksOut(node);
             case "http":        return httpOut(node);
+            case "hysteria2":   return hysteria2(node);
             default:
                 throw new IllegalArgumentException("暂不支持 " + node.protocol + " 协议");
         }
@@ -266,6 +330,35 @@ final class XrayConfig {
                 .put("port", node.port)
                 .put("users", new JSONArray().put(user));
         return new JSONObject().put("vnext", new JSONArray().put(vnext));
+    }
+
+    /**
+     * hysteria2 出站。
+     *
+     * <p>核心是 libv2ray.aar 里 v2fly v2ray-core v5 的 {@code proxy/hysteria2}
+     * （short_name 就是 hysteria2）。
+     *
+     * <p><b>JSON 键是 {@code servers}（复数）</b>，不是 proto 里那个 {@code server}：
+     * 配置走的是 {@code infra/conf/v4} 那一层，那里定义的是
+     * {@code type Hysteria2ClientConfig struct { Servers []*Hysteria2ServerTarget
+     * `json:"servers"` }}。写错键名的表现很具体 ——
+     * {@code infra/conf/v4: 0 Hysteria2 server configured.}，2026-10-31 真机第一版
+     * 就是这么挂的。
+     *
+     * <p><b>密码不在这里</b>，在传输层 {@code streamSettings.hy2Settings}
+     * （见 {@link #stream}）—— 和 trojan 把密码放 settings 的做法相反，别混。
+     *
+     * <p>也不认识 obfs：{@code transport/internet/hysteria2} 的 Config 只有
+     * password / congestion / ignore_client_bandwidth / use_udp_extension 四项，
+     * 没有 salamander。带混淆的节点在订阅解析那步就被挡了，见
+     * {@code Subscription.addClashLink}。
+     */
+    private static JSONObject hysteria2(Node node) throws JSONException {
+        require(node.uuid, "hysteria2 缺密码");
+        JSONObject server = new JSONObject()
+                .put("address", node.server)
+                .put("port", node.port);
+        return new JSONObject().put("servers", new JSONArray().put(server));
     }
 
     private static JSONObject trojan(Node node) throws JSONException {
@@ -336,6 +429,32 @@ final class XrayConfig {
         if (empty(network)) network = "tcp";
         String security = normalize(node.tls);
         if (empty(security)) security = "none";
+
+        // hysteria2 是「协议即传输」，而且**必须带 TLS**：dialer.go 里
+        // `tls.ConfigFromStreamSettings` 返回 nil 就直接报 Hy2MustNeedTLS。
+        // 密码也落在这一层（hy2Settings.password），和 settings 分开。
+        if ("hysteria2".equals(network)) {
+            JSONObject hyStream = new JSONObject()
+                    .put("network", "hysteria2")
+                    .put("security", "tls");
+            JSONObject tls = new JSONObject()
+                    .put("serverName", empty(node.host) ? node.server : node.host);
+            if (node.allowInsecure) tls.put("allowInsecure", true);
+            hyStream.put("tlsSettings", tls);
+            JSONObject hy = new JSONObject().put("password", empty(node.uuid) ? "" : node.uuid);
+            // 带宽估算喂给 BBR；不写就是 0，拥塞控制没有起点。
+            hy.put("congestion", new JSONObject()
+                    .put("type", "bbr")
+                    .put("up_mbps", node.upMbps > 0 ? node.upMbps : DEFAULT_HY2_UP_MBPS)
+                    .put("down_mbps", node.downMbps > 0 ? node.downMbps : DEFAULT_HY2_DOWN_MBPS));
+            // 键名是 hy2Settings，不是 hysteria2Settings —— conf/v4 的
+            // StreamConfig 里写的是 `Hy2Settings *Hy2Config `json:"hy2Settings"``。
+            // 写成全名的表现：核心不认识这个键，Hy2Settings 为 nil，password
+            // 变空串，服务端回 404（hysteria 2 的 auth 失败伪装），日志里是
+            // 「proxy/hysteria2: authentication error, HTTP status code: 404」。
+            hyStream.put("hy2Settings", hy);
+            return hyStream;
+        }
 
         if ("tcp".equals(network) && "none".equals(security)) return null;
 
@@ -494,6 +613,9 @@ final class XrayConfig {
         if (lower.startsWith("ss://")) return parseShadowsocks(text.substring(5));
         if (lower.startsWith("vless://")) return parseVless(text.substring(8));
         if (lower.startsWith("trojan://")) return parseTrojan(text.substring(9));
+        // hy2:// 和 hysteria2:// 两种写法在订阅和分享里都常见。
+        if (lower.startsWith("hy2://")) return parseHysteria2(text.substring(6));
+        if (lower.startsWith("hysteria2://")) return parseHysteria2(text.substring(12));
         // 裸代理地址（不是节点链接，是「直接可用的代理」）：http://user:pass@h:p
         // 和 socks5://h:p 这两种。免费订阅里这类不少，它们本来就能直接用。
         if (lower.startsWith("socks5://")) return parseBareProxy("socks", text.substring(9));
@@ -508,7 +630,7 @@ final class XrayConfig {
             return node;
         }
         throw new IllegalArgumentException(
-                "认不出这个链接。支持 vmess:// 、vless:// 、trojan:// 、ss:// ，"
+                "认不出这个链接。支持 vmess:// 、vless:// 、trojan:// 、ss:// 、hy2:// ，"
                         + "以及 http(s):// 与 socks5:// 形式的裸代理地址");
     }
 
@@ -523,6 +645,65 @@ final class XrayConfig {
      */
     private static Node parseVless(String body) throws JSONException {
         return parseUrlStyle("vless", body, 443);
+    }
+
+    /**
+     * hy2://password@host:port?sni=…&insecure=1&up=50&down=200#备注
+     *
+     * <p>形状和 vless 一样（userinfo@host:port + query），所以复用
+     * {@link #parseUrlStyle}，差别只有三处：
+     *
+     * <ol>
+     *   <li>传输层网络名固定 {@code hysteria2}（协议名和传输名是同一个词）；</li>
+     *   <li>TLS 强制开 —— 核心不给就报 {@code Hy2MustNeedTLS}；</li>
+     *   <li>{@code up} / {@code down} 两个带宽键 {@link #applyQuery} 不认，单独取。</li>
+     * </ol>
+     */
+    private static Node parseHysteria2(String body) throws JSONException {
+        Node node = parseUrlStyle("hysteria2", body, 443);
+        node.network = "hysteria2";
+        node.tls = "tls";
+        applyHysteria2Query(node, body);
+        return node;
+    }
+
+    /** hy2 链接里那几个 applyQuery 不管的键。 */
+    private static void applyHysteria2Query(Node node, String body) {
+        int qmark = body.indexOf('?');
+        if (qmark < 0) return;
+        int hash = body.indexOf('#', qmark);
+        String query = hash < 0 ? body.substring(qmark + 1) : body.substring(qmark + 1, hash);
+        for (String pair : query.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq <= 0) continue;
+            String k = percentDecode(pair.substring(0, eq)).trim().toLowerCase(Locale.ROOT);
+            String v = percentDecode(pair.substring(eq + 1)).trim();
+            if ("insecure".equals(k) || "allowinsecure".equals(k)) {
+                node.allowInsecure = "1".equals(v) || "true".equalsIgnoreCase(v);
+            } else if ("up".equals(k) || "upmbps".equals(k)) {
+                node.upMbps = leadingNumber(v);
+            } else if ("down".equals(k) || "downmbps".equals(k)) {
+                node.downMbps = leadingNumber(v);
+            }
+        }
+    }
+
+    /**
+     * 取字符串开头的数字。"50 Mbps" → 50，"0" → 0，认不出 → 0。
+     *
+     * <p>订阅里 {@code up: "50 Mbps"} 是带单位的字符串（Clash 侧这么写），
+     * 而我们要的是裸数字。
+     */
+    private static int leadingNumber(String value) {
+        String t = value == null ? "" : value.trim();
+        int end = 0;
+        while (end < t.length() && Character.isDigit(t.charAt(end))) end++;
+        if (end == 0) return 0;
+        try {
+            return Integer.parseInt(t.substring(0, end));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     /**

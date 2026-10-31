@@ -432,8 +432,9 @@ public class ProxyCoreTest {
     @Test
     public void 不认识的分享链接报错() throws Exception {
         try {
-            XrayConfig.parseShareLink("hysteria2://pass@1.2.3.4:443");
-            fail("hysteria2 不在支持列表里");
+            // hysteria2 从 2.0.28 起支持了，换一个确实没人实现的协议。
+            XrayConfig.parseShareLink("tuic://pass@1.2.3.4:443");
+            fail("tuic 不在支持列表里");
         } catch (IllegalArgumentException expected) {
             assertTrue(expected.getMessage().contains("vmess"));
         }

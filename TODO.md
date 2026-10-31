@@ -10,6 +10,198 @@
 > 历史。看的时候注意每段的日期。哪份文档是现行口径、哪份只剩历史价值，
 > 看 [`docs/README.md`](docs/README.md)。
 
+## 2026-10-31 下午：hy2 接上了（订阅里的「1 个不支持」）
+
+订阅里一直有一条 `type: hysteria2`，UI 上显示成「1 个不支持（hysteria2）」。那是我们的
+**主线路** —— `64.64.239.223:24443/udp`，UDP 直连，不像 TCP 那样被封。它被丢掉了一周多，
+客户端实际只能走 relay（149 中转）或 CF 边缘（丢包 40%~70%）。
+
+### 为什么会被当成「不支持」
+
+三处协议白名单都只写了 http/socks5/ss/trojan/vmess/vless，`hy2://` 一个都不认：
+
+| 位置 | 症状 |
+|---|---|
+| `Subscription.looksLikeLink` | 链接在进解析器**之前**就被判掉，记成 `unsupported`（名字是 `hy2`） |
+| `Subscription.containsScheme` | 一份**只有** hy2 的订阅会被当成「内容既不是节点列表也不是 base64」 |
+| `XrayConfig.parseShareLinkBody` | 根本没有 `hy2://` 分支 |
+
+而核心其实一直支持：`app/libs/libv2ray.aar` 里是 v2fly v2ray-core v5，带
+`proxy/hysteria2` 出站（`proxy/hysteria2/config.proto`、`v2ray.core.proxy.hysteria2`）。
+是**我们自己没接**。
+
+### 核心里还有两个键名坑（都踩了）
+
+1. **`settings.servers`（复数）**，不是 proto 里那个 `server`。走的是 `infra/conf/v4`
+   那层，那里写的是 `Hysteria2ClientConfig struct { Servers []*Hysteria2ServerTarget
+   `json:"servers"` }`。写成 `server` 报 `0 Hysteria2 server configured.`
+2. **`streamSettings.hy2Settings`**，不是 `hysteria2Settings`。`StreamConfig` 里是
+   `Hy2Settings *Hy2Config `json:"hy2Settings"``。写成全名不报错 —— 键被静默忽略，
+   `password` 变空串，服务端回 404（hysteria 2 认证失败的伪装），日志是
+   `proxy/hysteria2: authentication error, HTTP status code: 404`。
+
+这两个都是一个字一个字试出来的，单元测试现在锁着（`XrayHysteria2Test`）。
+
+### 服务器：加了一条不带混淆的入站
+
+核心的 `transport/internet/hysteria2` 只有 password / congestion /
+ignore_client_bandwidth / use_udp_extension 四项，**没有 obfs**。而现有 hysteria 服务端
+全局开了 `obfs: salamander`，所以另起一个实例：
+
+```yaml
+# /etc/hysteria/config-plain.yaml —— listen: :24444，没有 obfs 段，其余同 24443
+```
+
+`hysteria-plain.service`（`systemctl enable --now`），`firewall-cmd --add-port=24444/udp
+--permanent`（这次记得加 `--permanent`，2053 那次 reload 冲掉过一回）。
+24443 带混淆的原样不动，mihomo / sing-box 照旧用它。
+
+订阅 `使用/for-friend.yaml` 加 `hy2-plain`，同时塞进 `AUTO`（hy2 之后）和 `PROXY`；
+已推到 `149:/root/clash/XGl1wBMRf7QwfWj7.yaml`（备份 `.bak-20261031-…`）。
+
+### 验证（真机 7f8f5254 / 23113RKC6C）
+
+```
+订阅 → 9 个节点，1 个不支持（hysteria2(salamander)）    ← 带混淆那条仍被明确记账
+测速 → 测了 9 个，通了 2 个
+        164ms  美国  hy2-plain      ← 主线路
+        204ms  加拿大 cf-ws-ip2
+curl -x socks5h://127.0.0.1:<core port> https://www.google.com/generate_204
+        → 204 / 0.36~0.40s × 3
+```
+
+服务器侧对照：官方 hysteria 客户端连 24444，`204 / 0.036s`；手机那条在服务端日志里是
+`client connected {"id": "user"}`。
+
+### 顺带
+
+- `SpeedTest.shortLink` 对 hy2 链接显示成「6」—— 它按 `@` 切掉前半段，而 hy2 的
+  password 在 `@` 前面且没有别的分隔符，切完只剩尾巴。只影响日志可读性，没动。
+- 带 `obfs` 的节点现在会明确记成 `hysteria2(salamander)` 而不是静默丢掉 —— 用户至少
+  知道「这条在订阅里有、但内置核心用不了」，而不是「我的机场少了条节点」。
+
+## 2026-10-31 中午：测速的「延迟」不是节点的延迟
+
+用户想起来「测试节点延迟不是真的延迟」，查下来确有其事，而且底下压着两个 bug。
+
+### 一、探针请求被 `geosite:cn → direct` 截去直连
+
+`ProxyCore.PROBE_URL` 是 `https://www.gstatic.com/generate_204`，而 `gstatic.com`
+在 geosite 的 **cn** 分类里（和 `gstatic.cn`、`gstaticcnapps.cn` 同组，属 Google 中国
+那批）。`XrayConfig.routing()` 的 ③ 是 `geosite:cn → direct`，于是
+`Libv2ray.measureOutboundDelay` 里的 `core.Dial(ctx, inst, dest)` 直接把探针送去直连。
+
+真机证据（`D/VLC-std` 那个 tag 就是 Xray 的 access log）：
+
+```
+11:58:50 tcp:127.0.0.1:40456 accepted tcp:www.gstatic.com:443 [direct]
+11:58:51 tcp:127.0.0.1:40470 accepted tcp:www.gstatic.com:443 [direct]
+```
+
+同一时刻同一个核心里，`//missav.live:443` 和 `//content-autofill.googleapis.com:443`
+都是 `[proxy]` —— 只有 gstatic 被截。
+
+国内直连 gstatic 是**通的**（联通缓存 114.250.64.34，204 只要 0.21~0.23s），AAR 里
+`measureInstDelay` 再发两次取较小值、第二次复用 keep-alive 只剩纯 RTT —— 落到界面上
+就是那个数字。于是 8 个不同国家的节点连报 `84 / 85 / 85 / 88 / 84`，全都一样。
+
+后果不止数字难看：**节点全坏也全绿灯**。11:56:00 测速 6 个全通，11:56:08 真正启动后
+每一条出站都是 `failed to dial to (wss://zhaoruizhe.site/): 404 Not Found`。
+
+修法两条，都做了：
+
+| 改动 | 位置 |
+|---|---|
+| 新增 `XrayConfig.buildProbe/buildProbeString`，routing 里**只有一条**「所有流量 → proxy」，不加载 geosite / DirectHosts / 源声明 | `XrayConfig.java` |
+| `ProxyCore.probe` 改用它 | `ProxyCore.java` |
+| `PROBE_URL` 换成 `https://www.google.com/generate_204`（不在 geosite:cn，国内直连必不通 —— 哪天规则又漏回来，表现是「测不通」而不是「假的通」） | `ProxyCore.java` |
+
+### 二、Clash 订阅的 `ws-opts` 行内写法没解析，path 丢了
+
+订阅里 8 条节点全是这个写法：
+
+```yaml
+ws-opts: {path: /ws, headers: {Host: zhaoruizhe.site}}
+```
+
+`Subscription.clashToLinks` 只认「整行 key: value」，这一行进去只有一个键 `ws-opts`，
+值是整段花括号文本（注释里写的「嵌套层会被摊平成顶层键」只对**多行缩进**形式成立）。
+`pick(p, "path")` 于是取空，拼出的链接没有 `&path=`，Xray 按默认 `/` 去拨
+`wss://zhaoruizhe.site/`。服务器上 nginx 只有 `location /ws` 且 `$http_upgrade !=
+"websocket"` 就 `return 404` —— **每一条 ws 节点都是 404**。
+
+这是「测速绿灯但用不了」的另一半：就算把探针修好，path 不修也是全红。
+
+修法：`clashToLinks` 遇 `{` 开头的值走新的 `putFlow`，按花括号深度切逗号递归摊平，
+叶键名（`path` / `Host`）和全名（`ws-opts.path` / `headers.Host`）都进 map。
+
+### 验证（真机 7f8f5254 / 23113RKC6C）
+
+测速数字从「全一样」变成真实分层：
+
+```
+改前  8 个订阅节点  84 / 85 / 85 / 88 / 84 / …            全是直连 gstatic
+改后  7 个免费节点  192 美国洛杉矶 / 205 罗马尼亚 / 209 荷兰 / 254 / 308 / 365 / 超时
+改后  8 个订阅节点  超时 ×6、不通 ×1、262ms（cf-ws-ip2）
+```
+
+地理排序对了（美西 < 荷兰 < 罗马尼亚），免费节点还测出一条真超时。订阅那边只剩
+`cf-ws-ip2` 一条能通 —— 那是 Cloudflare 边缘按 IP 概率丢包（`P/vps/ops-notes-2026-10-30.md`
+记着 40%~70%），不是 App 的问题。源站本地 `curl -sk --http1.1` 带 upgrade 头拿 `101`，
+不带拿 `404`，配置本身是好的。
+
+端到端：点 `cf-ws-ip2` 启动后，通过本地 socks 连 google 三次全 `204`，Xray 日志：
+
+```
+12:09:06 tcp:127.0.0.1:44468 accepted tcp:www.google.com:443 [proxy]
+```
+
+**`[proxy]` 而不是 `[direct]`** —— 和改前那张日志正好对照。
+
+单测 302 条全过（新增 `XrayProbeConfigTest` 5 条 + `SubscriptionClashTest` 3 条）。
+
+### 还没做
+
+- 这两个改动要发版才到用户手上。**没发热更** —— `buildProbeString` 和 `putFlow` 都在
+  Java 侧，热更换不了。
+- CF 边缘丢包是环境问题，跟这次改动无关。`cf-ws-ip1/2/3` 需要定期扫干净 IP 换进去。
+
+## 2026-10-31 上午：发版后第一次读数
+
+读数全文在 [`server/track/reports/2026-10-31-读数.md`](server/track/reports/2026-10-31-读数.md)。
+窗口 10-23 22:05 → 10-31 11:46，60,147 条 / 1,079 个 device_id / 8,098 会话。
+
+**三项改动都验到了线上效果**：crash 从 10-29 起归零（全库最后一条就是修掉的那条
+`10-28 18:45 session 无效或已过期`）；hanime1 的 403 从每天 200 条量级掉到 18 条，
+2.0.27 的 133 台用 hanime1 的设备里只剩 1 台还在 403（其余是没重拉源的老安装）；
+reconcile 那条从 48 条/天降到 1 条/天。失败率跟着从 24% 掉到 19.3%，是上线以来第一次
+跌破 20%。10-30 单日 312 台 / 9,721 条 / 214 台新安装，三项都是新高。
+
+**新冒出来四件事，按优先级：**
+
+1. **mrds66 图床又换到 `pic.gyezbp.cn`（156 条 / 66 台）—— 已补，等用户重装源。**
+   10-28 刚补的 `pic.nihmcl.cn` 三天就过时。改前先抓了首页核对：两个站点的封面
+   **现在全在 gyezbp**（51cg 90 张、mrds66 100 张，零例外），文件是密文，同一套
+   key/iv 解出来分别是 `GIF89a`（368×340）和 `ffd8ffdb`（1300×640 JPEG）。
+   `pic.drleao.cn`（23 条 / 13 台）是 51cg 的历史图床，当前首页一张都没有，一起写进
+   白名单当防守。改了 `mrds66.json` 的 `allowedHosts`、`mrds66.js` 第 533 行的 `hosts`、
+   `51cg.json` 的 `allowedHosts`，备份 `*.bak-20261031-035303`；`json.load`、`node --check`、
+   公网分发抓取、`market-check` 13 条全过。用户重装一次 mrds66 才生效。
+2. **missav 出帧率掉到 10%**（80 起播 / 8 出帧，10-28 还有 21%），71 条
+   `vlc-error EncounteredError`。cms 10.7%、dozagonza 43.3% 是同类。要真机看 VLC 详情。
+3. **盾机制自己在报错：1,347 条 / 678 台**，几乎每台用过盾后源的设备都撞过。
+   形态是 `passLock` 全局串行排队超时、15 秒预算掐断（「预算已交给主进程」）、
+   `ensureWarm` 试满三轮的兜底文案。两件要分开修：**文案**（「没通过站点的访问验证
+   （Cloudflare）」兜住了所有原因，100 台「被 Cloudflare 拦」是假象）和 **`source_id`**
+   （这条路径上报的是当前源而不是发起源，`source_id=mrds66` 的 49 条文案里写着 hanime1）。
+   机制层面，hanime1 553 个会话里 157 个撞盾失败、112 个靠重试救回页面，但只有 9 个
+   最终播出来 —— 重试救得回页面，救不回播放。
+4. **黄果 `/api/home` 重定向 21 次**（`Too many follow-up requests: 21`，147 条 / 12 台）。
+
+顺带记两条口径问题：`command_cancelled` 8,700 条占三天事件量的 45%，读活跃度别用它；
+`play_error` 里仍有假源 `hongguo`（16 条 `stage=resolve`），是那个一直没动的
+`contentSource` 状态机。
+
 ## 2026-10-29 凌晨：埋点归因 → 两个真 bug + hanime1 改盾后
 
 数据在 [`server/track/reports/2026-10-28-读数.md`](server/track/reports/2026-10-28-读数.md)。

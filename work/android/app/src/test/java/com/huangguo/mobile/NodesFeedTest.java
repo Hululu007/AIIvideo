@@ -92,12 +92,13 @@ public class NodesFeedTest {
     public void 链接数量够但一条都解析不出来要拒() {
         // 这是最阴的一种：JSON 合法、links 有 5 条、校验「看起来没问题」，
         // 但全是核心不支持的协议 —— 用户点测速会得到「节点列表是空的」。
+        // hysteria2 从 2.0.28 起能解析了，换成确实没人实现的协议。
         String raw = feed(
-                "hysteria2://a@1.1.1.1:443#1",
-                "hysteria2://b@2.2.2.2:443#2",
-                "tuic://c@3.3.3.3:443#3",
-                "hysteria2://d@4.4.4.4:443#4",
-                "hysteria2://e@5.5.5.5:443#5");
+                "tuic://a@1.1.1.1:443#1",
+                "tuic://b@2.2.2.2:443#2",
+                "ssr://c29tZS1ibG9i#3",
+                "tuic://d@4.4.4.4:443#4",
+                "juicity://e@5.5.5.5:443#5");
         assertNull(NodesFeed.validate(raw));
     }
 

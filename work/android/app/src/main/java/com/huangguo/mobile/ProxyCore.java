@@ -41,8 +41,19 @@ public final class ProxyCore {
 
     private static final int PROBE_ATTEMPTS = 24;
 
-    /** 连通性测试 URL。204 最轻，不产生响应体。 */
-    static final String PROBE_URL = "https://www.gstatic.com/generate_204";
+    /**
+     * 连通性测试 URL。204 最轻，不产生响应体。
+     *
+     * <p><b>别换回 {@code www.gstatic.com}。</b> 那个域在 geosite 的 cn 分类里
+     * （和 {@code gstatic.cn} 同一组），配上生产 routing 的 {@code geosite:cn →
+     * direct} 会被截去直连 —— 国内直连 gstatic 是通的（联通缓存，204/0.21s），
+     * 于是测速对**任何**节点都报同一个几十毫秒的绿灯。2026-10-31 真机踩过：
+     * 8 个节点 6 个报 84~88ms，切过去全 {@code 404}。
+     *
+     * <p>{@code google.com} 不在 geosite:cn，国内直连是不通的 —— 这样即使哪天
+     * 分流规则又漏回来，表现也是「测不通」而不是「假的通」。
+     */
+    static final String PROBE_URL = "https://www.google.com/generate_204";
 
     private static final String TAG = "AIIvideo";
 
@@ -383,7 +394,11 @@ public final class ProxyCore {
         try {
             // 端口随便给一个 —— 这份配置只用来发起一次出站连接，
             // 它的 inbound 根本不会被监听。给 0 会被 Xray 判非法，所以给个高位端口。
-            String config = XrayConfig.buildString(node, 20480);
+            //
+            // 必须用 buildProbeString 而不是 buildString：后者带生产的 routing，
+            // 里面 `geosite:cn → direct` 会把 PROBE_URL 的域截去直连，测出来的是
+            // 手机到国内缓存的往返，不是节点的。见 XrayConfig.buildProbe 的注释。
+            String config = XrayConfig.buildProbeString(node, 20480);
             String target = url == null || url.isEmpty() ? PROBE_URL : url;
             long started = System.currentTimeMillis();
             long ms = Libv2ray.measureOutboundDelay(config, target);
